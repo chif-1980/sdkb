@@ -102,8 +102,14 @@ def test_nested_dependencies_and_sandbox_use_approved_sources():
     _assert_secure_dependency_lock(ROOT / "backend/package/uv.lock")
 
     dockerfile = (ROOT / "docker/sandbox_provisioner/Dockerfile").read_text()
-    assert "--index https://pypi.org/simple" in dockerfile
+    assert "--index-url https://pypi.org/simple" in dockerfile
     assert "pypi.tuna.tsinghua.edu.cn" not in dockerfile
+
+
+def test_sandbox_pip_uses_supported_index_url_option():
+    dockerfile = (ROOT / "docker/sandbox_provisioner/Dockerfile").read_text()
+    assert "--index-url https://pypi.org/simple" in dockerfile
+    assert "--index " not in dockerfile
 
 
 def _assert_secure_dependency_lock(path: Path) -> None:
