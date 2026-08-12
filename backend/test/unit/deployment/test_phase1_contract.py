@@ -112,6 +112,14 @@ def test_sandbox_pip_uses_supported_index_url_option():
     assert "--index " not in dockerfile
 
 
+def test_api_dockerfile_uses_official_debian_package_sources():
+    dockerfile = (ROOT / "docker/api.Dockerfile").read_text()
+    assert re.search(r"^FROM\s+python:3\.13-slim\s*$", dockerfile, re.MULTILINE)
+    assert "mirrors.tuna.tsinghua.edu.cn" not in dockerfile
+    assert "/etc/apt/sources" not in dockerfile
+    assert "apt-get update" in dockerfile
+
+
 def _assert_secure_dependency_lock(path: Path) -> None:
     with path.open("rb") as file:
         lock = tomllib.load(file)
