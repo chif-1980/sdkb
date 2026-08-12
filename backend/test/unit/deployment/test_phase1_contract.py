@@ -9,20 +9,28 @@ ROOT = Path(__file__).resolve().parents[4]
 def test_phase1_compose_uses_isolated_project_and_required_services():
     config = yaml.safe_load((ROOT / "compose.phase1.yml").read_text())
     assert config["name"] == "quickdone-kb-yuxi"
-    expected_services = {
-        "api",
-        "worker",
-        "web",
-        "postgres",
-        "redis",
-        "minio",
-        "etcd",
-        "milvus",
-        "sandbox-provisioner",
+    expected_container_names = {
+        "api": "quickdone-kb-api",
+        "worker": "quickdone-kb-worker",
+        "web": "quickdone-kb-admin-web",
+        "postgres": "quickdone-kb-postgres",
+        "redis": "quickdone-kb-redis",
+        "minio": "quickdone-kb-minio",
+        "etcd": "quickdone-kb-etcd",
+        "milvus": "quickdone-kb-milvus",
+        "sandbox-provisioner": "quickdone-kb-sandbox-provisioner",
     }
-    assert set(config["services"]) == expected_services
+    assert set(config["services"]) == set(expected_container_names)
     assert "graph" not in config["services"]
+    for service, container_name in expected_container_names.items():
+        assert config["services"][service]["extends"] == {
+            "file": "docker-compose.yml",
+            "service": service,
+        }
+        assert config["services"][service]["container_name"] == container_name
     assert config["services"]["api"]["environment"]["YUXI_ENV"] == "development"
+    assert config["networks"] == {"app-network": {"name": "quickdone-kb-yuxi-network"}}
+    assert set(config["volumes"]) == {"nltk_data"}
 
 
 def test_secrets_and_runtime_volumes_are_ignored():
@@ -38,6 +46,8 @@ def _parse_dotenv(text: str) -> dict[str, str]:
         if not line or line.startswith("#"):
             continue
         name, value = line.split("=", 1)
+        if name in values:
+            raise ValueError(f"duplicate dotenv name: {name}")
         values[name] = value
     return values
 
