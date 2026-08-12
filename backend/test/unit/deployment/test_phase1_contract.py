@@ -1,3 +1,5 @@
+import json
+import re
 from pathlib import Path
 
 import yaml
@@ -37,6 +39,18 @@ def test_secrets_and_runtime_volumes_are_ignored():
     ignored = (ROOT / ".gitignore").read_text().splitlines()
     for entry in (".env", "docker/volumes/", "artifacts/acceptance/"):
         assert entry in ignored
+
+
+def test_web_dockerfile_uses_the_declared_pnpm_version():
+    package_json = json.loads((ROOT / "web/package.json").read_text())
+    package_manager = package_json["packageManager"]
+    assert package_manager.startswith("pnpm@")
+    expected_version = package_manager.removeprefix("pnpm@")
+
+    dockerfile = (ROOT / "docker/web.Dockerfile").read_text()
+    installed_versions = re.findall(r"npm install -g pnpm@([^\s]+)", dockerfile)
+    assert installed_versions
+    assert set(installed_versions) == {expected_version}
 
 
 def _parse_dotenv(text: str) -> dict[str, str]:
