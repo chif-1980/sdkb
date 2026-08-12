@@ -1,10 +1,18 @@
 import json
+import re
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+COMPOSE_TIMEOUT_SECONDS = 30
+STDERR_LIMIT = 200
+
+
+class SmokeCheckError(RuntimeError):
+    pass
 
 
 def required_checks():
@@ -17,28 +25,43 @@ def fetch_json(url: str):
 
 
 def compose_exec(service: str, *args: str):
-    return subprocess.run(
-        [
-            "docker",
-            "compose",
-            "-f",
-            "compose.phase1.yml",
-            "--env-file",
-            ".env",
-            "exec",
-            "-T",
-            service,
-            *args,
-        ],
-        cwd=ROOT,
-        check=True,
-        text=True,
-        capture_output=True,
-    ).stdout.strip()
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                "compose.phase1.yml",
+                "--env-file",
+                ".env",
+                "exec",
+                "-T",
+                service,
+                *args,
+            ],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=COMPOSE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise SmokeCheckError(
+            f"{service} check timed out after {COMPOSE_TIMEOUT_SECONDS} seconds"
+        ) from None
+    except subprocess.CalledProcessError as exc:
+        stderr = _safe_stderr(exc.stderr)
+        detail = f": {stderr}" if stderr else ""
+        raise SmokeCheckError(
+            f"{service} check failed with exit code {exc.returncode}{detail}"
+        ) from None
+    return result.stdout.strip()
 
 
 def main():
-    assert fetch_json("http://127.0.0.1:5050/api/system/health")
+    api_health = fetch_json("http://127.0.0.1:5050/api/system/health")
+    if not isinstance(api_health, dict) or api_health.get("status") != "ok":
+        raise SmokeCheckError("API health check failed")
     marker = compose_exec(
         "postgres",
         "psql",
@@ -49,20 +72,50 @@ def main():
         "-Atc",
         "select value from phase1_smoke where id=1",
     )
-    assert marker == "survives-restart"
+    if marker != "survives-restart":
+        raise SmokeCheckError("Postgres marker check failed")
     with urllib.request.urlopen(
         "http://127.0.0.1:9000/minio/health/live", timeout=10
     ) as response:
-        assert response.status == 200
-    assert compose_exec(
+        if response.status != 200:
+            raise SmokeCheckError("MinIO health check failed")
+    milvus_health = compose_exec(
         "milvus",
         "curl",
         "--fail",
         "--silent",
         "http://127.0.0.1:9091/healthz",
     )
+    if not milvus_health:
+        raise SmokeCheckError("Milvus health check failed")
     print("phase1 smoke: PASS")
 
 
+def run_cli():
+    try:
+        main()
+    except SmokeCheckError as exc:
+        print(f"phase1 smoke: FAIL: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _safe_stderr(stderr: str | None) -> str:
+    if not stderr:
+        return ""
+    clean = " ".join(stderr.split())
+    redacted = re.sub(
+        r"(?i)\bauthorization\b\s*:\s*bearer\s+\S+",
+        "Authorization: Bearer <redacted>",
+        clean,
+    )
+    redacted = re.sub(
+        r"(?i)\b[\w-]*(password|secret|token|api[_-]?key)[\w-]*\b\s*[:=]\s*\S+",
+        r"\1=<redacted>",
+        redacted,
+    )
+    return redacted[:STDERR_LIMIT]
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(run_cli())
