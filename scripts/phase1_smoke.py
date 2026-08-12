@@ -1,5 +1,4 @@
 import json
-import re
 import subprocess
 import sys
 import urllib.request
@@ -8,7 +7,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_TIMEOUT_SECONDS = 30
-STDERR_LIMIT = 200
 
 
 class SmokeCheckError(RuntimeError):
@@ -30,6 +28,8 @@ def compose_exec(service: str, *args: str):
             [
                 "docker",
                 "compose",
+                "--project-name",
+                "quickdone-kb-yuxi",
                 "-f",
                 "compose.phase1.yml",
                 "--env-file",
@@ -50,10 +50,8 @@ def compose_exec(service: str, *args: str):
             f"{service} check timed out after {COMPOSE_TIMEOUT_SECONDS} seconds"
         ) from None
     except subprocess.CalledProcessError as exc:
-        stderr = _safe_stderr(exc.stderr)
-        detail = f": {stderr}" if stderr else ""
         raise SmokeCheckError(
-            f"{service} check failed with exit code {exc.returncode}{detail}"
+            f"{service} check failed with exit code {exc.returncode}"
         ) from None
     return result.stdout.strip()
 
@@ -98,23 +96,6 @@ def run_cli():
         print(f"phase1 smoke: FAIL: {exc}", file=sys.stderr)
         return 1
     return 0
-
-
-def _safe_stderr(stderr: str | None) -> str:
-    if not stderr:
-        return ""
-    clean = " ".join(stderr.split())
-    redacted = re.sub(
-        r"(?i)\bauthorization\b\s*:\s*bearer\s+\S+",
-        "Authorization: Bearer <redacted>",
-        clean,
-    )
-    redacted = re.sub(
-        r"(?i)\b[\w-]*(password|secret|token|api[_-]?key)[\w-]*\b\s*[:=]\s*\S+",
-        r"\1=<redacted>",
-        redacted,
-    )
-    return redacted[:STDERR_LIMIT]
 
 
 if __name__ == "__main__":

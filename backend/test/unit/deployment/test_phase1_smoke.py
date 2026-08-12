@@ -33,6 +33,7 @@ def test_compose_exec_uses_phase1_environment(monkeypatch):
     module = _load_smoke_module()
     completed = Mock(stdout=" survives-restart\n")
     run = Mock(return_value=completed)
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "unrelated")
     monkeypatch.setattr(module.subprocess, "run", run)
 
     result = module.compose_exec("postgres", "psql", "-Atc", "select 1")
@@ -42,6 +43,8 @@ def test_compose_exec_uses_phase1_environment(monkeypatch):
         [
             "docker",
             "compose",
+            "--project-name",
+            "quickdone-kb-yuxi",
             "-f",
             "compose.phase1.yml",
             "--env-file",
@@ -85,15 +88,15 @@ def test_compose_exec_reports_timeout_without_command_or_output(monkeypatch):
     assert "stderr-secret" not in message
 
 
-def test_compose_exec_reports_exit_code_and_limited_stderr(monkeypatch):
+def test_compose_exec_reports_only_service_and_exit_code(monkeypatch):
     module = _load_smoke_module()
-    long_stderr = "database unavailable: " + "x" * 300
+    secret_uri = "https://user:password@example.test/path?token=private"
     run = Mock(
         side_effect=subprocess.CalledProcessError(
             17,
             ["private-command", "--env-file", ".env"],
             output="stdout-secret",
-            stderr=long_stderr,
+            stderr=f"database unavailable: {secret_uri}",
         )
     )
     monkeypatch.setattr(module.subprocess, "run", run)
@@ -102,40 +105,12 @@ def test_compose_exec_reports_exit_code_and_limited_stderr(monkeypatch):
         module.compose_exec("postgres", "psql")
 
     message = str(exc_info.value)
-    assert "postgres" in message
-    assert "exit code 17" in message
-    assert "database unavailable" in message
-    stderr_detail = message.split(": ", 1)[1]
-    assert len(stderr_detail) == 200
-    assert stderr_detail == long_stderr[:200]
+    assert message == "postgres check failed with exit code 17"
+    assert "database unavailable" not in message
+    assert secret_uri not in message
     assert "private-command" not in message
     assert ".env" not in message
     assert "stdout-secret" not in message
-
-
-def test_compose_exec_redacts_credentials_from_stderr(monkeypatch):
-    module = _load_smoke_module()
-    stderr = "OPENAI_API_KEY=sk-private POSTGRES_PASSWORD=db-private Authorization: Bearer token-private"
-    monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        Mock(
-            side_effect=subprocess.CalledProcessError(
-                1,
-                ["private-command"],
-                stderr=stderr,
-            )
-        ),
-    )
-
-    with pytest.raises(module.SmokeCheckError) as exc_info:
-        module.compose_exec("postgres", "psql")
-
-    message = str(exc_info.value)
-    assert "sk-private" not in message
-    assert "db-private" not in message
-    assert "token-private" not in message
-    assert message.count("<redacted>") == 3
 
 
 def test_main_checks_live_services_and_existing_marker(monkeypatch, capsys):
