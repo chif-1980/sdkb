@@ -46,11 +46,25 @@ def test_web_dockerfile_uses_the_declared_pnpm_version():
     package_manager = package_json["packageManager"]
     assert package_manager.startswith("pnpm@")
     expected_version = package_manager.removeprefix("pnpm@")
+    expected_command = f"RUN npm install -g pnpm@{expected_version}"
 
     dockerfile = (ROOT / "docker/web.Dockerfile").read_text()
-    installed_versions = re.findall(r"npm install -g pnpm@([^\s]+)", dockerfile)
-    assert installed_versions
-    assert set(installed_versions) == {expected_version}
+    stage_pattern = re.compile(
+        r"^FROM\s+\S+\s+AS\s+(?P<name>\S+)\s*$"
+        r"(?P<body>.*?)(?=^FROM\s|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    stages = list(stage_pattern.finditer(dockerfile))
+
+    for stage_name in ("development", "build-stage"):
+        stage_bodies = [match["body"] for match in stages if match["name"] == stage_name]
+        assert len(stage_bodies) == 1
+        instructions = [
+            line.strip()
+            for line in stage_bodies[0].splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        assert instructions.count(expected_command) == 1
 
 
 def _parse_dotenv(text: str) -> dict[str, str]:
