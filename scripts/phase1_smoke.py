@@ -50,7 +50,9 @@ def main():
         "select value from phase1_smoke where id=1",
     )
     assert marker == "survives-restart"
-    with urllib.request.urlopen("http://127.0.0.1:9000/minio/health/live", timeout=10) as response:
+    with urllib.request.urlopen(
+        "http://127.0.0.1:9000/minio/health/live", timeout=10
+    ) as response:
         assert response.status == 200
     assert compose_exec(
         "milvus",
