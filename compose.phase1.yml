@@ -1,0 +1,35 @@
+name: quickdone-kb-yuxi
+services:
+  api:
+    extends: {file: docker-compose.yml, service: api}
+    container_name: quickdone-kb-api
+    environment: {YUXI_ENV: development, LITE_MODE: "false"}
+  worker:
+    extends: {file: docker-compose.yml, service: worker}
+    container_name: quickdone-kb-worker
+  web:
+    extends: {file: docker-compose.yml, service: web}
+    container_name: quickdone-kb-admin-web
+  postgres:
+    extends: {file: docker-compose.yml, service: postgres}
+    container_name: quickdone-kb-postgres
+  redis:
+    extends: {file: docker-compose.yml, service: redis}
+    container_name: quickdone-kb-redis
+  minio:
+    extends: {file: docker-compose.yml, service: minio}
+    container_name: quickdone-kb-minio
+  etcd:
+    extends: {file: docker-compose.yml, service: etcd}
+    container_name: quickdone-kb-etcd
+  milvus:
+    extends: {file: docker-compose.yml, service: milvus}
+    container_name: quickdone-kb-milvus
+  sandbox-provisioner:
+    extends: {file: docker-compose.yml, service: sandbox-provisioner}
+    container_name: quickdone-kb-sandbox-provisioner
+networks:
+  app-network:
+    name: quickdone-kb-yuxi-network
+volumes:
+  nltk_data:

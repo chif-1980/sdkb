@@ -74,7 +74,8 @@ saves
 saves_dev
 notebooks
 graphrag
-docker/volumes
+docker/volumes/
+artifacts/acceptance/
 docs/vibe
 .cursorrules
 
