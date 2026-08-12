@@ -46,13 +46,9 @@ def compose_exec(service: str, *args: str):
             timeout=COMPOSE_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        raise SmokeCheckError(
-            f"{service} check timed out after {COMPOSE_TIMEOUT_SECONDS} seconds"
-        ) from None
+        raise SmokeCheckError(f"{service} check timed out after {COMPOSE_TIMEOUT_SECONDS} seconds") from None
     except subprocess.CalledProcessError as exc:
-        raise SmokeCheckError(
-            f"{service} check failed with exit code {exc.returncode}"
-        ) from None
+        raise SmokeCheckError(f"{service} check failed with exit code {exc.returncode}") from None
     return result.stdout.strip()
 
 
@@ -72,9 +68,7 @@ def main():
     )
     if marker != "survives-restart":
         raise SmokeCheckError("Postgres marker check failed")
-    with urllib.request.urlopen(
-        "http://127.0.0.1:9000/minio/health/live", timeout=10
-    ) as response:
+    with urllib.request.urlopen("http://127.0.0.1:9000/minio/health/live", timeout=10) as response:
         if response.status != 200:
             raise SmokeCheckError("MinIO health check failed")
     milvus_health = compose_exec(
