@@ -10,6 +10,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[4]
 PYPI_INDEX = "https://pypi.org/simple"
 PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+PYPI_ARTIFACT_HOST = "files.pythonhosted.org"
+PYTORCH_ARTIFACT_HOSTS = {"download-r2.pytorch.org", PYPI_ARTIFACT_HOST}
 
 
 def test_phase1_compose_uses_isolated_project_and_required_services():
@@ -83,19 +85,86 @@ def test_python_dependencies_use_approved_package_indexes():
     assert len(pytorch_indexes) == 1
     assert pytorch_indexes[0].get("explicit") is True
 
-    with (ROOT / "backend/uv.lock").open("rb") as file:
+    _assert_secure_dependency_lock(ROOT / "backend/uv.lock")
+
+
+def test_nested_dependencies_and_sandbox_use_approved_sources():
+    with (ROOT / "backend/package/pyproject.toml").open("rb") as file:
+        package_project = tomllib.load(file)
+
+    indexes = package_project["tool"]["uv"]["index"]
+    default_indexes = [index for index in indexes if index.get("default")]
+    assert [index["url"] for index in default_indexes] == [PYPI_INDEX]
+    pytorch_indexes = [index for index in indexes if index["url"] == PYTORCH_CPU_INDEX]
+    assert len(pytorch_indexes) == 1
+    assert pytorch_indexes[0].get("explicit") is True
+
+    _assert_secure_dependency_lock(ROOT / "backend/package/uv.lock")
+
+    dockerfile = (ROOT / "docker/sandbox_provisioner/Dockerfile").read_text()
+    assert "--index https://pypi.org/simple" in dockerfile
+    assert "pypi.tuna.tsinghua.edu.cn" not in dockerfile
+
+
+def _assert_secure_dependency_lock(path: Path) -> None:
+    with path.open("rb") as file:
         lock = tomllib.load(file)
 
     allowed_registries = {PYPI_INDEX, PYTORCH_CPU_INDEX}
     for package in lock["package"]:
-        registry = package.get("source", {}).get("registry")
+        source = package.get("source", {})
+        registry = source.get("registry")
         if registry:
             assert registry in allowed_registries, package["name"]
+            _assert_secure_url(registry, {urlparse(registry).hostname})
+
+        for dependency in package.get("dependencies", []):
+            dependency_registry = dependency.get("source", {}).get("registry")
+            if dependency_registry:
+                assert dependency_registry in allowed_registries, package["name"]
+                _assert_secure_url(dependency_registry, {urlparse(dependency_registry).hostname})
 
         artifacts = [package.get("sdist"), *package.get("wheels", [])]
         for artifact in artifacts:
-            if artifact and "url" in artifact:
-                assert urlparse(artifact["url"]).hostname != "pypi.tuna.tsinghua.edu.cn", package["name"]
+            if not artifact:
+                continue
+            assert artifact.get("hash", "").startswith("sha256:"), package["name"]
+            if "url" not in artifact:
+                continue
+            parsed = _assert_secure_url(artifact["url"], PYTORCH_ARTIFACT_HOSTS)
+            if source.get("registry") == PYTORCH_CPU_INDEX:
+                assert parsed.hostname in PYTORCH_ARTIFACT_HOSTS, package["name"]
+            else:
+                assert parsed.hostname == PYPI_ARTIFACT_HOST, package["name"]
+
+    _assert_secure_nested_urls(lock, allowed_registries)
+
+
+def _assert_secure_nested_urls(value, allowed_registries: set[str]) -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in {"registry", "index"}:
+                assert isinstance(nested, str)
+                assert nested in allowed_registries
+                _assert_secure_url(nested, {urlparse(nested).hostname})
+            elif key == "url":
+                assert isinstance(nested, str)
+                _assert_secure_url(nested, PYTORCH_ARTIFACT_HOSTS)
+            else:
+                _assert_secure_nested_urls(nested, allowed_registries)
+    elif isinstance(value, list):
+        for nested in value:
+            _assert_secure_nested_urls(nested, allowed_registries)
+
+
+def _assert_secure_url(value: str, allowed_hosts: set[str]):
+    parsed = urlparse(value)
+    assert parsed.scheme == "https"
+    assert parsed.username is None and parsed.password is None
+    assert parsed.port is None
+    assert not parsed.query and not parsed.fragment
+    assert parsed.hostname in allowed_hosts
+    return parsed
 
 
 def _parse_dotenv(text: str) -> dict[str, str]:
