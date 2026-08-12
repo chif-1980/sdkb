@@ -4,32 +4,69 @@ services:
     extends: {file: docker-compose.yml, service: api}
     container_name: quickdone-kb-api
     environment: {YUXI_ENV: development, LITE_MODE: "false"}
+    volumes: !override
+      - yuxi_data:/app/saves
+      - models_data:/app/models
+      - nltk_data:/root/nltk_data
+      - /var/run/docker.sock:/var/run/docker.sock
   worker:
     extends: {file: docker-compose.yml, service: worker}
     container_name: quickdone-kb-worker
+    volumes: !override
+      - yuxi_data:/app/saves
+      - models_data:/app/models
+      - /var/run/docker.sock:/var/run/docker.sock
   web:
     extends: {file: docker-compose.yml, service: web}
     container_name: quickdone-kb-admin-web
+    volumes: !override []
   postgres:
     extends: {file: docker-compose.yml, service: postgres}
     container_name: quickdone-kb-postgres
+    volumes: !override
+      - postgres_data:/var/lib/postgresql/data
   redis:
     extends: {file: docker-compose.yml, service: redis}
     container_name: quickdone-kb-redis
+    volumes: !override
+      - redis_data:/data
   minio:
     extends: {file: docker-compose.yml, service: minio}
     container_name: quickdone-kb-minio
+    volumes: !override
+      - minio_data:/minio_data
+      - minio_config:/root/.minio
   etcd:
     extends: {file: docker-compose.yml, service: etcd}
     container_name: quickdone-kb-etcd
+    volumes: !override
+      - milvus_etcd_data:/etcd
   milvus:
     extends: {file: docker-compose.yml, service: milvus}
     container_name: quickdone-kb-milvus
+    environment:
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes: !override
+      - milvus_data:/var/lib/milvus
+      - milvus_logs:/var/lib/milvus/logs
   sandbox-provisioner:
     extends: {file: docker-compose.yml, service: sandbox-provisioner}
     container_name: quickdone-kb-sandbox-provisioner
+    volumes: !override
+      - yuxi_data:/app/saves
+      - /var/run/docker.sock:/var/run/docker.sock
 networks:
   app-network:
     name: quickdone-kb-yuxi-network
 volumes:
   nltk_data:
+  yuxi_data:
+  models_data:
+  postgres_data:
+  redis_data:
+  minio_data:
+  minio_config:
+  milvus_etcd_data:
+  milvus_data:
+  milvus_logs:

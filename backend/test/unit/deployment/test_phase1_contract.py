@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,8 +16,67 @@ PYPI_ARTIFACT_HOST = "files.pythonhosted.org"
 PYTORCH_ARTIFACT_HOSTS = {"download-r2.pytorch.org", PYPI_ARTIFACT_HOST}
 
 
+class ComposeLoader(yaml.SafeLoader):
+    pass
+
+
+ComposeLoader.add_constructor(
+    "!override", lambda loader, node: loader.construct_sequence(node, deep=True)
+)
+
+
+def _compose_version_at_least(value: str, minimum: tuple[int, int, int]) -> bool:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", value)
+    if not match:
+        return False
+    return tuple(map(int, match.groups())) >= minimum
+
+
+def _render_phase1_config() -> dict:
+    version = subprocess.run(
+        ["docker", "compose", "version", "--short"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if version.returncode or not _compose_version_at_least(version.stdout, (2, 24, 4)):
+        raise AssertionError("phase one requires Docker Compose 2.24.4 or newer")
+
+    command = [
+        "docker",
+        "compose",
+        "-f",
+        str(ROOT / "compose.phase1.yml"),
+        "--env-file",
+        str(ROOT / ".env.example"),
+        "config",
+        "--no-env-resolution",
+        "--format",
+        "json",
+    ]
+    environment = {
+        name: os.environ[name]
+        for name in ("HOME", "PATH", "TMPDIR")
+        if name in os.environ
+    }
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise AssertionError(f"phase one Compose config failed with exit code {result.returncode}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError("phase one Compose config did not return valid JSON") from exc
+
+
 def test_phase1_compose_uses_isolated_project_and_required_services():
-    config = yaml.safe_load((ROOT / "compose.phase1.yml").read_text())
+    config = yaml.load((ROOT / "compose.phase1.yml").read_text(), Loader=ComposeLoader)
     assert config["name"] == "quickdone-kb-yuxi"
     expected_container_names = {
         "api": "quickdone-kb-api",
@@ -38,7 +99,90 @@ def test_phase1_compose_uses_isolated_project_and_required_services():
         assert config["services"][service]["container_name"] == container_name
     assert config["services"]["api"]["environment"]["YUXI_ENV"] == "development"
     assert config["networks"] == {"app-network": {"name": "quickdone-kb-yuxi-network"}}
-    assert set(config["volumes"]) == {"nltk_data"}
+    assert set(config["volumes"]) == {
+        "nltk_data",
+        "yuxi_data",
+        "models_data",
+        "postgres_data",
+        "redis_data",
+        "minio_data",
+        "minio_config",
+        "milvus_etcd_data",
+        "milvus_data",
+        "milvus_logs",
+    }
+
+
+def test_phase1_runtime_uses_images_and_named_volumes_without_host_file_shares():
+    config = _render_phase1_config()
+
+    allowed_bind = "/var/run/docker.sock"
+    for service in config["services"].values():
+        for volume in service.get("volumes", []):
+            if volume["type"] == "bind":
+                assert volume["source"] == allowed_bind
+
+    expected_named_targets = {
+        "api": {"/app/saves", "/app/models", "/root/nltk_data"},
+        "worker": {"/app/saves", "/app/models"},
+        "sandbox-provisioner": {"/app/saves"},
+        "postgres": {"/var/lib/postgresql/data"},
+        "redis": {"/data"},
+        "minio": {"/minio_data", "/root/.minio"},
+        "etcd": {"/etcd"},
+        "milvus": {"/var/lib/milvus", "/var/lib/milvus/logs"},
+    }
+    for service, targets in expected_named_targets.items():
+        named_targets = {
+            volume["target"]
+            for volume in config["services"][service].get("volumes", [])
+            if volume["type"] == "volume"
+        }
+        assert named_targets == targets
+
+    minio_environment = config["services"]["minio"]["environment"]
+    milvus_environment = config["services"]["milvus"]["environment"]
+    assert milvus_environment["MINIO_ACCESS_KEY_ID"] == minio_environment["MINIO_ACCESS_KEY"]
+    assert milvus_environment["MINIO_SECRET_ACCESS_KEY"] == minio_environment["MINIO_SECRET_KEY"]
+
+
+def test_phase1_config_rendering_does_not_resolve_private_env_file():
+    config = _render_phase1_config()
+    api_environment = config["services"]["api"]["environment"]
+    private_names = {
+        "OPENAI_API_KEY",
+        "JWT_SECRET_KEY",
+        "POSTGRES_PASSWORD",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+    }
+    assert private_names.isdisjoint(api_environment)
+
+
+def test_phase1_documents_compose_version_required_by_override_tag():
+    deployment = (ROOT / "docs/advanced/deployment.md").read_text()
+    assert "阶段一隔离部署要求 Docker Compose (v2.24.4+)" in deployment
+
+
+def test_phase1_compose_version_gate_matches_override_requirement():
+    assert not _compose_version_at_least("2.24.3", (2, 24, 4))
+    assert _compose_version_at_least("2.24.4", (2, 24, 4))
+    assert _compose_version_at_least("v5.3.1", (2, 24, 4))
+
+
+def test_sandbox_env_does_not_expose_management_credentials():
+    sandbox_environment = _parse_dotenv(
+        (ROOT / "docker/sandbox_provisioner/sandbox.env").read_text()
+    )
+    forbidden_names = {
+        "OPENAI_API_KEY",
+        "JWT_SECRET_KEY",
+        "POSTGRES_PASSWORD",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+        "SANDBOX_PROVISIONER_TOKEN",
+    }
+    assert forbidden_names.isdisjoint(sandbox_environment)
 
 
 def test_secrets_and_runtime_volumes_are_ignored():

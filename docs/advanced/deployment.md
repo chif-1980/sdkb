@@ -8,6 +8,8 @@
 - Docker Compose (v2.20+)
 - NVIDIA Container Toolkit（如需使用 GPU 服务）
 
+阶段一隔离部署要求 Docker Compose (v2.24.4+)，因为 `compose.phase1.yml` 使用 `!override` 清除上游开发态挂载。
+
 ::: warning 注意事项
 1. 生产环境和开发环境建议使用不同的机器，避免端口和资源冲突
 2. 虽然名为「生产环境」，但这只是基本配置，真正上线需要根据实际情况调整
