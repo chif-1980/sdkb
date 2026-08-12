@@ -1,11 +1,15 @@
 import json
 import re
+import tomllib
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[4]
+PYPI_INDEX = "https://pypi.org/simple"
+PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
 
 def test_phase1_compose_uses_isolated_project_and_required_services():
@@ -65,6 +69,33 @@ def test_web_dockerfile_uses_the_declared_pnpm_version():
             if line.strip() and not line.lstrip().startswith("#")
         ]
         assert instructions.count(expected_command) == 1
+
+
+def test_python_dependencies_use_approved_package_indexes():
+    with (ROOT / "backend/pyproject.toml").open("rb") as file:
+        project = tomllib.load(file)
+
+    indexes = project["tool"]["uv"]["index"]
+    default_indexes = [index for index in indexes if index.get("default")]
+    assert [index["url"] for index in default_indexes] == [PYPI_INDEX]
+
+    pytorch_indexes = [index for index in indexes if index["url"] == PYTORCH_CPU_INDEX]
+    assert len(pytorch_indexes) == 1
+    assert pytorch_indexes[0].get("explicit") is True
+
+    with (ROOT / "backend/uv.lock").open("rb") as file:
+        lock = tomllib.load(file)
+
+    allowed_registries = {PYPI_INDEX, PYTORCH_CPU_INDEX}
+    for package in lock["package"]:
+        registry = package.get("source", {}).get("registry")
+        if registry:
+            assert registry in allowed_registries, package["name"]
+
+        artifacts = [package.get("sdist"), *package.get("wheels", [])]
+        for artifact in artifacts:
+            if artifact and "url" in artifact:
+                assert urlparse(artifact["url"]).hostname != "pypi.tuna.tsinghua.edu.cn", package["name"]
 
 
 def _parse_dotenv(text: str) -> dict[str, str]:
