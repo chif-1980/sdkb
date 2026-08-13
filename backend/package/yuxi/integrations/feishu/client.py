@@ -7,7 +7,13 @@ from typing import Any
 
 import httpx
 
-from yuxi.integrations.feishu.schemas import FeishuAttachment, FeishuDownload, FeishuError, FeishuNode
+from yuxi.integrations.feishu.schemas import (
+    FeishuAttachment,
+    FeishuDownload,
+    FeishuError,
+    FeishuNode,
+    FeishuPageContent,
+)
 from yuxi.utils import logger
 
 FEISHU_OPEN_API_BASE_URL = "https://open.feishu.cn"
@@ -118,6 +124,131 @@ class FeishuClient:
             if not data.get("has_more"):
                 return attachments
             page_token = self._next_page_token(data, seen_page_tokens)
+
+    async def get_wiki_document(self, node: FeishuNode) -> FeishuPageContent:
+        if node.obj_type != "docx":
+            raise FeishuApiError(f"Unsupported Feishu Wiki obj_type: {node.obj_type!r}")
+        document_id = node.obj_token or node.node_token
+        content_payload = await self._get(
+            f"/open-apis/docx/v1/documents/{document_id}/raw_content",
+            params={},
+        )
+        content_data = self._as_mapping(content_payload.get("data"), "data")
+        content = content_data.get("content")
+        if not isinstance(content, str):
+            raise FeishuApiError("Feishu document response did not include string content")
+
+        blocks = await self._list_document_blocks(document_id, node.revision)
+        attachments: list[FeishuAttachment] = []
+        seen_tokens: set[str] = set()
+        visited_blocks: set[str] = set()
+        for block in blocks:
+            self._append_block_attachments(block, attachments, seen_tokens)
+        for block in blocks:
+            await self._collect_block_attachments(
+                document_id=document_id,
+                block=block,
+                attachments=attachments,
+                seen_tokens=seen_tokens,
+                visited_blocks=visited_blocks,
+            )
+        return FeishuPageContent(content=content.encode("utf-8"), attachments=tuple(attachments))
+
+    async def _list_document_blocks(self, document_id: str, revision: str | None) -> list[Mapping[str, Any]]:
+        return await self._list_blocks(f"/open-apis/docx/v1/documents/{document_id}/blocks", revision=revision)
+
+    async def _list_block_children(self, document_id: str, block_id: str) -> list[Mapping[str, Any]]:
+        return await self._list_blocks(f"/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children")
+
+    async def _list_blocks(self, path: str, *, revision: str | None = None) -> list[Mapping[str, Any]]:
+        blocks: list[Mapping[str, Any]] = []
+        page_token: str | None = None
+        seen_page_tokens: set[str] = set()
+        while True:
+            params: dict[str, str] = {"page_size": "100"}
+            if page_token:
+                params["page_token"] = page_token
+            if revision:
+                params["document_revision_id"] = revision
+            payload = await self._get(path, params=params)
+            data = self._as_mapping(payload.get("data"), "data")
+            items = data.get("items") or []
+            if not isinstance(items, list):
+                raise FeishuApiError("Feishu document block response had invalid items")
+            blocks.extend(self._as_mapping(item, "block item") for item in items)
+            if not data.get("has_more"):
+                return blocks
+            page_token = self._next_page_token(data, seen_page_tokens)
+
+    async def _collect_block_attachments(
+        self,
+        *,
+        document_id: str,
+        block: Mapping[str, Any],
+        attachments: list[FeishuAttachment],
+        seen_tokens: set[str],
+        visited_blocks: set[str],
+    ) -> None:
+        block_id = block.get("block_id")
+        if isinstance(block_id, str) and block_id:
+            if block_id in visited_blocks:
+                return
+            visited_blocks.add(block_id)
+        children = block.get("children")
+        if not isinstance(block_id, str) or not block_id or not isinstance(children, list) or not children:
+            return
+        for child in await self._list_block_children(document_id, block_id):
+            self._append_block_attachments(child, attachments, seen_tokens)
+            await self._collect_block_attachments(
+                document_id=document_id,
+                block=child,
+                attachments=attachments,
+                seen_tokens=seen_tokens,
+                visited_blocks=visited_blocks,
+            )
+
+    @classmethod
+    def _append_block_attachments(
+        cls,
+        block: Mapping[str, Any],
+        attachments: list[FeishuAttachment],
+        seen_tokens: set[str],
+    ) -> None:
+        file_block = block.get("file")
+        if isinstance(file_block, Mapping):
+            token = file_block.get("token") or file_block.get("file_token")
+            if isinstance(token, str) and token and token not in seen_tokens:
+                seen_tokens.add(token)
+                name = file_block.get("name")
+                attachments.append(
+                    FeishuAttachment(
+                        file_token=token,
+                        name=name if isinstance(name, str) and name else f"file-{token}",
+                        file_type="file",
+                    )
+                )
+        image_block = block.get("image")
+        if isinstance(image_block, Mapping):
+            token = image_block.get("token") or image_block.get("file_token")
+            if isinstance(token, str) and token and token not in seen_tokens:
+                seen_tokens.add(token)
+                attachments.append(FeishuAttachment(file_token=token, name=f"image-{token}", file_type="image"))
+        text_block = block.get("text")
+        if not isinstance(text_block, Mapping):
+            return
+        elements = text_block.get("elements")
+        if not isinstance(elements, list):
+            return
+        for element in elements:
+            if not isinstance(element, Mapping):
+                continue
+            inline_file = element.get("file")
+            if not isinstance(inline_file, Mapping):
+                continue
+            token = inline_file.get("file_token") or inline_file.get("token")
+            if isinstance(token, str) and token and token not in seen_tokens:
+                seen_tokens.add(token)
+                attachments.append(FeishuAttachment(file_token=token, name=f"image-{token}", file_type="image"))
 
     async def download(self, file_token: str) -> FeishuDownload:
         response = await self._get_response(f"/open-apis/drive/v1/files/{file_token}/download")

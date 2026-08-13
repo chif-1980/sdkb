@@ -27,6 +27,12 @@ class FeishuAttachment:
 
 
 @dataclass(frozen=True, slots=True)
+class FeishuPageContent:
+    content: bytes
+    attachments: tuple[FeishuAttachment, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class FeishuDownload:
     file_token: str
     content: bytes

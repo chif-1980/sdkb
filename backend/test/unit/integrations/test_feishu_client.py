@@ -11,6 +11,7 @@ from yuxi.integrations.feishu import (
     FeishuCredentialError,
     FeishuPermissionError,
 )
+from yuxi.integrations.feishu.schemas import FeishuNode
 
 
 def _client(handler, **kwargs) -> FeishuClient:
@@ -160,6 +161,112 @@ async def test_list_attachments_follows_page_token() -> None:
         ("file-1", "one.pdf", 12),
         ("file-2", "two.txt", 4),
     ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_wiki_document_reads_docx_content_and_nested_block_attachments() -> None:
+    requests: list[tuple[str, str | None]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        requests.append((request.url.path, request.url.params.get("page_token")))
+        if request.url.path.endswith("/raw_content"):
+            assert request.url.path == "/open-apis/docx/v1/documents/doc-token/raw_content"
+            return httpx.Response(200, json={"code": 0, "data": {"content": "# Hello"}})
+        if request.url.path == "/open-apis/docx/v1/documents/doc-token/blocks":
+            if request.url.params.get("page_token") is None:
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "items": [
+                                {
+                                    "block_id": "root-1",
+                                    "children": ["container-1"],
+                                    "block_type": 1,
+                                }
+                            ],
+                            "has_more": True,
+                            "page_token": "blocks-next",
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {"block_id": "file-block", "file": {"token": "file-1", "name": "guide.pdf"}},
+                            {"block_id": "image-block", "image": {"token": "image-1"}},
+                        ],
+                        "has_more": False,
+                    },
+                },
+            )
+        if request.url.path == "/open-apis/docx/v1/documents/doc-token/blocks/root-1/children":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [{"block_id": "container-1", "children": ["nested-1"]}],
+                        "has_more": False,
+                    },
+                },
+            )
+        if request.url.path == "/open-apis/docx/v1/documents/doc-token/blocks/container-1/children":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "block_id": "nested-1",
+                                "text": {
+                                    "elements": [{"file": {"file_token": "inline-1", "source_block_id": "nested-1"}}]
+                                },
+                            }
+                        ],
+                        "has_more": False,
+                    },
+                },
+            )
+        raise AssertionError(f"Unexpected URL: {request.url}")
+
+    client = _client(handler)
+    document = await client.get_wiki_document(
+        FeishuNode(space_id="space-1", node_token="node-token", obj_token="doc-token", obj_type="docx")
+    )
+
+    assert document.content == b"# Hello"
+    assert [(item.file_token, item.name, item.file_type) for item in document.attachments] == [
+        ("file-1", "guide.pdf", "file"),
+        ("image-1", "image-image-1", "image"),
+        ("inline-1", "image-inline-1", "image"),
+    ]
+    assert requests == [
+        ("/open-apis/docx/v1/documents/doc-token/raw_content", None),
+        ("/open-apis/docx/v1/documents/doc-token/blocks", None),
+        ("/open-apis/docx/v1/documents/doc-token/blocks", "blocks-next"),
+        ("/open-apis/docx/v1/documents/doc-token/blocks/root-1/children", None),
+        ("/open-apis/docx/v1/documents/doc-token/blocks/container-1/children", None),
+    ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_wiki_document_rejects_non_docx_nodes() -> None:
+    client = _client(lambda request: httpx.Response(200))
+
+    with pytest.raises(FeishuApiError, match="obj_type"):
+        await client.get_wiki_document(
+            FeishuNode(space_id="space-1", node_token="node-token", obj_token="sheet-token", obj_type="sheet")
+        )
+
     await client.aclose()
 
 

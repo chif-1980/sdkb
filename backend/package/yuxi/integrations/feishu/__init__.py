@@ -7,7 +7,13 @@ from yuxi.integrations.feishu.client import (
     FeishuCredentialError,
     FeishuPermissionError,
 )
-from yuxi.integrations.feishu.schemas import FeishuAttachment, FeishuDownload, FeishuError, FeishuNode
+from yuxi.integrations.feishu.schemas import (
+    FeishuAttachment,
+    FeishuDownload,
+    FeishuError,
+    FeishuNode,
+    FeishuPageContent,
+)
 
 __all__ = [
     "DEFAULT_CREDENTIAL_ENV_NAME",
@@ -20,5 +26,6 @@ __all__ = [
     "FeishuDownload",
     "FeishuError",
     "FeishuNode",
+    "FeishuPageContent",
     "FeishuPermissionError",
 ]
