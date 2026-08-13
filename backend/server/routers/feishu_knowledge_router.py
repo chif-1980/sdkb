@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Literal, Protocol
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +18,7 @@ from yuxi.integrations.feishu.service import FeishuScanService
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository as _BaseRepository
 from yuxi.services.task_service import TaskContext, tasker
+from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
@@ -43,6 +46,49 @@ class KnowledgeRemovalAdapter:
         await knowledge_base.delete_file(kb_id, file_id)
 
 
+class MinioFeishuArchiveAdapter:
+    BUCKET = "knowledgebases"
+    SAFE_EXTENSIONS = {
+        ".bmp",
+        ".docx",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".md",
+        ".pdf",
+        ".png",
+        ".pptx",
+        ".tif",
+        ".tiff",
+        ".txt",
+        ".webp",
+        ".xlsx",
+    }
+
+    async def archive(
+        self,
+        *,
+        source_id: str,
+        item_id: str,
+        version_id: str,
+        item_type: str,
+        title: str,
+        content: bytes,
+        content_type: str | None,
+    ) -> str:
+        extension = ".md" if item_type == "page" else Path(title).suffix.lower()
+        if extension not in self.SAFE_EXTENSIONS:
+            extension = ".bin"
+        object_name = f"feishu/{source_id}/{item_id}/{version_id}/source{extension}"
+        await get_minio_client().aupload_file(
+            self.BUCKET,
+            object_name,
+            content,
+            content_type=content_type,
+        )
+        return f"minio://{self.BUCKET}/{object_name}"
+
+
 @dataclass(frozen=True, slots=True)
 class PublishResult:
     file_id: str
@@ -60,6 +106,7 @@ class PublishAdapter(Protocol):
         version_id: str,
         page_info: dict,
         operator_id: str,
+        file_id: str | None = None,
     ) -> PublishResult: ...
 
 
@@ -76,6 +123,7 @@ class KnowledgePublishAdapter:
         version_id: str,
         page_info: dict,
         operator_id: str,
+        file_id: str | None = None,
     ) -> PublishResult:
         citation = {
             "source_url": source_url,
@@ -84,16 +132,17 @@ class KnowledgePublishAdapter:
             "page_info": page_info,
         }
         params = {"content_type": "file", "feishu": citation}
-        file_meta = await knowledge_base.add_file_record(
-            kb_id,
-            object_path,
-            params=params,
-            operator_id=operator_id,
-        )
-        file_id = file_meta["file_id"]
-        parsed = await knowledge_base.parse_file(kb_id, file_id, operator_id=operator_id)
-        if parsed.get("status") != "parsed":
-            raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
+        if file_id is None:
+            file_meta = await knowledge_base.add_file_record(
+                kb_id,
+                object_path,
+                params=params,
+                operator_id=operator_id,
+            )
+            file_id = file_meta["file_id"]
+            parsed = await knowledge_base.parse_file(kb_id, file_id, operator_id=operator_id)
+            if parsed.get("status") != "parsed":
+                raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
         indexed = await knowledge_base.index_file(
             kb_id,
             file_id,
@@ -206,7 +255,7 @@ class FeishuReviewService:
             if not self._is_failed_status(version.processing_status):
                 raise ValueError("Only failed material can be retried")
             from_status = version.processing_status
-            version.processing_status = "processing_queued"
+            version.processing_status = "publish_queued" if from_status == "publish_failed" else "processing_queued"
             version.retry_count = (version.retry_count or 0) + 1
             version.error_code = None
             version.error_message = None
@@ -216,13 +265,78 @@ class FeishuReviewService:
                 version_id=version.version_id,
                 event_type="retry_queued",
                 from_status=from_status,
-                to_status="processing_queued",
+                to_status=version.processing_status,
                 operator_id=operator_id,
             )
             await self.session.flush()
             return version
 
-    async def mark_publish_succeeded(self, version_id: str, *, yuxi_file_id: str) -> FeishuMaterialVersion:
+    async def claim_publish(self, version_id: str) -> tuple[FeishuMaterialVersion, FeishuSourceItem, FeishuSource]:
+        async with self._transaction():
+            version, item, source = await self._get_material(version_id, lock=True)
+            if version.processing_status != "publish_queued":
+                raise ValueError("Material is not queued for publishing")
+            version.processing_status = "publishing"
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="publishing",
+                from_status="publish_queued",
+                to_status="publishing",
+            )
+            await self.session.flush()
+            return version, item, source
+
+    async def claim_processing(self, version_id: str) -> tuple[FeishuMaterialVersion, FeishuSourceItem, FeishuSource]:
+        async with self._transaction():
+            version, item, source = await self._get_material(version_id, lock=True)
+            if version.processing_status != "processing_queued":
+                raise ValueError("Material is not queued for processing")
+            version.processing_status = "processing"
+            await self.session.flush()
+            return version, item, source
+
+    async def mark_processing_succeeded(self, version_id: str, *, file_id: str) -> FeishuMaterialVersion:
+        async with self._transaction():
+            version, item, _ = await self._get_material(version_id, lock=True)
+            if version.processing_status != "processing":
+                raise ValueError("Material is not processing")
+            version.processing_status = "awaiting_review"
+            version.yuxi_file_id = file_id
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="parsed",
+                from_status="processing",
+                to_status="awaiting_review",
+            )
+            await self.session.flush()
+            return version
+
+    async def mark_processing_failed(self, version_id: str, *, message: str) -> FeishuMaterialVersion:
+        async with self._transaction():
+            version, item, _ = await self._get_material(version_id, lock=True)
+            if version.processing_status != "processing":
+                raise ValueError("Material is not processing")
+            version.processing_status = "parse_failed"
+            version.error_message = message
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="parse_failed",
+                from_status="processing",
+                to_status="parse_failed",
+                message=message,
+            )
+            await self.session.flush()
+            return version
+
+    async def mark_publish_succeeded(
+        self, version_id: str, *, yuxi_file_id: str, chunk_count: int = 0
+    ) -> FeishuMaterialVersion:
         async with self._transaction():
             version, item, _ = await self._get_material(version_id, lock=True)
             if version.processing_status not in {"publish_queued", "publishing"}:
@@ -241,6 +355,7 @@ class FeishuReviewService:
             item.active_version_id = version.version_id
             version.processing_status = "published"
             version.yuxi_file_id = yuxi_file_id
+            version.chunk_count = chunk_count
             version.published_at = utc_now()
             version.error_code = None
             version.error_message = None
@@ -276,13 +391,45 @@ class FeishuReviewService:
             return version
 
     async def confirm_removal(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
+        version, item, source = await self._claim_removal(version_id, operator_id=operator_id)
+        try:
+            await self.removal_adapter.remove(kb_id=source.target_kb_id, file_id=version.yuxi_file_id)
+        except Exception as exc:
+            await self._restore_removal(version_id, message=str(exc))
+            raise
+        return await self._finish_removal(version_id, operator_id=operator_id)
+
+    async def _claim_removal(
+        self, version_id: str, *, operator_id: str
+    ) -> tuple[FeishuMaterialVersion, FeishuSourceItem, FeishuSource]:
         async with self._transaction():
             version, item, source = await self._get_material(version_id, lock=True)
             if item.source_validity != "invalid":
                 raise ValueError("Material source must be invalid before removal")
-            if item.active_version_id != version.version_id or not version.yuxi_file_id:
+            if (
+                item.active_version_id != version.version_id
+                or version.processing_status != "published"
+                or not version.yuxi_file_id
+            ):
                 raise ValueError("Material is not the active published version")
-            await self.removal_adapter.remove(kb_id=source.target_kb_id, file_id=version.yuxi_file_id)
+            version.processing_status = "removal_pending"
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="removal_started",
+                from_status="published",
+                to_status="removal_pending",
+                operator_id=operator_id,
+            )
+            await self.session.flush()
+            return version, item, source
+
+    async def _finish_removal(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
+        async with self._transaction():
+            version, item, _ = await self._get_material(version_id, lock=True)
+            if version.processing_status != "removal_pending" or item.active_version_id != version.version_id:
+                raise ValueError("Material removal is no longer pending")
             item.active_version_id = None
             version.processing_status = "removed"
             self._append_event(
@@ -296,6 +443,23 @@ class FeishuReviewService:
             )
             await self.session.flush()
             return version
+
+    async def _restore_removal(self, version_id: str, *, message: str) -> None:
+        async with self._transaction():
+            version, item, _ = await self._get_material(version_id, lock=True)
+            if version.processing_status != "removal_pending":
+                return
+            version.processing_status = "published"
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="removal_failed",
+                from_status="removal_pending",
+                to_status="published",
+                message=message,
+            )
+            await self.session.flush()
 
     async def _get_material(
         self, version_id: str, *, lock: bool = False
@@ -405,12 +569,11 @@ class BatchActionRequest(BaseModel):
     def normalize_reason(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
 
-    @field_validator("reason")
-    @classmethod
-    def reject_requires_reason(cls, value: str | None, info) -> str | None:
-        if info.data.get("action") == "reject" and not value:
+    @model_validator(mode="after")
+    def reject_requires_reason(self):
+        if self.action == "reject" and not self.reason:
             raise ValueError("reason is required for reject")
-        return value
+        return self
 
 
 def _iso(value):
@@ -569,7 +732,11 @@ async def scan_source(
                 raise LookupError(f"Feishu source not found: {source_id}")
             client = FeishuClient(credential_env_name=worker_source.credential_env_name)
             try:
-                result = await FeishuScanService(repository=worker_repository, client=client).scan(
+                result = await FeishuScanService(
+                    repository=worker_repository,
+                    client=client,
+                    archive_adapter=MinioFeishuArchiveAdapter(),
+                ).scan(
                     source_id=source_id,
                     mode=payload.mode,
                     operator_id=current_user.uid,
@@ -669,13 +836,136 @@ async def list_material_events(version_id: str, db: AsyncSession = Depends(get_d
     return {"items": [_event_dict(event) for event in result.scalars()]}
 
 
+async def _run_publish_worker(
+    version_id: str,
+    *,
+    operator_id: str,
+    publish_adapter: PublishAdapter | None = None,
+) -> dict:
+    adapter = publish_adapter or KnowledgePublishAdapter()
+    try:
+        async with pg_manager.get_async_session_context() as session:
+            version, item, source = await FeishuReviewService(session).claim_publish(version_id)
+            object_path = version.source_object_path or (version.processing_params or {}).get("object_path")
+            if not object_path:
+                raise RuntimeError("Feishu material has no archived source object")
+            publish_args = {
+                "kb_id": source.target_kb_id,
+                "object_path": object_path,
+                "source_url": item.source_url,
+                "wiki_path": item.path_text,
+                "version_id": version.version_id,
+                "page_info": {"item_type": item.item_type, "title": item.title},
+                "operator_id": operator_id,
+                "file_id": version.yuxi_file_id,
+            }
+        result = await adapter.publish(**publish_args)
+    except Exception as exc:
+        async with pg_manager.get_async_session_context() as session:
+            service = FeishuReviewService(session)
+            try:
+                await service.mark_publish_failed(version_id, message=str(exc))
+            except (LookupError, ValueError):
+                pass
+        raise
+
+    async with pg_manager.get_async_session_context() as session:
+        material = await FeishuReviewService(session).mark_publish_succeeded(
+            version_id,
+            yuxi_file_id=result.file_id,
+            chunk_count=result.chunk_count,
+        )
+    return {"version_id": material.version_id, "status": material.processing_status, "file_id": result.file_id}
+
+
+async def _run_processing_worker(version_id: str, *, operator_id: str) -> dict:
+    try:
+        async with pg_manager.get_async_session_context() as session:
+            version, item, source = await FeishuReviewService(session).claim_processing(version_id)
+            object_path = version.source_object_path or (version.processing_params or {}).get("object_path")
+            if not object_path:
+                raise RuntimeError("Feishu material has no archived source object")
+            params = {
+                "content_type": "file",
+                "feishu": {
+                    "source_url": item.source_url,
+                    "wiki_path": item.path_text,
+                    "material_version": version.version_id,
+                    "page_info": {"item_type": item.item_type, "title": item.title},
+                },
+            }
+            kb_id = source.target_kb_id
+            existing_file_id = version.yuxi_file_id
+        if existing_file_id is None:
+            file_meta = await knowledge_base.add_file_record(kb_id, object_path, params=params, operator_id=operator_id)
+            existing_file_id = file_meta["file_id"]
+        parsed = await knowledge_base.parse_file(kb_id, existing_file_id, operator_id=operator_id)
+        if parsed.get("status") != "parsed":
+            raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
+    except Exception as exc:
+        async with pg_manager.get_async_session_context() as session:
+            service = FeishuReviewService(session)
+            try:
+                await service.mark_processing_failed(version_id, message=str(exc))
+            except (LookupError, ValueError):
+                pass
+        raise
+
+    async with pg_manager.get_async_session_context() as session:
+        material = await FeishuReviewService(session).mark_processing_succeeded(version_id, file_id=existing_file_id)
+    return {"version_id": material.version_id, "status": material.processing_status, "file_id": existing_file_id}
+
+
+async def _enqueue_publish(version_id: str, *, operator_id: str):
+    async def run_publish(context: TaskContext):
+        result = await _run_publish_worker(version_id, operator_id=operator_id)
+        await context.set_result(result)
+        return result
+
+    return await tasker.enqueue(
+        name=f"Publish Feishu material ({version_id})",
+        task_type="feishu_publish",
+        payload={"version_id": version_id},
+        coroutine=run_publish,
+    )
+
+
+async def _enqueue_processing(version_id: str, *, operator_id: str):
+    async def run_processing(context: TaskContext):
+        result = await _run_processing_worker(version_id, operator_id=operator_id)
+        await context.set_result(result)
+        return result
+
+    return await tasker.enqueue(
+        name=f"Process Feishu material ({version_id})",
+        task_type="feishu_process",
+        payload={"version_id": version_id},
+        coroutine=run_processing,
+    )
+
+
+def _raise_action_error(exc: Exception) -> None:
+    if isinstance(exc, LookupError):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @feishu_knowledge.post("/materials/{version_id}/approve", status_code=202)
 async def approve_material(
     version_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    raise NotImplementedError
+    try:
+        material = await FeishuReviewService(db).approve(version_id, operator_id=current_user.uid)
+        task = await _enqueue_publish(version_id, operator_id=current_user.uid)
+    except (LookupError, ValueError) as exc:
+        _raise_action_error(exc)
+    except Exception as exc:
+        _raise_action_error(exc)
+    return {"version_id": material.version_id, "status": material.processing_status, "task_id": task.id}
 
 
 @feishu_knowledge.post("/materials/{version_id}/reject")
@@ -704,7 +994,39 @@ async def retry_material(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    raise NotImplementedError
+    try:
+        material = await FeishuReviewService(db).retry(version_id, operator_id=current_user.uid)
+        if material.processing_status == "publish_queued":
+            task = await _enqueue_publish(version_id, operator_id=current_user.uid)
+        else:
+            task = await _enqueue_processing(version_id, operator_id=current_user.uid)
+    except (LookupError, ValueError) as exc:
+        _raise_action_error(exc)
+    except Exception as exc:
+        _raise_action_error(exc)
+    return {"version_id": material.version_id, "status": material.processing_status, "task_id": task.id}
+
+
+async def _apply_action(
+    version_id: str,
+    action: str,
+    *,
+    db: AsyncSession,
+    operator_id: str,
+    reason: str | None,
+) -> dict:
+    user = SimpleNamespace(uid=operator_id)
+    if action == "approve":
+        return await approve_material(version_id, db=db, current_user=user)
+    if action == "reject":
+        if not reason:
+            raise HTTPException(status_code=422, detail="reason is required for reject")
+        return await reject_material(version_id, RejectRequest(reason=reason), db=db, current_user=user)
+    if action == "retry":
+        return await retry_material(version_id, db=db, current_user=user)
+    if action == "confirm_removal":
+        return await confirm_removal(version_id, db=db, current_user=user)
+    raise HTTPException(status_code=422, detail=f"Unsupported action: {action}")
 
 
 @feishu_knowledge.post("/materials/batch-action", status_code=202)
@@ -713,7 +1035,30 @@ async def batch_action(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    raise NotImplementedError
+    items = []
+    for version_id in payload.version_ids:
+        try:
+            result = await _apply_action(
+                version_id,
+                payload.action,
+                db=db,
+                operator_id=current_user.uid,
+                reason=payload.reason,
+            )
+            items.append({**result, "ok": True})
+        except HTTPException as exc:
+            items.append(
+                {
+                    "version_id": version_id,
+                    "ok": False,
+                    "status_code": exc.status_code,
+                    "error": str(exc.detail),
+                }
+            )
+        except Exception as exc:
+            items.append({"version_id": version_id, "ok": False, "status_code": 500, "error": str(exc)})
+    succeeded = sum(bool(item["ok"]) for item in items)
+    return {"succeeded": succeeded, "failed": len(items) - succeeded, "items": items}
 
 
 @feishu_knowledge.post("/materials/{version_id}/confirm-removal", status_code=202)
@@ -722,7 +1067,13 @@ async def confirm_removal(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    raise NotImplementedError
+    try:
+        material = await FeishuReviewService(db).confirm_removal(version_id, operator_id=current_user.uid)
+    except (LookupError, ValueError) as exc:
+        _raise_action_error(exc)
+    except Exception as exc:
+        _raise_action_error(exc)
+    return {"version_id": material.version_id, "status": material.processing_status}
 
 
 __all__ = ["feishu_knowledge"]

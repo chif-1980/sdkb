@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
+import mimetypes
 from pathlib import Path
+from typing import Protocol
 
 from yuxi.integrations.feishu.client import FeishuClient, FeishuNotFoundError
 from yuxi.integrations.feishu.schemas import FeishuAttachment, FeishuNode
@@ -30,6 +32,20 @@ AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".wma"}
 VIDEO_EXTENSIONS = {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm"}
 
 
+class FeishuArchiveAdapter(Protocol):
+    async def archive(
+        self,
+        *,
+        source_id: str,
+        item_id: str,
+        version_id: str,
+        item_type: str,
+        title: str,
+        content: bytes,
+        content_type: str | None,
+    ) -> str: ...
+
+
 @dataclass(frozen=True, slots=True)
 class FeishuScanResult:
     run_id: str
@@ -54,9 +70,16 @@ class _ScanCounts:
 
 
 class FeishuScanService:
-    def __init__(self, *, repository: FeishuKnowledgeRepository, client: FeishuClient) -> None:
+    def __init__(
+        self,
+        *,
+        repository: FeishuKnowledgeRepository,
+        client: FeishuClient,
+        archive_adapter: FeishuArchiveAdapter | None = None,
+    ) -> None:
         self.repository = repository
         self.client = client
+        self.archive_adapter = archive_adapter
 
     async def scan(
         self,
@@ -168,6 +191,7 @@ class FeishuScanService:
         title = node.title or node.node_token
         path_text = f"{parent_path} / {title}" if parent_path else title
         page_key = f"page:{node.space_id}:{node.node_token}"
+        page_url = self._page_url(source.wiki_root_url, node.node_token)
         page_content = await self.client.get_wiki_document(node)
         await self._record_material(
             source=source,
@@ -176,7 +200,7 @@ class FeishuScanService:
             title=title,
             parent_item_key=parent_item_key,
             path_text=path_text,
-            source_url=self._page_url(source.wiki_root_url, node.node_token),
+            source_url=page_url,
             token=node.obj_token or node.node_token,
             revision=page_content.revision,
             source_updated_at=node.source_updated_at,
@@ -192,6 +216,7 @@ class FeishuScanService:
                 attachment=attachment,
                 parent_item_key=page_key,
                 parent_path=path_text,
+                parent_source_url=page_url,
                 counts=counts,
                 seen_item_keys=seen_item_keys,
                 seen_at=seen_at,
@@ -216,6 +241,7 @@ class FeishuScanService:
         attachment: FeishuAttachment,
         parent_item_key: str,
         parent_path: str,
+        parent_source_url: str | None,
         counts: _ScanCounts,
         seen_item_keys: set[str],
         seen_at: datetime,
@@ -228,7 +254,7 @@ class FeishuScanService:
             title=attachment.name,
             parent_item_key=parent_item_key,
             path_text=f"{parent_path} / {attachment.name}",
-            source_url=None,
+            source_url=parent_source_url,
             token=attachment.file_token,
             revision=attachment.revision,
             source_updated_at=attachment.source_updated_at,
@@ -289,28 +315,57 @@ class FeishuScanService:
             )
             return
 
-        if self._metadata_matches(current, revision, normalized_updated_at):
+        metadata_matches = self._metadata_matches(current, revision, normalized_updated_at)
+        archive_missing = self.archive_adapter is not None and current is not None and not current.source_object_path
+        if metadata_matches and not archive_missing:
             counts.unchanged += 1
             return
+        content_type = "text/markdown" if item_type == "page" else None
         if content is None:
             download = await self.client.download(token, download_type=download_type)
             content = download.content
+            content_type = download.content_type
         content_hash = sha256(content).hexdigest()
         if (
             current is not None
             and revision is None
             and normalized_updated_at is None
             and current.content_hash == content_hash
+            and not archive_missing
         ):
             counts.unchanged += 1
             return
-        _, version_created = await self.repository.create_material_version(
+        version, version_created = await self.repository.create_material_version(
             item_id=item.item_id,
             revision=self._version_revision(revision, normalized_updated_at, content_hash),
             content_hash=content_hash,
             processing_status="discovered",
             processing_params=self._processing_params(normalized_updated_at),
         )
+        if self.archive_adapter is not None and not version.source_object_path:
+            content_type = content_type or mimetypes.guess_type(title)[0]
+            object_path = await self.archive_adapter.archive(
+                source_id=source.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                item_type=item_type,
+                title=title,
+                content=content,
+                content_type=content_type,
+            )
+            version.source_object_path = object_path
+            version.processing_params = {
+                **(version.processing_params or {}),
+                "object_path": object_path,
+                "content_type": content_type,
+                "source_url": source_url,
+                "wiki_path": path_text,
+                "material_version": version.version_id,
+                "item_type": item_type,
+                "title": title,
+                "download_type": download_type,
+            }
+            await self.repository.session.flush()
         if not version_created:
             counts.unchanged += 1
         elif item_created:

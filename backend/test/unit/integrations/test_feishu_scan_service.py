@@ -190,6 +190,73 @@ async def test_page_body_and_attachments_are_independent_source_items(repository
     assert fake.download_calls == [("pdf-1", "media")]
 
 
+async def test_scan_archives_page_and_attachment_bytes_with_source_metadata(repository, session):
+    archived = []
+
+    class ArchiveAdapter:
+        async def archive(self, **kwargs):
+            archived.append(kwargs)
+            extension = ".md" if kwargs["item_type"] == "page" else ".pdf"
+            return (
+                f"minio://knowledgebases/feishu/{kwargs['source_id']}/{kwargs['item_id']}/"
+                f"{kwargs['version_id']}/source{extension}"
+            )
+
+    root = node("root", "../../Untrusted title")
+    attachment = FeishuAttachment(file_token="pdf-1", name="../../Guide.PDF", revision="7")
+    fake = FakeFeishuClient(
+        nodes={"root": root},
+        page_attachments={"obj-root": [attachment]},
+        page_contents={"obj-root": b"# page"},
+        contents={"pdf-1": b"%PDF"},
+    )
+
+    result = await FeishuScanService(
+        repository=repository,
+        client=fake,
+        archive_adapter=ArchiveAdapter(),
+    ).scan(source_id="source-1", mode="full")
+
+    versions = list((await session.execute(select(FeishuMaterialVersion).order_by(FeishuMaterialVersion.id))).scalars())
+    assert result.status == "succeeded"
+    assert [entry["content"] for entry in archived] == [b"# page", b"%PDF"]
+    assert [entry["content_type"] for entry in archived] == ["text/markdown", "application/pdf"]
+    assert all(version.source_object_path for version in versions)
+    assert [version.processing_params["object_path"] for version in versions] == [
+        version.source_object_path for version in versions
+    ]
+    for version in versions:
+        assert version.processing_params["material_version"] == version.version_id
+        assert version.processing_params["source_url"] == "https://example.feishu.cn/wiki/root"
+        assert version.processing_params["wiki_path"].startswith("../../Untrusted title")
+        assert version.processing_params["item_type"] in {"page", "attachment"}
+        assert version.processing_params["title"]
+
+
+async def test_scan_does_not_archive_unsupported_media(repository):
+    archived = []
+
+    class ArchiveAdapter:
+        async def archive(self, **kwargs):
+            archived.append(kwargs)
+            return "unexpected"
+
+    root = node("root", "Root")
+    audio = FeishuAttachment(file_token="audio-1", name="call.mp3")
+    fake = FakeFeishuClient(
+        nodes={"root": root},
+        page_attachments={"obj-root": [audio]},
+        page_contents={"obj-root": b"page"},
+    )
+
+    await FeishuScanService(repository=repository, client=fake, archive_adapter=ArchiveAdapter()).scan(
+        source_id="source-1", mode="full"
+    )
+
+    assert [entry["item_type"] for entry in archived] == ["page"]
+    assert fake.download_calls == []
+
+
 async def test_incremental_scan_creates_version_only_for_changed_item(repository, session):
     root = node("root", "Root")
     pdf = FeishuAttachment(file_token="pdf-1", name="guide.pdf", revision="pdf-1")

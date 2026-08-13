@@ -1,5 +1,6 @@
 """Unit contracts for the Feishu knowledge admin API (Task 4)."""
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -324,6 +325,59 @@ async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
         "page_info": {"page_number": 2},
     }
     assert [call[0] for call in calls] == ["add", "parse", "index"]
+
+
+async def test_minio_archive_adapter_uses_stable_ids_and_safe_extension(monkeypatch):
+    calls = []
+
+    class FakeMinio:
+        async def aupload_file(self, bucket_name, object_name, data, content_type=None):
+            calls.append((bucket_name, object_name, data, content_type))
+
+    monkeypatch.setattr(router_module, "get_minio_client", lambda: FakeMinio())
+    adapter = router_module.MinioFeishuArchiveAdapter()
+
+    object_path = await adapter.archive(
+        source_id="source-1",
+        item_id="item-1",
+        version_id="version-1",
+        item_type="attachment",
+        title="../../Quarterly Report.PDF",
+        content=b"%PDF",
+        content_type="application/pdf",
+    )
+
+    assert object_path == "minio://knowledgebases/feishu/source-1/item-1/version-1/source.pdf"
+    assert calls == [
+        (
+            "knowledgebases",
+            "feishu/source-1/item-1/version-1/source.pdf",
+            b"%PDF",
+            "application/pdf",
+        )
+    ]
+
+
+async def test_minio_archive_adapter_ignores_unsafe_extension(monkeypatch):
+    calls = []
+
+    class FakeMinio:
+        async def aupload_file(self, bucket_name, object_name, data, content_type=None):
+            calls.append(object_name)
+
+    monkeypatch.setattr(router_module, "get_minio_client", lambda: FakeMinio())
+    object_path = await router_module.MinioFeishuArchiveAdapter().archive(
+        source_id="source-1",
+        item_id="item-1",
+        version_id="version-1",
+        item_type="attachment",
+        title="payload.exe",
+        content=b"data",
+        content_type="application/octet-stream",
+    )
+
+    assert object_path.endswith("/source.bin")
+    assert calls == ["feishu/source-1/item-1/version-1/source.bin"]
 
 
 async def test_router_requires_login_and_admin_role():
@@ -707,6 +761,93 @@ async def test_retry_endpoint_increments_and_queues_processing_task(monkeypatch)
     assert calls[1][1]["task_type"] == "feishu_process"
 
 
+async def test_publish_worker_archives_then_publishes_and_switches_active(monkeypatch, review_fixture):
+    calls = []
+
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            calls.append(("publish", kwargs))
+            return router_module.PublishResult(file_id="file-new", chunk_count=4)
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    await review_fixture.commit()
+    await FeishuReviewService(review_fixture).approve("version-new", operator_id="admin")
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    result = await router_module._run_publish_worker(
+        "version-new",
+        operator_id="admin",
+        publish_adapter=FakePublishAdapter(),
+    )
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    version = await review_fixture.get(FeishuMaterialVersion, 2)
+    assert result == {"version_id": "version-new", "status": "published", "file_id": "file-new"}
+    assert [call[0] for call in calls] == ["publish"]
+    assert calls[0][1]["source_url"] is None
+    assert calls[0][1]["wiki_path"] is None
+    assert calls[0][1]["page_info"] == {"item_type": "page", "title": "Page"}
+    assert version.source_object_path.endswith("/source.md")
+    assert version.chunk_count == 4
+    assert item.active_version_id == "version-new"
+
+
+async def test_publish_worker_failure_keeps_old_active_and_records_failure(monkeypatch, review_fixture):
+    class FailingPublishAdapter:
+        async def publish(self, **kwargs):
+            raise RuntimeError("index failed")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    await review_fixture.commit()
+    await FeishuReviewService(review_fixture).approve("version-new", operator_id="admin")
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    with pytest.raises(RuntimeError, match="index failed"):
+        await router_module._run_publish_worker(
+            "version-new",
+            operator_id="admin",
+            publish_adapter=FailingPublishAdapter(),
+        )
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    version = await review_fixture.get(FeishuMaterialVersion, 2)
+    assert item.active_version_id == "version-old"
+    assert version.processing_status == "publish_failed"
+    assert version.error_message == "index failed"
+
+
+async def test_publish_worker_missing_archive_fails_and_keeps_old_active(monkeypatch, review_fixture):
+    class UnexpectedPublishAdapter:
+        async def publish(self, **kwargs):
+            raise AssertionError("publish must not run without an archive")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    await FeishuReviewService(review_fixture).approve("version-new", operator_id="admin")
+    with pytest.raises(RuntimeError, match="archived source object"):
+        await router_module._run_publish_worker(
+            "version-new",
+            operator_id="admin",
+            publish_adapter=UnexpectedPublishAdapter(),
+        )
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    version = await review_fixture.get(FeishuMaterialVersion, 2)
+    assert item.active_version_id == "version-old"
+    assert version.processing_status == "publish_failed"
+
+
 async def test_removal_adapter_failure_keeps_active_version(review_fixture):
     class FailingRemovalAdapter:
         async def remove(self, *, kb_id: str, file_id: str) -> None:
@@ -722,6 +863,25 @@ async def test_removal_adapter_failure_keeps_active_version(review_fixture):
     assert item.active_version_id == "version-old"
     old = await review_fixture.get(FeishuMaterialVersion, 1)
     assert old.processing_status == "published"
+
+
+async def test_confirm_removal_calls_external_adapter_outside_transaction(review_fixture):
+    calls = []
+
+    class RemovalAdapter:
+        async def remove(self, *, kb_id: str, file_id: str) -> None:
+            calls.append((kb_id, file_id, review_fixture.in_transaction()))
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    item.source_validity = "invalid"
+    await review_fixture.commit()
+
+    service = FeishuReviewService(review_fixture, removal_adapter=RemovalAdapter())
+    removed = await service.confirm_removal("version-old", operator_id="admin")
+
+    assert calls == [("kb-1", "file-old", False)]
+    assert removed.processing_status == "removed"
+    assert item.active_version_id is None
 
 
 async def test_batch_action_reports_each_version_and_supports_reject(monkeypatch):
@@ -746,4 +906,31 @@ async def test_batch_action_reports_each_version_and_supports_reject(monkeypatch
     assert calls == [
         ("version-1", "reject", "admin", "duplicate"),
         ("version-2", "reject", "admin", "duplicate"),
+    ]
+
+
+async def test_batch_action_returns_partial_results(monkeypatch):
+    async def fake_apply(version_id, action, *, db, operator_id, reason):
+        if version_id == "missing":
+            raise HTTPException(status_code=404, detail="material not found")
+        if version_id == "conflict":
+            raise HTTPException(status_code=409, detail="invalid state")
+        return {"version_id": version_id, "status": "publish_queued", "task_id": "task-1"}
+
+    monkeypatch.setattr(router_module, "_apply_action", fake_apply)
+    result = await router_module.batch_action(
+        router_module.BatchActionRequest(
+            action="approve",
+            version_ids=["ok", "missing", "conflict"],
+        ),
+        db=SimpleNamespace(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    assert result["succeeded"] == 1
+    assert result["failed"] == 2
+    assert result["items"] == [
+        {"version_id": "ok", "status": "publish_queued", "task_id": "task-1", "ok": True},
+        {"version_id": "missing", "ok": False, "status_code": 404, "error": "material not found"},
+        {"version_id": "conflict", "ok": False, "status_code": 409, "error": "invalid state"},
     ]
