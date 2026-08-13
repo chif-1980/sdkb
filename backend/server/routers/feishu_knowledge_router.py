@@ -219,16 +219,12 @@ class FeishuKnowledgeRepository(_BaseRepository):
     async def start_sync_run(self, *, source_id: str, run_type: str, operator_id: str | None = None):
         if self.queued_run_id is None:
             return await super().start_sync_run(source_id=source_id, run_type=run_type, operator_id=operator_id)
-        result = await self.session.execute(
-            select(FeishuSyncRun).where(FeishuSyncRun.run_id == self.queued_run_id).with_for_update()
+        return await self.claim_queued_sync_run(
+            run_id=self.queued_run_id,
+            source_id=source_id,
+            run_type=run_type,
+            operator_id=operator_id,
         )
-        run = result.scalar_one_or_none()
-        if run is None or run.source_id != source_id or run.run_type != run_type or run.status != "queued":
-            raise RuntimeError(f"Queued Feishu sync run is unavailable: {self.queued_run_id}")
-        run.status = "running"
-        run.started_at = utc_now()
-        await self.session.flush()
-        return run
 
 
 class FeishuReviewService:
@@ -348,6 +344,17 @@ class FeishuReviewService:
                 from_status="processing",
                 to_status="awaiting_review",
             )
+            await self.session.flush()
+            return version
+
+    async def remember_processing_file(self, version_id: str, *, file_id: str) -> FeishuMaterialVersion:
+        async with self._transaction():
+            version, _, _ = await self._get_material(version_id, lock=True)
+            if version.processing_status != "processing":
+                raise ValueError("Material is not processing")
+            if version.yuxi_file_id not in {None, file_id}:
+                raise ValueError("Material already references a different file")
+            version.yuxi_file_id = file_id
             await self.session.flush()
             return version
 
@@ -803,20 +810,31 @@ async def scan_source(
     async def run_scan(context: TaskContext):
         async with pg_manager.get_async_session_context() as session:
             worker_repository = FeishuKnowledgeRepository(session, queued_run_id=run.run_id)
-            worker_source = await worker_repository.get_source(source_id)
-            if worker_source is None:
-                raise LookupError(f"Feishu source not found: {source_id}")
-            client = FeishuClient(credential_env_name=worker_source.credential_env_name)
+            client = None
             try:
-                result = await FeishuScanService(
-                    repository=worker_repository,
-                    client=client,
-                    archive_adapter=MinioFeishuArchiveAdapter(),
-                ).scan(
-                    source_id=source_id,
-                    mode=payload.mode,
-                    operator_id=current_user.uid,
-                )
+                try:
+                    worker_source = await worker_repository.get_source(source_id)
+                    if worker_source is None:
+                        raise LookupError(f"Feishu source not found: {source_id}")
+                    client = FeishuClient(credential_env_name=worker_source.credential_env_name)
+                    result = await FeishuScanService(
+                        repository=worker_repository,
+                        client=client,
+                        archive_adapter=MinioFeishuArchiveAdapter(),
+                    ).scan(
+                        source_id=source_id,
+                        mode=payload.mode,
+                        operator_id=current_user.uid,
+                    )
+                except Exception as exc:
+                    await worker_repository.fail_sync_run(
+                        run_id=run.run_id,
+                        source_id=source_id,
+                        error_summary=f"{type(exc).__name__}: {exc}",
+                        operator_id=current_user.uid,
+                    )
+                    await session.commit()
+                    raise
                 await context.set_result({"run_id": result.run_id, "status": result.status})
                 if result.status != "succeeded":
                     raise RuntimeError(result.error_summary or "Feishu scan failed")
@@ -840,7 +858,8 @@ async def scan_source(
                     raise enqueue_errors[0]
                 return {"run_id": result.run_id, "status": result.status}
             finally:
-                await client.aclose()
+                if client is not None:
+                    await client.aclose()
 
     try:
         task, created = await tasker.enqueue_unique_by_payload(
@@ -1030,6 +1049,11 @@ async def _run_processing_worker(version_id: str, *, operator_id: str) -> dict:
         if existing_file_id is None:
             file_meta = await knowledge_base.add_file_record(kb_id, object_path, params=params, operator_id=operator_id)
             existing_file_id = file_meta["file_id"]
+            async with pg_manager.get_async_session_context() as session:
+                await FeishuReviewService(session).remember_processing_file(
+                    version_id,
+                    file_id=existing_file_id,
+                )
         parsed = await knowledge_base.parse_file(kb_id, existing_file_id, operator_id=operator_id)
         if parsed.get("status") != "parsed":
             raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")

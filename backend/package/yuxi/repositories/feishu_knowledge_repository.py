@@ -176,6 +176,82 @@ class FeishuKnowledgeRepository:
             raise RuntimeError("Feishu sync run was not created")
         return run
 
+    async def claim_queued_sync_run(
+        self,
+        *,
+        run_id: str,
+        source_id: str,
+        run_type: str,
+        operator_id: str | None = None,
+    ) -> FeishuSyncRun:
+        run: FeishuSyncRun | None = None
+        has_running_run = False
+        async with self._write_transaction():
+            source_result = await self.session.execute(
+                select(FeishuSource).where(FeishuSource.source_id == source_id).with_for_update()
+            )
+            if source_result.scalar_one_or_none() is None:
+                raise LookupError(f"Feishu source not found: {source_id}")
+            run_result = await self.session.execute(
+                select(FeishuSyncRun).where(FeishuSyncRun.run_id == run_id).with_for_update()
+            )
+            run = run_result.scalar_one_or_none()
+            if run is None or run.source_id != source_id or run.run_type != run_type or run.status != "queued":
+                raise RuntimeError(f"Queued Feishu sync run is unavailable: {run_id}")
+            running_result = await self.session.execute(
+                select(FeishuSyncRun.run_id).where(
+                    FeishuSyncRun.source_id == source_id,
+                    FeishuSyncRun.status == "running",
+                    FeishuSyncRun.run_id != run_id,
+                )
+            )
+            if running_result.scalar_one_or_none() is not None:
+                has_running_run = True
+            else:
+                run.status = "running"
+                run.started_at = utc_now()
+                run.operator_id = operator_id
+                await self.session.flush()
+        if has_running_run:
+            raise ConcurrentSyncRunError(f"A Feishu sync run is already active for source: {source_id}")
+        return run
+
+    async def fail_sync_run(
+        self,
+        *,
+        run_id: str,
+        source_id: str,
+        error_summary: str,
+        operator_id: str | None = None,
+    ) -> bool:
+        async with self._write_transaction():
+            result = await self.session.execute(
+                select(FeishuSyncRun)
+                .where(FeishuSyncRun.run_id == run_id, FeishuSyncRun.source_id == source_id)
+                .with_for_update()
+            )
+            run = result.scalar_one_or_none()
+            if run is None or run.status not in {"queued", "running"}:
+                return False
+            from_status = run.status
+            run.status = "failed"
+            run.finished_at = utc_now()
+            run.failed_count = max(run.failed_count or 0, 1)
+            run.error_summary = error_summary
+            self.session.add(
+                FeishuProcessingEvent(
+                    source_id=source_id,
+                    event_type="scan_failed",
+                    from_status=from_status,
+                    to_status="failed",
+                    operator_id=operator_id,
+                    message=error_summary,
+                    payload_json={"run_id": run_id},
+                )
+            )
+            await self.session.flush()
+            return True
+
     async def finish_sync_run(
         self,
         *,

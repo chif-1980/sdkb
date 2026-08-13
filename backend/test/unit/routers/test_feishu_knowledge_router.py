@@ -6,12 +6,14 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.routers import feishu_knowledge_router as router_module
 from server.routers.feishu_knowledge_router import FeishuReviewService, feishu_knowledge
 from server.utils.auth_middleware import get_admin_user, get_current_user, get_db
 from yuxi.knowledge.utils.kb_utils import prepare_item_metadata
+from yuxi.repositories.feishu_knowledge_repository import ConcurrentSyncRunError
 from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
@@ -377,6 +379,236 @@ async def test_successful_scan_queues_archived_material_processing(monkeypatch):
         "worker_commit",
         ("processing", "version-1", "admin"),
     ]
+
+
+@pytest.mark.parametrize("failure_stage", ["source_lookup", "client_constructor"])
+async def test_scan_worker_initialization_failure_marks_run_failed(monkeypatch, failure_stage):
+    captured = {}
+    calls = []
+
+    class FakeDb:
+        async def commit(self):
+            calls.append("request_commit")
+
+    class FakeRepository:
+        def __init__(self, _session, *, queued_run_id=None):
+            self.queued_run_id = queued_run_id
+
+        async def get_source(self, source_id):
+            if self.queued_run_id and failure_stage == "source_lookup":
+                return None
+            return SimpleNamespace(
+                source_id=source_id,
+                name="Source",
+                credential_env_name="FEISHU_TOKEN",
+            )
+
+        async def queue_sync_run(self, **kwargs):
+            return SimpleNamespace(run_id="run-1")
+
+        async def fail_sync_run(self, *, run_id, source_id, error_summary, operator_id):
+            calls.append(("failed", run_id, source_id, error_summary, operator_id))
+            return True
+
+    class FailingClient:
+        def __init__(self, **kwargs):
+            raise RuntimeError("credential unavailable")
+
+    class WorkerDb:
+        async def commit(self):
+            calls.append("worker_commit")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield WorkerDb()
+
+    async def capture_scan(**kwargs):
+        captured["coroutine"] = kwargs["coroutine"]
+        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module, "FeishuClient", FailingClient)
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+
+    await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="full"),
+        db=FakeDb(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    with pytest.raises((LookupError, RuntimeError)):
+        await captured["coroutine"](SimpleNamespace())
+
+    expected_message = (
+        "LookupError: Feishu source not found: source-1"
+        if failure_stage == "source_lookup"
+        else "RuntimeError: credential unavailable"
+    )
+    assert calls == [
+        "request_commit",
+        ("failed", "run-1", "source-1", expected_message, "admin"),
+        "worker_commit",
+    ]
+
+
+async def test_scan_worker_concurrent_claim_failure_marks_queued_run_failed(monkeypatch):
+    captured = {}
+    calls = []
+
+    class FakeDb:
+        async def commit(self):
+            calls.append("request_commit")
+
+    class FakeRepository:
+        def __init__(self, _session, *, queued_run_id=None):
+            self.queued_run_id = queued_run_id
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(
+                source_id=source_id,
+                name="Source",
+                credential_env_name="FEISHU_TOKEN",
+            )
+
+        async def queue_sync_run(self, **kwargs):
+            return SimpleNamespace(run_id="run-2")
+
+        async def fail_sync_run(self, *, run_id, source_id, error_summary, operator_id):
+            calls.append(("failed", run_id, source_id, error_summary, operator_id))
+            return True
+
+    class FakeClient:
+        async def aclose(self):
+            calls.append("client_close")
+
+    class FakeScanService:
+        def __init__(self, **kwargs):
+            pass
+
+        async def scan(self, **kwargs):
+            raise ConcurrentSyncRunError("A Feishu sync run is already active for source: source-1")
+
+    class WorkerDb:
+        async def commit(self):
+            calls.append("worker_commit")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield WorkerDb()
+
+    async def capture_scan(**kwargs):
+        captured["coroutine"] = kwargs["coroutine"]
+        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module, "FeishuClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+
+    await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="full"),
+        db=FakeDb(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    with pytest.raises(ConcurrentSyncRunError):
+        await captured["coroutine"](SimpleNamespace())
+
+    assert calls == [
+        "request_commit",
+        (
+            "failed",
+            "run-2",
+            "source-1",
+            "ConcurrentSyncRunError: A Feishu sync run is already active for source: source-1",
+            "admin",
+        ),
+        "worker_commit",
+        "client_close",
+    ]
+
+
+async def test_router_repository_queued_run_claim_honors_same_source_mutex(review_fixture):
+    runs = [
+        FeishuSyncRun(run_id="run-first", source_id="source-1", run_type="full", status="queued"),
+        FeishuSyncRun(run_id="run-second", source_id="source-1", run_type="full", status="queued"),
+    ]
+    review_fixture.add_all(runs)
+    await review_fixture.commit()
+
+    first = await router_module.FeishuKnowledgeRepository(
+        review_fixture,
+        queued_run_id="run-first",
+    ).start_sync_run(source_id="source-1", run_type="full", operator_id="admin-1")
+
+    with pytest.raises(ConcurrentSyncRunError):
+        await router_module.FeishuKnowledgeRepository(
+            review_fixture,
+            queued_run_id="run-second",
+        ).start_sync_run(source_id="source-1", run_type="full", operator_id="admin-2")
+
+    assert first.status == "running"
+    assert runs[1].status == "queued"
+
+
+async def test_rejected_queued_scan_worker_persists_failed_run_and_event(monkeypatch, review_fixture):
+    running = FeishuSyncRun(
+        run_id="run-active",
+        source_id="source-1",
+        run_type="full",
+        status="running",
+    )
+    review_fixture.add(running)
+    await review_fixture.commit()
+    captured = {}
+
+    class FakeClient:
+        async def aclose(self):
+            pass
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    async def capture_scan(**kwargs):
+        captured["coroutine"] = kwargs["coroutine"]
+        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+
+    monkeypatch.setattr(router_module, "FeishuClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+
+    response = await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="full"),
+        db=review_fixture,
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    with pytest.raises(ConcurrentSyncRunError):
+        await captured["coroutine"](SimpleNamespace())
+
+    rejected = (
+        await review_fixture.execute(select(FeishuSyncRun).where(FeishuSyncRun.run_id == response["run_id"]))
+    ).scalar_one()
+    event = (
+        await review_fixture.execute(
+            select(FeishuProcessingEvent).where(
+                FeishuProcessingEvent.event_type == "scan_failed",
+                FeishuProcessingEvent.payload_json == {"run_id": rejected.run_id},
+            )
+        )
+    ).scalar_one()
+    assert rejected.status == "failed"
+    assert rejected.finished_at is not None
+    assert rejected.error_summary == (
+        "ConcurrentSyncRunError: A Feishu sync run is already active for source: source-1"
+    )
+    assert (event.from_status, event.to_status, event.operator_id) == ("queued", "failed", "admin")
 
 
 async def test_duplicate_scan_returns_existing_task_and_rolls_back_unused_run(monkeypatch):
@@ -1093,6 +1325,63 @@ async def test_processing_worker_passes_archived_source_and_content_hash(monkeyp
     }
     assert calls[0][5]["filename"] == "Root/Finance/Quarterly Report.PDF"
     assert calls[0][5]["path"] == current.source_object_path
+
+
+async def test_processing_retry_reuses_file_record_created_before_parse_failure(monkeypatch, review_fixture):
+    calls = []
+
+    class FakeKnowledgeBase:
+        async def add_file_record(self, kb_id, object_path, *, params, operator_id):
+            calls.append(("add", kb_id, object_path, operator_id))
+            return {"file_id": "file-one"}
+
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            calls.append(("parse", kb_id, file_id, operator_id))
+            if len([call for call in calls if call[0] == "parse"]) == 1:
+                raise RuntimeError("parser unavailable")
+            return {"status": "parsed"}
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.processing_status = "processing_queued"
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    await review_fixture.commit()
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    with pytest.raises(RuntimeError, match="parser unavailable"):
+        await router_module._run_processing_worker("version-new", operator_id="admin")
+
+    await review_fixture.refresh(current)
+    assert current.processing_status == "parse_failed"
+    assert current.yuxi_file_id == "file-one"
+
+    await FeishuReviewService(review_fixture).retry("version-new", operator_id="admin")
+    result = await router_module._run_processing_worker("version-new", operator_id="admin")
+
+    await review_fixture.refresh(current)
+    events = list(
+        (
+            await review_fixture.execute(
+                select(FeishuProcessingEvent)
+                .where(FeishuProcessingEvent.version_id == "version-new")
+                .order_by(FeishuProcessingEvent.id)
+            )
+        ).scalars()
+    )
+    assert result == {"version_id": "version-new", "status": "awaiting_review", "file_id": "file-one"}
+    assert current.processing_status == "awaiting_review"
+    assert current.yuxi_file_id == "file-one"
+    assert [call[0] for call in calls] == ["add", "parse", "parse"]
+    assert [call[2] for call in calls if call[0] == "parse"] == ["file-one", "file-one"]
+    assert [(event.event_type, event.from_status, event.to_status) for event in events] == [
+        ("parse_failed", "processing", "parse_failed"),
+        ("retry_queued", "parse_failed", "processing_queued"),
+        ("parsed", "processing", "awaiting_review"),
+    ]
 
 
 async def test_publish_worker_archives_then_publishes_and_switches_active(monkeypatch, review_fixture):

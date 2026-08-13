@@ -95,6 +95,78 @@ async def test_start_sync_run_rejects_a_second_running_scan(repository):
     assert run.status == "running"
 
 
+async def test_fail_sync_run_persists_terminal_state_and_event(repository, session):
+    run = FeishuSyncRun(
+        run_id="queued-run",
+        source_id="source-1",
+        run_type="full",
+        status="queued",
+        operator_id="admin-1",
+    )
+    session.add(run)
+    await session.commit()
+
+    updated = await repository.fail_sync_run(
+        run_id=run.run_id,
+        source_id="source-1",
+        error_summary="RuntimeError: credential unavailable",
+        operator_id="admin-1",
+    )
+    await session.commit()
+
+    event = (await session.execute(select(FeishuProcessingEvent))).scalar_one()
+    assert updated is True
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    assert run.failed_count == 1
+    assert run.error_summary == "RuntimeError: credential unavailable"
+    assert (event.event_type, event.from_status, event.to_status) == ("scan_failed", "queued", "failed")
+    assert event.message == run.error_summary
+    assert event.payload_json == {"run_id": run.run_id}
+
+
+async def test_claim_queued_sync_run_rejects_same_source_and_allows_different_source(repository, session):
+    await repository.get_or_create_source(
+        source_id="source-2",
+        name="Product Wiki",
+        wiki_root_token="root-2",
+        wiki_root_url=None,
+        target_kb_id="kb-2",
+        credential_env_name="FEISHU_ACCESS_TOKEN",
+    )
+    runs = [
+        FeishuSyncRun(run_id="source-1-first", source_id="source-1", run_type="full", status="queued"),
+        FeishuSyncRun(run_id="source-1-second", source_id="source-1", run_type="full", status="queued"),
+        FeishuSyncRun(run_id="source-2-first", source_id="source-2", run_type="full", status="queued"),
+    ]
+    session.add_all(runs)
+    await session.commit()
+
+    first = await repository.claim_queued_sync_run(
+        run_id="source-1-first",
+        source_id="source-1",
+        run_type="full",
+        operator_id="admin-1",
+    )
+    with pytest.raises(ConcurrentSyncRunError):
+        await repository.claim_queued_sync_run(
+            run_id="source-1-second",
+            source_id="source-1",
+            run_type="full",
+            operator_id="admin-2",
+        )
+    other_source = await repository.claim_queued_sync_run(
+        run_id="source-2-first",
+        source_id="source-2",
+        run_type="full",
+        operator_id="admin-2",
+    )
+
+    assert first.status == "running"
+    assert runs[1].status == "queued"
+    assert other_source.status == "running"
+
+
 async def test_successful_full_scan_is_the_only_incremental_prerequisite(repository):
     failed_full = await repository.start_sync_run(source_id="source-1", run_type="full")
     await repository.finish_sync_run(

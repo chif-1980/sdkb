@@ -10,7 +10,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository
+from yuxi.repositories.feishu_knowledge_repository import (
+    ConcurrentSyncRunError,
+    FeishuKnowledgeRepository,
+)
 from yuxi.storage.postgres.models_knowledge import FeishuSource
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -48,6 +51,88 @@ async def postgres_source_context():
         async with factory() as session:
             yield session, factory, source_id
     finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture()
+async def postgres_mutex_context():
+    postgres_url = os.getenv("POSTGRES_URL")
+    if not postgres_url:
+        pytest.skip("POSTGRES_URL is not configured for the PostgreSQL repository integration tests.")
+    engine = create_async_engine(postgres_url, pool_size=2, max_overflow=0)
+    schema_name = f"task4_mutex_{uuid4().hex}"
+    schema_engine = engine.execution_options(schema_translate_map={None: schema_name})
+    factory = async_sessionmaker(schema_engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+            await connection.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
+            await connection.execute(
+                text(
+                    """
+                    CREATE TABLE feishu_sources (
+                        id SERIAL PRIMARY KEY,
+                        source_id VARCHAR(64) NOT NULL UNIQUE,
+                        name VARCHAR(255) NOT NULL,
+                        wiki_root_token VARCHAR(255) NOT NULL,
+                        wiki_root_url VARCHAR(1024),
+                        target_kb_id VARCHAR(80) NOT NULL,
+                        credential_env_name VARCHAR(255) NOT NULL,
+                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_by VARCHAR(64),
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            await connection.execute(
+                text(
+                    """
+                    CREATE TABLE feishu_sync_runs (
+                        id SERIAL PRIMARY KEY,
+                        run_id VARCHAR(64) NOT NULL UNIQUE,
+                        source_id VARCHAR(64) NOT NULL REFERENCES feishu_sources(source_id) ON DELETE CASCADE,
+                        run_type VARCHAR(32) NOT NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'running',
+                        started_at TIMESTAMPTZ DEFAULT NOW(),
+                        finished_at TIMESTAMPTZ,
+                        operator_id VARCHAR(64),
+                        scanned_count INTEGER DEFAULT 0,
+                        new_count INTEGER DEFAULT 0,
+                        changed_count INTEGER DEFAULT 0,
+                        unchanged_count INTEGER DEFAULT 0,
+                        unsupported_count INTEGER DEFAULT 0,
+                        failed_count INTEGER DEFAULT 0,
+                        invalidated_count INTEGER DEFAULT 0,
+                        error_summary TEXT
+                    )
+                    """
+                )
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO feishu_sources (
+                        source_id, name, wiki_root_token, target_kb_id, credential_env_name
+                    ) VALUES ('source-1', 'Source', 'root', 'kb-1', 'FEISHU_ACCESS_TOKEN')
+                    """
+                )
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO feishu_sync_runs (run_id, source_id, run_type, status)
+                    VALUES
+                        ('run-first', 'source-1', 'full', 'queued'),
+                        ('run-second', 'source-1', 'full', 'queued')
+                    """
+                )
+            )
+        yield factory, schema_name
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
         await engine.dispose()
 
 
@@ -124,3 +209,63 @@ async def test_postgres_source_upsert_advances_persisted_updated_at(postgres_sou
     assert persisted_updated_at is not None
     assert previous_updated_at is not None
     assert persisted_updated_at > previous_updated_at
+
+
+async def test_postgres_claim_queued_run_serializes_same_source(postgres_mutex_context):
+    factory, schema_name = postgres_mutex_context
+    first_claimed = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async with factory() as first_session, factory() as second_session:
+
+        async def claim_first():
+            async with first_session.begin():
+                run = await FeishuKnowledgeRepository(first_session).claim_queued_sync_run(
+                    run_id="run-first",
+                    source_id="source-1",
+                    run_type="full",
+                    operator_id="admin-1",
+                )
+                first_claimed.set()
+                await release_first.wait()
+                return run.run_id
+
+        async def claim_second():
+            await first_claimed.wait()
+            async with second_session.begin():
+                return await FeishuKnowledgeRepository(second_session).claim_queued_sync_run(
+                    run_id="run-second",
+                    source_id="source-1",
+                    run_type="full",
+                    operator_id="admin-2",
+                )
+
+        first_task = asyncio.create_task(claim_first())
+        first_claim_waiter = asyncio.create_task(first_claimed.wait())
+        second_task = None
+        try:
+            done, _ = await asyncio.wait(
+                {first_task, first_claim_waiter},
+                timeout=2,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if first_task in done:
+                await first_task
+            assert first_claim_waiter in done, "First PostgreSQL claim did not acquire the source lock"
+
+            second_task = asyncio.create_task(claim_second())
+            await asyncio.sleep(0.05)
+            assert second_task.done() is False
+
+            release_first.set()
+            assert await asyncio.wait_for(first_task, timeout=2) == "run-first"
+            with pytest.raises(ConcurrentSyncRunError):
+                await asyncio.wait_for(second_task, timeout=2)
+        finally:
+            release_first.set()
+            first_claim_waiter.cancel()
+            await asyncio.gather(
+                first_task,
+                *([second_task] if second_task is not None else []),
+                return_exceptions=True,
+            )
