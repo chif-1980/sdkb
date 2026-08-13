@@ -29,6 +29,11 @@ class FeishuSourceSummary:
     valid_count: int
     invalid_count: int
     unsupported_count: int
+    awaiting_review_count: int
+    failed_count: int
+    source_invalid_count: int
+    last_full_sync_at: datetime | None
+    last_incremental_sync_at: datetime | None
 
 
 class FeishuKnowledgeRepository:
@@ -578,6 +583,18 @@ class FeishuKnowledgeRepository:
                     func.sum(case((FeishuSourceItem.source_validity == "valid", 1), else_=0)),
                     func.sum(case((FeishuSourceItem.source_validity == "invalid", 1), else_=0)),
                     func.sum(case((FeishuMaterialVersion.processing_status == "unsupported", 1), else_=0)),
+                    func.sum(case((FeishuMaterialVersion.processing_status == "awaiting_review", 1), else_=0)),
+                    func.sum(
+                        case(
+                            (
+                                FeishuMaterialVersion.processing_status.in_(
+                                    {"parse_failed", "publish_failed", "removal_failed"}
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
                 )
                 .select_from(FeishuSourceItem)
                 .outerjoin(
@@ -590,12 +607,24 @@ class FeishuKnowledgeRepository:
                 )
                 .where(FeishuSourceItem.source_id == source_id)
             )
-        total, valid, invalid, unsupported = result.one()
+            run_result = await self.session.execute(
+                select(
+                    func.max(case((FeishuSyncRun.run_type == "full", FeishuSyncRun.started_at), else_=None)),
+                    func.max(case((FeishuSyncRun.run_type == "incremental", FeishuSyncRun.started_at), else_=None)),
+                ).where(FeishuSyncRun.source_id == source_id)
+            )
+        total, valid, invalid, unsupported, awaiting_review, failed = result.one()
+        last_full_sync_at, last_incremental_sync_at = run_result.one()
         return FeishuSourceSummary(
             total_count=total or 0,
             valid_count=valid or 0,
             invalid_count=invalid or 0,
             unsupported_count=unsupported or 0,
+            awaiting_review_count=awaiting_review or 0,
+            failed_count=failed or 0,
+            source_invalid_count=invalid or 0,
+            last_full_sync_at=last_full_sync_at,
+            last_incremental_sync_at=last_incremental_sync_at,
         )
 
     async def _finish_sync_run(

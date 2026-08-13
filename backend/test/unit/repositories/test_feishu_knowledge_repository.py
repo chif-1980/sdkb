@@ -507,3 +507,139 @@ async def test_event_summary_and_terminal_run_update(repository, session):
     assert summary.valid_count == 1
     assert summary.invalid_count == 0
     assert summary.unsupported_count == 1
+
+
+async def test_source_summary_returns_empty_workbench_values(repository):
+    summary = await repository.get_source_summary("source-1")
+
+    assert summary.total_count == 0
+    assert summary.awaiting_review_count == 0
+    assert summary.failed_count == 0
+    assert summary.source_invalid_count == 0
+    assert summary.last_full_sync_at is None
+    assert summary.last_incremental_sync_at is None
+
+
+async def test_source_summary_uses_latest_runs_and_latest_material_versions(repository, session):
+    full_started_at = datetime(2026, 8, 13, 3, tzinfo=UTC)
+    incremental_started_at = datetime(2026, 8, 13, 2, tzinfo=UTC)
+    session.add_all(
+        [
+            FeishuSyncRun(
+                run_id="full-old",
+                source_id="source-1",
+                run_type="full",
+                status="succeeded",
+                started_at=datetime(2026, 8, 13, 1, tzinfo=UTC),
+            ),
+            FeishuSyncRun(
+                run_id="full-latest-running",
+                source_id="source-1",
+                run_type="full",
+                status="running",
+                started_at=full_started_at,
+            ),
+            FeishuSyncRun(
+                run_id="incremental-latest-failed",
+                source_id="source-1",
+                run_type="incremental",
+                status="failed",
+                started_at=incremental_started_at,
+            ),
+        ]
+    )
+    items = [
+        FeishuSourceItem(
+            item_id="item-review",
+            source_id="source-1",
+            item_key="page:review",
+            item_type="page",
+            source_validity="valid",
+        ),
+        FeishuSourceItem(
+            item_id="item-parse-failed",
+            source_id="source-1",
+            item_key="page:parse-failed",
+            item_type="page",
+            source_validity="valid",
+        ),
+        FeishuSourceItem(
+            item_id="item-publish-failed",
+            source_id="source-1",
+            item_key="page:publish-failed",
+            item_type="page",
+            source_validity="valid",
+        ),
+        FeishuSourceItem(
+            item_id="item-removal-failed",
+            source_id="source-1",
+            item_key="page:removal-failed",
+            item_type="page",
+            source_validity="invalid",
+        ),
+        FeishuSourceItem(
+            item_id="item-invalid",
+            source_id="source-1",
+            item_key="page:invalid",
+            item_type="page",
+            source_validity="invalid",
+        ),
+    ]
+    session.add_all(items)
+    await session.flush()
+    session.add_all(
+        [
+            FeishuMaterialVersion(
+                version_id="review-old-failure",
+                item_id="item-review",
+                revision="1",
+                content_hash="review-old",
+                processing_status="parse_failed",
+            ),
+            FeishuMaterialVersion(
+                version_id="review-latest",
+                item_id="item-review",
+                revision="2",
+                content_hash="review-latest",
+                processing_status="awaiting_review",
+            ),
+            FeishuMaterialVersion(
+                version_id="parse-failed",
+                item_id="item-parse-failed",
+                revision="1",
+                content_hash="parse-failed",
+                processing_status="parse_failed",
+            ),
+            FeishuMaterialVersion(
+                version_id="publish-failed",
+                item_id="item-publish-failed",
+                revision="1",
+                content_hash="publish-failed",
+                processing_status="publish_failed",
+            ),
+            FeishuMaterialVersion(
+                version_id="removal-failed",
+                item_id="item-removal-failed",
+                revision="1",
+                content_hash="removal-failed",
+                processing_status="removal_failed",
+            ),
+            FeishuMaterialVersion(
+                version_id="invalid-published",
+                item_id="item-invalid",
+                revision="1",
+                content_hash="invalid-published",
+                processing_status="published",
+            ),
+        ]
+    )
+    await session.commit()
+
+    summary = await repository.get_source_summary("source-1")
+
+    assert summary.total_count == 5
+    assert summary.awaiting_review_count == 1
+    assert summary.failed_count == 3
+    assert summary.source_invalid_count == 2
+    assert summary.last_full_sync_at.replace(tzinfo=UTC) == full_started_at
+    assert summary.last_incremental_sync_at.replace(tzinfo=UTC) == incremental_started_at

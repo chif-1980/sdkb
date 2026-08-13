@@ -205,6 +205,30 @@ async def test_retry_only_accepts_failed_status_and_increments_counter(review_fi
     assert retried.retry_count == 1
 
 
+async def test_retry_rejects_removal_failed_without_changing_material(review_fixture):
+    service = FeishuReviewService(review_fixture)
+    version = await review_fixture.get(FeishuMaterialVersion, 1)
+    version.processing_status = "removal_failed"
+    version.error_message = "delete failed"
+    await review_fixture.commit()
+
+    with pytest.raises(ValueError, match="retried"):
+        await service.retry("version-old", operator_id="admin")
+
+    await review_fixture.refresh(version)
+    events = list(
+        (
+            await review_fixture.execute(
+                select(FeishuProcessingEvent).where(FeishuProcessingEvent.version_id == "version-old")
+            )
+        ).scalars()
+    )
+    assert version.processing_status == "removal_failed"
+    assert version.retry_count == 0
+    assert version.error_message == "delete failed"
+    assert events == []
+
+
 async def test_confirm_removal_requires_invalid_source_and_real_adapter(review_fixture):
     removed = []
 
@@ -1020,7 +1044,17 @@ async def test_batch_reject_requires_reason_even_when_field_is_omitted():
 
 
 async def test_query_endpoints_return_sources_runs_materials_and_events(review_fixture):
-    review_fixture.add(FeishuSyncRun(run_id="run-1", source_id="source-1", run_type="full", status="succeeded"))
+    run_started_at = datetime(2026, 8, 13, 3, tzinfo=UTC)
+    review_fixture.add(
+        FeishuSyncRun(
+            run_id="run-1",
+            source_id="source-1",
+            run_type="full",
+            status="succeeded",
+            started_at=run_started_at,
+            operator_id="admin-1",
+        )
+    )
     review_fixture.add(
         FeishuProcessingEvent(
             source_id="source-1",
@@ -1038,12 +1072,61 @@ async def test_query_endpoints_return_sources_runs_materials_and_events(review_f
     material = await router_module.get_material("version-new", db=review_fixture)
     events = await router_module.list_material_events("version-new", db=review_fixture)
 
-    assert sources["items"][0]["source_id"] == "source-1"
+    assert sources["items"][0] == {
+        "source_id": "source-1",
+        "name": "Source",
+        "wiki_root_token": "root",
+        "wiki_root_url": None,
+        "target_kb_id": "kb-1",
+        "credential_env_name": "FEISHU_ACCESS_TOKEN",
+        "enabled": True,
+        "created_at": sources["items"][0]["created_at"],
+        "updated_at": sources["items"][0]["updated_at"],
+        "last_full_sync_at": "2026-08-13T03:00:00",
+        "last_incremental_sync_at": None,
+        "total_count": 1,
+        "awaiting_review_count": 0,
+        "failed_count": 0,
+        "source_invalid_count": 0,
+    }
     assert runs["items"][0]["run_id"] == run["run_id"] == "run-1"
+    assert runs["items"][0]["operator_id"] == run["operator_id"] == "admin-1"
     assert {entry["version_id"] for entry in materials["items"]} == {"version-old", "version-new"}
     assert material["version_id"] == "version-new"
     assert material["source_url"] is None
     assert events["items"][0]["event_type"] == "parsed"
+
+
+async def test_source_list_returns_null_times_and_zero_counts_for_empty_source(review_fixture):
+    review_fixture.add(
+        FeishuSource(
+            source_id="source-empty",
+            name="Empty Source",
+            wiki_root_token="empty-root",
+            target_kb_id="kb-empty",
+            credential_env_name="FEISHU_ACCESS_TOKEN",
+        )
+    )
+    await review_fixture.commit()
+
+    response = await router_module.list_sources(db=review_fixture)
+    source = next(item for item in response["items"] if item["source_id"] == "source-empty")
+
+    assert {
+        "last_full_sync_at": source["last_full_sync_at"],
+        "last_incremental_sync_at": source["last_incremental_sync_at"],
+        "total_count": source["total_count"],
+        "awaiting_review_count": source["awaiting_review_count"],
+        "failed_count": source["failed_count"],
+        "source_invalid_count": source["source_invalid_count"],
+    } == {
+        "last_full_sync_at": None,
+        "last_incremental_sync_at": None,
+        "total_count": 0,
+        "awaiting_review_count": 0,
+        "failed_count": 0,
+        "source_invalid_count": 0,
+    }
 
 
 async def test_material_list_supports_item_type_filter_and_serializes_api_response(review_fixture):
@@ -1284,6 +1367,34 @@ async def test_retry_endpoint_increments_and_queues_processing_task(monkeypatch)
     assert calls[2][1]["task_type"] == "feishu_process"
     assert calls[2][1]["payload_match"] == {"version_id": "version-new"}
     assert calls[2][1]["statuses"] == {"pending"}
+
+
+async def test_retry_endpoint_rejects_removal_failed_without_enqueue(monkeypatch, review_fixture):
+    enqueue_calls = []
+    version = await review_fixture.get(FeishuMaterialVersion, 1)
+    version.processing_status = "removal_failed"
+    version.error_message = "delete failed"
+    await review_fixture.commit()
+
+    async def record_enqueue(*args, **kwargs):
+        enqueue_calls.append((args, kwargs))
+        return SimpleNamespace(id="unexpected-task")
+
+    monkeypatch.setattr(router_module, "_enqueue_processing", record_enqueue)
+    monkeypatch.setattr(router_module, "_enqueue_publish", record_enqueue)
+
+    async with await _database_client(
+        review_fixture,
+        user=SimpleNamespace(uid="admin", role="admin"),
+    ) as client:
+        response = await client.post("/api/feishu-knowledge/materials/version-old/retry")
+
+    await review_fixture.refresh(version)
+    assert response.status_code == 409
+    assert version.processing_status == "removal_failed"
+    assert version.retry_count == 0
+    assert version.error_message == "delete failed"
+    assert enqueue_calls == []
 
 
 @pytest.mark.parametrize(

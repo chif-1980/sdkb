@@ -17,7 +17,10 @@ from server.utils.auth_middleware import get_admin_user, get_db
 from yuxi.integrations.feishu import FeishuClient, FeishuClientError
 from yuxi.integrations.feishu.service import FeishuScanService
 from yuxi.knowledge.runtime import knowledge_base
-from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository as _BaseRepository
+from yuxi.repositories.feishu_knowledge_repository import (
+    FeishuKnowledgeRepository as _BaseRepository,
+    FeishuSourceSummary,
+)
 from yuxi.services.task_service import TaskContext, tasker
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
@@ -230,6 +233,7 @@ class FeishuKnowledgeRepository(_BaseRepository):
 
 class FeishuReviewService:
     APPROVABLE_STATUSES = {"parsed", "awaiting_review"}
+    RETRYABLE_STATUSES = {"parse_failed", "publish_failed"}
 
     def __init__(self, session: AsyncSession, *, removal_adapter: RemovalAdapter | None = None) -> None:
         self.session = session
@@ -285,7 +289,7 @@ class FeishuReviewService:
     async def retry(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
         async with self._transaction():
             version, item, _ = await self._get_material(version_id, lock=True)
-            if not self._is_failed_status(version.processing_status):
+            if version.processing_status not in self.RETRYABLE_STATUSES:
                 raise ValueError("Only failed material can be retried")
             from_status = version.processing_status
             version.processing_status = "publish_queued" if from_status == "publish_failed" else "processing_queued"
@@ -610,10 +614,6 @@ class FeishuReviewService:
             )
         )
 
-    @staticmethod
-    def _is_failed_status(value: str) -> bool:
-        return value == "failed" or value.endswith("_failed") or value.startswith("error_")
-
     @asynccontextmanager
     async def _transaction(self):
         transaction = self.session.begin_nested() if self.session.in_transaction() else self.session.begin()
@@ -685,8 +685,8 @@ def _iso(value):
     return value.isoformat() if value is not None else None
 
 
-def _source_dict(source: FeishuSource) -> dict:
-    return {
+def _source_dict(source: FeishuSource, summary: FeishuSourceSummary | None = None) -> dict:
+    data = {
         "source_id": source.source_id,
         "name": source.name,
         "wiki_root_token": source.wiki_root_token,
@@ -697,6 +697,18 @@ def _source_dict(source: FeishuSource) -> dict:
         "created_at": _iso(getattr(source, "created_at", None)),
         "updated_at": _iso(getattr(source, "updated_at", None)),
     }
+    if summary is not None:
+        data.update(
+            {
+                "last_full_sync_at": _iso(summary.last_full_sync_at),
+                "last_incremental_sync_at": _iso(summary.last_incremental_sync_at),
+                "total_count": summary.total_count,
+                "awaiting_review_count": summary.awaiting_review_count,
+                "failed_count": summary.failed_count,
+                "source_invalid_count": summary.source_invalid_count,
+            }
+        )
+    return data
 
 
 def _run_dict(run: FeishuSyncRun) -> dict:
@@ -705,6 +717,7 @@ def _run_dict(run: FeishuSyncRun) -> dict:
         "source_id": run.source_id,
         "run_type": run.run_type,
         "status": run.status,
+        "operator_id": run.operator_id,
         "started_at": _iso(run.started_at),
         "finished_at": _iso(run.finished_at),
         "scanned_count": run.scanned_count or 0,
@@ -774,7 +787,12 @@ def _event_dict(event: FeishuProcessingEvent) -> dict:
 @feishu_knowledge.get("/sources")
 async def list_sources(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(FeishuSource).order_by(FeishuSource.created_at.desc()))
-    return {"items": [_source_dict(source) for source in result.scalars()]}
+    repository = FeishuKnowledgeRepository(db)
+    items = []
+    for source in result.scalars():
+        summary = await repository.get_source_summary(source.source_id)
+        items.append(_source_dict(source, summary))
+    return {"items": items}
 
 
 @feishu_knowledge.post("/sources", status_code=201)

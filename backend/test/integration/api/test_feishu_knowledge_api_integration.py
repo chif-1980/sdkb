@@ -187,6 +187,17 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
             assert source_id == "source-1"
             return source
 
+        async def get_source_summary(self, source_id):
+            assert source_id == "source-1"
+            return SimpleNamespace(
+                last_full_sync_at=None,
+                last_incremental_sync_at=None,
+                total_count=0,
+                awaiting_review_count=0,
+                failed_count=0,
+                source_invalid_count=0,
+            )
+
         async def queue_sync_run(self, **kwargs):
             calls.append(("queue_scan", kwargs))
             return SimpleNamespace(run_id="run-1")
@@ -262,7 +273,23 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
     assert scanned.status_code == 202
     assert scanned.json() == {"task_id": "task-scan", "run_id": "run-1", "status": "queued", "created": True}
     assert queried.status_code == 200
-    assert queried.json()["items"][0]["source_id"] == "source-1"
+    assert queried.json()["items"][0] == {
+        "source_id": "source-1",
+        "name": "Docs",
+        "wiki_root_token": "root",
+        "wiki_root_url": None,
+        "target_kb_id": "kb-1",
+        "credential_env_name": "FEISHU_ACCESS_TOKEN",
+        "enabled": True,
+        "created_at": None,
+        "updated_at": None,
+        "last_full_sync_at": None,
+        "last_incremental_sync_at": None,
+        "total_count": 0,
+        "awaiting_review_count": 0,
+        "failed_count": 0,
+        "source_invalid_count": 0,
+    }
     assert rejected.status_code == 200
     assert rejected.json() == {"version_id": "version-1", "status": "rejected"}
     assert approved.status_code == 202
