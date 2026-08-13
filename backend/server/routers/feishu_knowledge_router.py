@@ -878,6 +878,20 @@ async def scan_source(
                     )
                     await session.commit()
                     raise
+                try:
+                    await session.commit()
+                except Exception as commit_exc:
+                    await session.rollback()
+                    error_summary = result.error_summary or f"{type(commit_exc).__name__}: {commit_exc}"
+                    async with pg_manager.get_async_session_context() as recovery_session:
+                        await FeishuKnowledgeRepository(recovery_session).fail_sync_run(
+                            run_id=run.run_id,
+                            source_id=source_id,
+                            error_summary=error_summary,
+                            operator_id=current_user.uid,
+                        )
+                        await recovery_session.commit()
+                    raise
                 await context.set_result({"run_id": result.run_id, "status": result.status})
                 if result.status != "succeeded":
                     raise RuntimeError(result.error_summary or "Feishu scan failed")

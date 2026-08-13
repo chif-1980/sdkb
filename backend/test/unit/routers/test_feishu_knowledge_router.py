@@ -8,11 +8,13 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from server.routers import feishu_knowledge_router as router_module
 from server.routers.feishu_knowledge_router import FeishuReviewService, feishu_knowledge
 from server.utils.auth_middleware import get_admin_user, get_current_user, get_db
+from yuxi.integrations.feishu.client import FeishuPermissionError
+from yuxi.integrations.feishu.schemas import FeishuNode, FeishuPageContent
 from yuxi.knowledge.utils.kb_utils import prepare_item_metadata
 from yuxi.repositories.feishu_knowledge_repository import ConcurrentSyncRunError, FeishuKnowledgeRepository
 from yuxi.storage.postgres.models_business import Base
@@ -107,6 +109,62 @@ async def _database_client(session, *, user=None):
     app.dependency_overrides[get_admin_user] = admin_override
     app.dependency_overrides[get_db] = db_override
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+class _FailingAfterArchiveFeishuClient:
+    async def get_node(self, node_token):
+        assert node_token == "root"
+        return FeishuNode(
+            space_id="space-1",
+            node_token="root",
+            obj_token="obj-root",
+            obj_type="docx",
+            title="Root",
+            has_child=True,
+            source_updated_at="2026-08-13T00:00:00Z",
+        )
+
+    async def get_wiki_document(self, node):
+        assert node.node_token == "root"
+        return FeishuPageContent(content=b"# Root", revision="1")
+
+    async def list_children(self, parent_node_token):
+        assert parent_node_token == "root"
+        raise FeishuPermissionError("permission denied")
+
+    async def aclose(self):
+        pass
+
+
+class _StableArchiveAdapter:
+    async def archive(self, **kwargs):
+        return (
+            f"minio://knowledgebases/feishu/{kwargs['source_id']}/{kwargs['item_id']}/{kwargs['version_id']}/source.md"
+        )
+
+
+@asynccontextmanager
+async def _production_session_context(session_factory):
+    async with session_factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _seed_feishu_source(session_factory):
+    async with session_factory() as session:
+        await router_module.FeishuKnowledgeRepository(session).get_or_create_source(
+            source_id="source-1",
+            name="Source",
+            wiki_root_token="root",
+            wiki_root_url="https://example.feishu.cn/wiki/root",
+            target_kb_id="kb-1",
+            credential_env_name="FEISHU_ACCESS_TOKEN",
+        )
+        await session.commit()
 
 
 async def test_router_module_exposes_all_admin_endpoints():
@@ -400,10 +458,159 @@ async def test_successful_scan_queues_archived_material_processing(monkeypatch):
 
     assert calls == [
         "request_commit",
+        "worker_commit",
         ("claim", "source-1", "admin"),
         "worker_commit",
         ("processing", "version-1", "admin"),
     ]
+
+
+async def test_failed_scan_commits_domain_state_before_task_failure(monkeypatch, tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'failed-scan.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    captured = {}
+    processing_calls = []
+
+    async def capture_scan(**kwargs):
+        captured["coroutine"] = kwargs["coroutine"]
+        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+
+    async def unexpected_processing(version_id, *, operator_id):
+        processing_calls.append((version_id, operator_id))
+
+    monkeypatch.setattr(router_module, "FeishuClient", lambda **kwargs: _FailingAfterArchiveFeishuClient())
+    monkeypatch.setattr(router_module, "MinioFeishuArchiveAdapter", lambda: _StableArchiveAdapter())
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        lambda: _production_session_context(session_factory),
+    )
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+    monkeypatch.setattr(router_module, "_enqueue_processing", unexpected_processing)
+
+    await _seed_feishu_source(session_factory)
+    async with session_factory() as request_session:
+        response = await router_module.scan_source(
+            "source-1",
+            router_module.ScanRequest(mode="full"),
+            db=request_session,
+            current_user=SimpleNamespace(uid="admin"),
+        )
+
+    result_values = []
+
+    class Context:
+        async def set_result(self, value):
+            result_values.append(value)
+
+    with pytest.raises(RuntimeError, match="FeishuPermissionError: permission denied"):
+        await captured["coroutine"](Context())
+
+    async with session_factory() as verification_session:
+        run = await verification_session.scalar(select(FeishuSyncRun).where(FeishuSyncRun.run_id == response["run_id"]))
+        events = list(
+            (
+                await verification_session.execute(
+                    select(FeishuProcessingEvent).where(FeishuProcessingEvent.event_type == "scan_failed")
+                )
+            ).scalars()
+        )
+        version = await verification_session.scalar(select(FeishuMaterialVersion))
+
+        assert run.status == "failed"
+        assert "FeishuPermissionError: permission denied" in run.error_summary
+        assert len(events) == 1
+        assert events[0].payload_json == {"run_id": run.run_id}
+        assert version.source_object_path
+        assert version.processing_params["object_path"] == version.source_object_path
+        assert version.processing_status == "discovered"
+
+        next_run = await router_module.FeishuKnowledgeRepository(verification_session).queue_sync_run(
+            source_id="source-1",
+            run_type="full",
+            operator_id="admin",
+        )
+        await verification_session.commit()
+        claimed = await router_module.FeishuKnowledgeRepository(
+            verification_session,
+            queued_run_id=next_run.run_id,
+        ).start_sync_run(source_id="source-1", run_type="full", operator_id="admin")
+        assert claimed.status == "running"
+
+    assert result_values == [{"run_id": response["run_id"], "status": "failed"}]
+    assert processing_calls == []
+    await engine.dispose()
+
+
+async def test_scan_domain_commit_failure_uses_fresh_session_to_fail_run(monkeypatch, tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'commit-failure.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    request_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    commit_calls = 0
+
+    class FailFirstCommitSession(AsyncSession):
+        async def commit(self):
+            nonlocal commit_calls
+            commit_calls += 1
+            if commit_calls == 1:
+                raise RuntimeError("forced domain commit failure")
+            await super().commit()
+
+    worker_session_factory = async_sessionmaker(
+        engine,
+        class_=FailFirstCommitSession,
+        expire_on_commit=False,
+    )
+    captured = {}
+
+    async def capture_scan(**kwargs):
+        captured["coroutine"] = kwargs["coroutine"]
+        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+
+    monkeypatch.setattr(router_module, "FeishuClient", lambda **kwargs: _FailingAfterArchiveFeishuClient())
+    monkeypatch.setattr(router_module, "MinioFeishuArchiveAdapter", lambda: _StableArchiveAdapter())
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        lambda: _production_session_context(worker_session_factory),
+    )
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+
+    await _seed_feishu_source(request_session_factory)
+    async with request_session_factory() as request_session:
+        response = await router_module.scan_source(
+            "source-1",
+            router_module.ScanRequest(mode="full"),
+            db=request_session,
+            current_user=SimpleNamespace(uid="admin"),
+        )
+
+    class Context:
+        async def set_result(self, value):
+            pass
+
+    with pytest.raises(RuntimeError, match="forced domain commit failure"):
+        await captured["coroutine"](Context())
+
+    async with request_session_factory() as verification_session:
+        run = await verification_session.scalar(select(FeishuSyncRun).where(FeishuSyncRun.run_id == response["run_id"]))
+        events = list(
+            (
+                await verification_session.execute(
+                    select(FeishuProcessingEvent).where(FeishuProcessingEvent.event_type == "scan_failed")
+                )
+            ).scalars()
+        )
+
+    assert commit_calls >= 2
+    assert run.status == "failed"
+    assert run.error_summary == "FeishuPermissionError: permission denied"
+    assert len(events) == 1
+    assert events[0].payload_json == {"run_id": run.run_id}
+    await engine.dispose()
 
 
 @pytest.mark.parametrize("failure_stage", ["source_lookup", "client_constructor"])
