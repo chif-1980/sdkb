@@ -411,12 +411,24 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_source_items_item_key ON feishu_source_items(item_key)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_material_versions_identity ON feishu_material_versions(item_id, revision, content_hash)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_material_versions_identity "
+                "ON feishu_material_versions(item_id, revision, content_hash)"
+            ),
             "CREATE INDEX IF NOT EXISTS ix_feishu_sources_target_kb_id ON feishu_sources(target_kb_id)",
             "CREATE INDEX IF NOT EXISTS ix_feishu_sync_runs_source_status ON feishu_sync_runs(source_id, status)",
-            "CREATE INDEX IF NOT EXISTS ix_feishu_source_items_source_validity ON feishu_source_items(source_id, source_validity)",
-            "CREATE INDEX IF NOT EXISTS ix_feishu_material_versions_item_status ON feishu_material_versions(item_id, processing_status)",
-            "CREATE INDEX IF NOT EXISTS ix_feishu_processing_events_item_created ON feishu_processing_events(item_id, created_at)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_source_items_source_validity "
+                "ON feishu_source_items(source_id, source_validity)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_material_versions_item_status "
+                "ON feishu_material_versions(item_id, processing_status)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_processing_events_item_created "
+                "ON feishu_processing_events(item_id, created_at)"
+            ),
             "CREATE INDEX IF NOT EXISTS idx_kb_type ON knowledge_bases(kb_type)",
             "CREATE INDEX IF NOT EXISTS idx_kb_name ON knowledge_bases(name)",
             "CREATE INDEX IF NOT EXISTS idx_kf_kb_id ON knowledge_files(kb_id)",

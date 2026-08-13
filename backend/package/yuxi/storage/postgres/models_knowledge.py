@@ -319,7 +319,9 @@ class FeishuSyncRun(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String(64), nullable=False, unique=True, index=True)
-    source_id = Column(String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id = Column(
+        String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, index=True
+    )
     run_type = Column(String(32), nullable=False)
     status = Column(String(32), nullable=False, default="running", index=True)
     started_at = Column(DateTime(timezone=True), default=utc_now_naive)
@@ -346,7 +348,9 @@ class FeishuSourceItem(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     item_id = Column(String(64), nullable=False, unique=True, index=True)
-    source_id = Column(String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id = Column(
+        String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, index=True
+    )
     item_key = Column(String(512), nullable=False, unique=True)
     item_type = Column(String(32), nullable=False)
     title = Column(String(512))
@@ -372,7 +376,9 @@ class FeishuMaterialVersion(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     version_id = Column(String(64), nullable=False, unique=True, index=True)
-    item_id = Column(String(64), ForeignKey("feishu_source_items.item_id", ondelete="CASCADE"), nullable=False, index=True)
+    item_id = Column(
+        String(64), ForeignKey("feishu_source_items.item_id", ondelete="CASCADE"), nullable=False, index=True
+    )
     revision = Column(String(128), nullable=False)
     content_hash = Column(String(128), nullable=False)
     source_object_path = Column(String(1024))
@@ -402,7 +408,9 @@ class FeishuProcessingEvent(Base):
     __table_args__ = (Index("ix_feishu_processing_events_item_created", "item_id", "created_at"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    source_id = Column(String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id = Column(
+        String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, index=True
+    )
     item_id = Column(String(64), ForeignKey("feishu_source_items.item_id", ondelete="CASCADE"), index=True)
     version_id = Column(String(64), ForeignKey("feishu_material_versions.version_id", ondelete="CASCADE"), index=True)
     event_type = Column(String(64), nullable=False)
