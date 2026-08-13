@@ -1,0 +1,749 @@
+"""Unit contracts for the Feishu knowledge admin API (Task 4)."""
+
+from types import SimpleNamespace
+
+import pytest
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from server.routers import feishu_knowledge_router as router_module
+from server.routers.feishu_knowledge_router import FeishuReviewService, feishu_knowledge
+from server.utils.auth_middleware import get_admin_user, get_current_user, get_db
+from yuxi.storage.postgres.models_business import Base
+from yuxi.storage.postgres.models_knowledge import (
+    FeishuMaterialVersion,
+    FeishuProcessingEvent,
+    FeishuSource,
+    FeishuSourceItem,
+    FeishuSyncRun,
+)
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+async def review_fixture():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        source = FeishuSource(
+            source_id="source-1",
+            name="Source",
+            wiki_root_token="root",
+            target_kb_id="kb-1",
+            credential_env_name="FEISHU_ACCESS_TOKEN",
+        )
+        item = FeishuSourceItem(
+            item_id="item-1",
+            source_id="source-1",
+            item_key="page:space:node",
+            item_type="page",
+            title="Page",
+            source_validity="valid",
+            active_version_id="version-old",
+        )
+        old = FeishuMaterialVersion(
+            version_id="version-old",
+            item_id="item-1",
+            revision="1",
+            content_hash="old-hash",
+            processing_status="published",
+            review_status="approved",
+            yuxi_file_id="file-old",
+        )
+        current = FeishuMaterialVersion(
+            version_id="version-new",
+            item_id="item-1",
+            revision="2",
+            content_hash="new-hash",
+            processing_status="parsed",
+            review_status="pending",
+        )
+        session.add_all([source, item, old, current])
+        await session.commit()
+        yield session
+    await engine.dispose()
+
+
+async def _client(*, user=None):
+    app = FastAPI()
+    app.include_router(feishu_knowledge, prefix="/api")
+
+    async def admin_override():
+        if user is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=401, detail="not authenticated")
+        return user
+
+    async def db_override():
+        yield SimpleNamespace()
+
+    app.dependency_overrides[get_admin_user] = admin_override
+    app.dependency_overrides[get_db] = db_override
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def _database_client(session, *, user=None):
+    app = FastAPI()
+    app.include_router(feishu_knowledge, prefix="/api")
+
+    async def admin_override():
+        if user is None:
+            raise HTTPException(status_code=401, detail="not authenticated")
+        return user
+
+    async def db_override():
+        yield session
+
+    app.dependency_overrides[get_admin_user] = admin_override
+    app.dependency_overrides[get_db] = db_override
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def test_router_module_exposes_all_admin_endpoints():
+    paths = {route.path for route in feishu_knowledge.routes}
+    assert "/feishu-knowledge/sources" in paths
+    assert "/feishu-knowledge/sources/{source_id}/scan" in paths
+    assert "/feishu-knowledge/materials/{version_id}/approve" in paths
+    assert "/feishu-knowledge/materials/batch-action" in paths
+
+
+async def test_batch_action_rejects_empty_or_more_than_100_items():
+    async with await _client(user=SimpleNamespace(uid="admin", role="admin")) as client:
+        empty = await client.post(
+            "/api/feishu-knowledge/materials/batch-action", json={"action": "approve", "version_ids": []}
+        )
+        too_many = await client.post(
+            "/api/feishu-knowledge/materials/batch-action",
+            json={"action": "approve", "version_ids": [str(i) for i in range(101)]},
+        )
+    assert empty.status_code == 422
+    assert too_many.status_code == 422
+
+
+async def test_reject_requires_non_blank_reason():
+    async with await _client(user=SimpleNamespace(uid="admin", role="admin")) as client:
+        response = await client.post(
+            "/api/feishu-knowledge/materials/version-1/reject",
+            json={"reason": "   "},
+        )
+    assert response.status_code == 422
+
+
+async def test_scan_only_accepts_full_or_incremental():
+    async with await _client(user=SimpleNamespace(uid="admin", role="admin")) as client:
+        response = await client.post(
+            "/api/feishu-knowledge/sources/source-1/scan",
+            json={"mode": "delta"},
+        )
+    assert response.status_code == 422
+
+
+async def test_approve_queues_publish_without_replacing_active(review_fixture):
+    service = FeishuReviewService(review_fixture)
+
+    material = await service.approve("version-new", operator_id="admin")
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    assert material.review_status == "approved"
+    assert material.processing_status == "publish_queued"
+    assert item.active_version_id == "version-old"
+
+
+async def test_publish_success_switches_active_and_replaces_old_version(review_fixture):
+    service = FeishuReviewService(review_fixture)
+    await service.approve("version-new", operator_id="admin")
+
+    await service.mark_publish_succeeded("version-new", yuxi_file_id="file-new")
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    old = await review_fixture.get(FeishuMaterialVersion, 1)
+    new = await review_fixture.get(FeishuMaterialVersion, 2)
+    assert item.active_version_id == "version-new"
+    assert old.processing_status == "replaced"
+    assert old.replaced_at is not None
+    assert new.processing_status == "published"
+    assert new.yuxi_file_id == "file-new"
+
+
+async def test_publish_failure_keeps_old_active_and_records_event(review_fixture):
+    service = FeishuReviewService(review_fixture)
+    await service.approve("version-new", operator_id="admin")
+
+    await service.mark_publish_failed("version-new", message="index failed")
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    new = await review_fixture.get(FeishuMaterialVersion, 2)
+    assert item.active_version_id == "version-old"
+    assert new.processing_status == "publish_failed"
+    assert new.error_message == "index failed"
+    events = (await review_fixture.execute(FeishuProcessingEvent.__table__.select())).all()
+    assert events[-1].event_type == "publish_failed"
+
+
+async def test_retry_only_accepts_failed_status_and_increments_counter(review_fixture):
+    service = FeishuReviewService(review_fixture)
+    with pytest.raises(ValueError, match="failed"):
+        await service.retry("version-new", operator_id="admin")
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.processing_status = "parse_failed"
+    await review_fixture.commit()
+    retried = await service.retry("version-new", operator_id="admin")
+    assert retried.processing_status == "processing_queued"
+    assert retried.retry_count == 1
+
+
+async def test_confirm_removal_requires_invalid_source_and_real_adapter(review_fixture):
+    removed = []
+
+    class RemovalAdapter:
+        async def remove(self, *, kb_id: str, file_id: str) -> None:
+            removed.append((kb_id, file_id))
+
+    service = FeishuReviewService(review_fixture, removal_adapter=RemovalAdapter())
+    with pytest.raises(ValueError, match="invalid"):
+        await service.confirm_removal("version-old", operator_id="admin")
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    item.source_validity = "invalid"
+    await review_fixture.commit()
+    removed_version = await service.confirm_removal("version-old", operator_id="admin")
+    assert removed == [("kb-1", "file-old")]
+    assert removed_version.processing_status == "removed"
+    assert item.active_version_id is None
+
+
+async def test_scan_uses_unique_task_by_source_and_returns_task_and_run_ids(monkeypatch):
+    captured = {}
+
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_source(self, source_id):
+            assert source_id == "source-1"
+            return SimpleNamespace(source_id=source_id, name="Source")
+
+        async def queue_sync_run(self, **kwargs):
+            captured["run"] = kwargs
+            return SimpleNamespace(run_id="run-1")
+
+    async def fake_enqueue_unique_by_payload(**kwargs):
+        captured["task"] = kwargs
+        return SimpleNamespace(id="task-1"), True
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", fake_enqueue_unique_by_payload)
+
+    result = await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="full"),
+        db=SimpleNamespace(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    assert result == {"task_id": "task-1", "run_id": "run-1", "status": "queued", "created": True}
+    assert captured["task"]["payload_match"] == {"source_id": "source-1"}
+    assert captured["task"]["statuses"] == {"pending", "running"}
+
+
+async def test_duplicate_scan_returns_existing_task_and_rolls_back_unused_run(monkeypatch):
+    captured = {"cancelled": []}
+
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(source_id=source_id, name="Source")
+
+        async def queue_sync_run(self, **kwargs):
+            return SimpleNamespace(run_id="run-unused")
+
+        async def cancel_queued_run(self, run_id):
+            captured["cancelled"].append(run_id)
+
+    async def fake_enqueue_unique_by_payload(**kwargs):
+        return SimpleNamespace(id="task-existing", payload={"run_id": "run-existing"}), False
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", fake_enqueue_unique_by_payload)
+
+    result = await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="incremental"),
+        db=SimpleNamespace(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    assert result["task_id"] == "task-existing"
+    assert result["run_id"] == "run-existing"
+    assert result["created"] is False
+    assert captured["cancelled"] == ["run-unused"]
+
+
+async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
+    calls = []
+
+    class FakeKnowledgeBase:
+        async def add_file_record(self, kb_id, object_path, *, params, operator_id):
+            calls.append(("add", kb_id, object_path, params, operator_id))
+            return {"file_id": "file-new", "status": "uploaded"}
+
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            calls.append(("parse", kb_id, file_id, operator_id))
+            return {"status": "parsed"}
+
+        async def index_file(self, kb_id, file_id, *, operator_id, params):
+            calls.append(("index", kb_id, file_id, operator_id, params))
+            return {"status": "indexed", "chunk_count": 3}
+
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+    adapter = router_module.KnowledgePublishAdapter()
+    result = await adapter.publish(
+        kb_id="kb-1",
+        object_path="minio://knowledgebases/feishu/source/version/page.md",
+        source_url="https://feishu.example/wiki/node",
+        wiki_path="Root / Page",
+        version_id="version-new",
+        page_info={"page_number": 2},
+        operator_id="admin",
+    )
+
+    assert result.file_id == "file-new"
+    params = calls[0][3]["feishu"]
+    assert params == {
+        "source_url": "https://feishu.example/wiki/node",
+        "wiki_path": "Root / Page",
+        "material_version": "version-new",
+        "page_info": {"page_number": 2},
+    }
+    assert [call[0] for call in calls] == ["add", "parse", "index"]
+
+
+async def test_router_requires_login_and_admin_role():
+    app = FastAPI()
+    app.include_router(feishu_knowledge, prefix="/api")
+
+    async def fake_db():
+        yield SimpleNamespace()
+
+    app.dependency_overrides[get_db] = fake_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        anonymous = await client.get("/api/feishu-knowledge/sources")
+
+    async def standard_user():
+        return SimpleNamespace(role="user", department_id=1)
+
+    app.dependency_overrides[get_current_user] = standard_user
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        forbidden = await client.get("/api/feishu-knowledge/sources")
+
+    assert anonymous.status_code == 401
+    assert forbidden.status_code == 403
+
+
+async def test_create_source_persists_only_credential_environment_name(monkeypatch):
+    captured = {}
+
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_or_create_source(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    result = await router_module.create_source(
+        router_module.SourceCreate(
+            name="Docs",
+            wiki_root_token="root",
+            target_kb_id="kb-1",
+            credential_env_name="FEISHU_DOCS_TOKEN",
+        ),
+        db=SimpleNamespace(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+    assert result["credential_env_name"] == "FEISHU_DOCS_TOKEN"
+    assert "credential" not in captured
+    assert captured["created_by"] == "admin"
+
+
+async def test_create_source_rejects_blank_identifiers_before_repository_call(monkeypatch):
+    called = False
+
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_or_create_source(self, **kwargs):
+            nonlocal called
+            called = True
+            return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    async with await _client(user=SimpleNamespace(uid="admin", role="admin")) as client:
+        response = await client.post(
+            "/api/feishu-knowledge/sources",
+            json={
+                "name": "   ",
+                "wiki_root_token": "root",
+                "target_kb_id": "kb-1",
+                "credential_env_name": "FEISHU_DOCS_TOKEN",
+            },
+        )
+
+    assert response.status_code == 422
+    assert called is False
+
+
+async def test_check_source_uses_read_only_feishu_client(monkeypatch):
+    calls = []
+
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(
+                source_id=source_id,
+                wiki_root_token="root",
+                credential_env_name="FEISHU_DOCS_TOKEN",
+            )
+
+    class FakeClient:
+        def __init__(self, *, credential_env_name):
+            calls.append(("init", credential_env_name))
+
+        async def get_node(self, node_token):
+            calls.append(("get", node_token))
+            return SimpleNamespace(node_token=node_token, title="Root")
+
+        async def aclose(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    result = await router_module.check_source("source-1", db=SimpleNamespace())
+    assert result == {"status": "ok", "source_id": "source-1", "root_title": "Root"}
+    assert calls == [("init", "FEISHU_DOCS_TOKEN"), ("get", "root"), ("close",)]
+
+
+async def test_check_source_maps_client_initialization_error_to_422(monkeypatch):
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(
+                source_id=source_id,
+                wiki_root_token="root",
+                credential_env_name="MISSING_FEISHU_TOKEN",
+            )
+
+    class FailingClient:
+        def __init__(self, *, credential_env_name):
+            raise router_module.FeishuClientError(f"Missing credential: {credential_env_name}")
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module, "FeishuClient", FailingClient)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router_module.check_source("source-1", db=SimpleNamespace())
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "Missing credential: MISSING_FEISHU_TOKEN"
+
+
+async def test_check_source_maps_read_failure_to_422_and_closes_client(monkeypatch):
+    closed = False
+
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(
+                source_id=source_id,
+                wiki_root_token="root",
+                credential_env_name="FEISHU_DOCS_TOKEN",
+            )
+
+    class FailingClient:
+        def __init__(self, *, credential_env_name):
+            assert credential_env_name == "FEISHU_DOCS_TOKEN"
+
+        async def get_node(self, node_token):
+            assert node_token == "root"
+            raise router_module.FeishuClientError("Feishu root is not readable")
+
+        async def aclose(self):
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module, "FeishuClient", FailingClient)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router_module.check_source("source-1", db=SimpleNamespace())
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "Feishu root is not readable"
+    assert closed is True
+
+
+async def test_approve_endpoint_queues_real_publish_task(monkeypatch):
+    calls = []
+
+    class FakeReviewService:
+        def __init__(self, _session):
+            pass
+
+        async def approve(self, version_id, *, operator_id):
+            calls.append(("approve", version_id, operator_id))
+            return SimpleNamespace(version_id=version_id, processing_status="publish_queued")
+
+    async def fake_enqueue(**kwargs):
+        calls.append(("enqueue", kwargs))
+        return SimpleNamespace(id="task-publish")
+
+    monkeypatch.setattr(router_module, "FeishuReviewService", FakeReviewService)
+    monkeypatch.setattr(router_module.tasker, "enqueue", fake_enqueue)
+    result = await router_module.approve_material(
+        "version-new",
+        db=SimpleNamespace(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+    assert result == {"version_id": "version-new", "status": "publish_queued", "task_id": "task-publish"}
+    assert calls[1][1]["task_type"] == "feishu_publish"
+    assert calls[1][1]["payload"] == {"version_id": "version-new"}
+
+
+async def test_batch_reject_requires_reason_even_when_field_is_omitted():
+    async with await _client(user=SimpleNamespace(uid="admin", role="admin")) as client:
+        response = await client.post(
+            "/api/feishu-knowledge/materials/batch-action",
+            json={"action": "reject", "version_ids": ["version-1"]},
+        )
+    assert response.status_code == 422
+
+
+async def test_query_endpoints_return_sources_runs_materials_and_events(review_fixture):
+    review_fixture.add(FeishuSyncRun(run_id="run-1", source_id="source-1", run_type="full", status="succeeded"))
+    review_fixture.add(
+        FeishuProcessingEvent(
+            source_id="source-1",
+            item_id="item-1",
+            version_id="version-new",
+            event_type="parsed",
+        )
+    )
+    await review_fixture.commit()
+
+    sources = await router_module.list_sources(db=review_fixture)
+    runs = await router_module.list_source_runs("source-1", db=review_fixture)
+    run = await router_module.get_run("run-1", db=review_fixture)
+    materials = await router_module.list_materials("source-1", db=review_fixture)
+    material = await router_module.get_material("version-new", db=review_fixture)
+    events = await router_module.list_material_events("version-new", db=review_fixture)
+
+    assert sources["items"][0]["source_id"] == "source-1"
+    assert runs["items"][0]["run_id"] == run["run_id"] == "run-1"
+    assert {entry["version_id"] for entry in materials["items"]} == {"version-old", "version-new"}
+    assert material["version_id"] == "version-new"
+    assert material["source_url"] is None
+    assert events["items"][0]["event_type"] == "parsed"
+
+
+async def test_material_list_supports_item_type_filter_and_serializes_api_response(review_fixture):
+    attachment = FeishuSourceItem(
+        item_id="item-attachment",
+        source_id="source-1",
+        item_key="attachment:space:file",
+        item_type="attachment",
+        title="Guide.pdf",
+        source_validity="valid",
+    )
+    attachment_version = FeishuMaterialVersion(
+        version_id="version-attachment",
+        item_id="item-attachment",
+        revision="1",
+        content_hash="attachment-hash",
+        processing_status="parsed",
+        review_status="pending",
+    )
+    review_fixture.add_all([attachment, attachment_version])
+    await review_fixture.commit()
+
+    async with await _database_client(
+        review_fixture,
+        user=SimpleNamespace(uid="admin", role="admin"),
+    ) as client:
+        response = await client.get(
+            "/api/feishu-knowledge/sources/source-1/materials",
+            params={"item_type": "attachment", "processing_status": "parsed"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "version_id": "version-attachment",
+                "item_id": "item-attachment",
+                "source_id": "source-1",
+                "title": "Guide.pdf",
+                "item_type": "attachment",
+                "source_validity": "valid",
+                "active": False,
+                "source_url": None,
+                "wiki_path": None,
+                "target_kb_id": "kb-1",
+                "revision": "1",
+                "content_hash": "attachment-hash",
+                "source_object_path": None,
+                "parsed_object_path": None,
+                "processing_status": "parsed",
+                "processing_params": {},
+                "error_code": None,
+                "error_message": None,
+                "review_status": "pending",
+                "reviewer_id": None,
+                "reviewed_at": None,
+                "review_comment": None,
+                "retry_count": 0,
+                "yuxi_file_id": None,
+                "chunk_count": 0,
+                "token_count": 0,
+                "published_at": None,
+                "replaced_at": None,
+                "created_at": attachment_version.created_at.isoformat(),
+                "updated_at": attachment_version.updated_at.isoformat(),
+            }
+        ]
+    }
+
+
+async def test_material_queries_return_404_for_missing_parent_or_material(review_fixture):
+    async with await _database_client(
+        review_fixture,
+        user=SimpleNamespace(uid="admin", role="admin"),
+    ) as client:
+        missing_source = await client.get("/api/feishu-knowledge/sources/missing/materials")
+        missing_material = await client.get("/api/feishu-knowledge/materials/missing")
+        missing_events = await client.get("/api/feishu-knowledge/materials/missing/events")
+
+    assert missing_source.status_code == 404
+    assert missing_material.status_code == 404
+    assert missing_events.status_code == 404
+
+
+async def test_reject_endpoint_maps_missing_and_state_conflict(review_fixture):
+    async with await _database_client(
+        review_fixture,
+        user=SimpleNamespace(uid="admin", role="admin"),
+    ) as client:
+        missing = await client.post(
+            "/api/feishu-knowledge/materials/missing/reject",
+            json={"reason": "not relevant"},
+        )
+        first = await client.post(
+            "/api/feishu-knowledge/materials/version-new/reject",
+            json={"reason": "not relevant"},
+        )
+        conflict = await client.post(
+            "/api/feishu-knowledge/materials/version-new/reject",
+            json={"reason": "still not relevant"},
+        )
+
+    assert missing.status_code == 404
+    assert first.status_code == 200
+    assert first.json() == {"version_id": "version-new", "status": "rejected"}
+    assert conflict.status_code == 409
+
+
+async def test_reject_endpoint_persists_reason_and_does_not_publish(review_fixture):
+    result = await router_module.reject_material(
+        "version-new",
+        router_module.RejectRequest(reason="Not approved for production"),
+        db=review_fixture,
+        current_user=SimpleNamespace(uid="admin"),
+    )
+    material = await review_fixture.get(FeishuMaterialVersion, 2)
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    assert result == {"version_id": "version-new", "status": "rejected"}
+    assert material.review_comment == "Not approved for production"
+    assert item.active_version_id == "version-old"
+
+
+async def test_retry_endpoint_increments_and_queues_processing_task(monkeypatch):
+    calls = []
+
+    class FakeReviewService:
+        def __init__(self, _session):
+            pass
+
+        async def retry(self, version_id, *, operator_id):
+            calls.append(("retry", version_id, operator_id))
+            return SimpleNamespace(version_id=version_id, processing_status="processing_queued")
+
+    async def fake_enqueue(**kwargs):
+        calls.append(("enqueue", kwargs))
+        return SimpleNamespace(id="task-process")
+
+    monkeypatch.setattr(router_module, "FeishuReviewService", FakeReviewService)
+    monkeypatch.setattr(router_module.tasker, "enqueue", fake_enqueue)
+    result = await router_module.retry_material(
+        "version-new",
+        db=SimpleNamespace(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+    assert result == {"version_id": "version-new", "status": "processing_queued", "task_id": "task-process"}
+    assert calls[1][1]["task_type"] == "feishu_process"
+
+
+async def test_removal_adapter_failure_keeps_active_version(review_fixture):
+    class FailingRemovalAdapter:
+        async def remove(self, *, kb_id: str, file_id: str) -> None:
+            raise RuntimeError("Milvus deletion failed")
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    item.source_validity = "invalid"
+    await review_fixture.commit()
+    service = FeishuReviewService(review_fixture, removal_adapter=FailingRemovalAdapter())
+    with pytest.raises(RuntimeError, match="Milvus deletion failed"):
+        await service.confirm_removal("version-old", operator_id="admin")
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    assert item.active_version_id == "version-old"
+    old = await review_fixture.get(FeishuMaterialVersion, 1)
+    assert old.processing_status == "published"
+
+
+async def test_batch_action_reports_each_version_and_supports_reject(monkeypatch):
+    calls = []
+
+    async def fake_apply(version_id, action, *, db, operator_id, reason):
+        calls.append((version_id, action, operator_id, reason))
+        return {"version_id": version_id, "status": "rejected"}
+
+    monkeypatch.setattr(router_module, "_apply_action", fake_apply)
+    result = await router_module.batch_action(
+        router_module.BatchActionRequest(
+            action="reject",
+            version_ids=["version-1", "version-2"],
+            reason="duplicate",
+        ),
+        db=SimpleNamespace(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+    assert result["succeeded"] == 2
+    assert result["failed"] == 0
+    assert calls == [
+        ("version-1", "reject", "admin", "duplicate"),
+        ("version-2", "reject", "admin", "duplicate"),
+    ]
