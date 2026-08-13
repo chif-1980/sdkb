@@ -639,6 +639,104 @@ async def test_failed_scan_commits_domain_state_before_task_failure(monkeypatch,
     await engine.dispose()
 
 
+async def test_scan_cancellation_after_success_commit_queues_discovered_versions(monkeypatch, tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cancelled-after-scan-commit.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def aclose(self):
+            pass
+
+    class FakeScanService:
+        def __init__(self, **kwargs):
+            self.repository = kwargs["repository"]
+
+        async def scan(self, **kwargs):
+            run = await self.repository.session.scalar(
+                select(FeishuSyncRun).where(FeishuSyncRun.run_id == self.repository.queued_run_id)
+            )
+            run.status = "succeeded"
+            run.finished_at = datetime.now(UTC)
+            return SimpleNamespace(run_id=run.run_id, status="succeeded")
+
+    async def capture_scan(**kwargs):
+        captured["coroutine"] = kwargs["coroutine"]
+        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+
+    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        lambda: _production_session_context(session_factory),
+    )
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+
+    await _seed_feishu_source(session_factory)
+    async with session_factory() as session:
+        session.add(
+            FeishuSourceItem(
+                item_id="item-discovered",
+                source_id="source-1",
+                item_key="page:space:discovered",
+                item_type="page",
+                title="Discovered",
+                source_validity="valid",
+            )
+        )
+        await session.flush()
+        session.add(
+            FeishuMaterialVersion(
+                version_id="version-discovered",
+                item_id="item-discovered",
+                revision="1",
+                content_hash="discovered-hash",
+                source_object_path="minio://knowledgebases/feishu/source-1/item-discovered/source.md",
+                processing_status="discovered",
+                review_status="pending",
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as request_session:
+        response = await router_module.scan_source(
+            "source-1",
+            router_module.ScanRequest(mode="full"),
+            db=request_session,
+            current_user=SimpleNamespace(uid="admin"),
+        )
+
+    class Context:
+        calls = 0
+
+        async def raise_if_cancelled(self):
+            self.calls += 1
+            if self.calls == 2:
+                raise asyncio.CancelledError("scan cancelled after success commit")
+
+        async def set_result(self, value):
+            pass
+
+    with pytest.raises(asyncio.CancelledError, match="scan cancelled after success commit"):
+        await captured["coroutine"](Context())
+
+    async with session_factory() as session:
+        run = await session.scalar(select(FeishuSyncRun).where(FeishuSyncRun.run_id == response["run_id"]))
+        version = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-discovered")
+        )
+
+    assert run.status == "succeeded"
+    assert version.processing_status == "processing_queued"
+    await engine.dispose()
+
+
 async def test_scan_cancellation_before_external_work_fails_run_once_and_propagates(monkeypatch, tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cancelled-scan.db'}")
     async with engine.begin() as connection:
@@ -695,6 +793,72 @@ async def test_scan_cancellation_before_external_work_fails_run_once_and_propaga
     assert run.error_summary == "CancelledError: Task was cancelled"
     assert len(failure_events) == 1
     await engine.dispose()
+
+
+async def test_scan_compensation_commit_failure_preserves_original_cancellation(monkeypatch):
+    captured = {}
+    session_count = 0
+    cancellation = asyncio.CancelledError("scan cancelled")
+
+    class FakeDb:
+        async def commit(self):
+            pass
+
+    class WorkerDb:
+        def __init__(self, index):
+            self.index = index
+
+        async def commit(self):
+            if self.index == 2:
+                raise RuntimeError("forced scan compensation commit failure")
+
+    class FakeRepository:
+        def __init__(self, _session, *, queued_run_id=None):
+            self.queued_run_id = queued_run_id
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(source_id=source_id, name="Source")
+
+        async def queue_sync_run(self, **kwargs):
+            return SimpleNamespace(run_id="run-1")
+
+        async def get_sync_run_status(self, run_id):
+            return "queued"
+
+        async def fail_sync_run(self, **kwargs):
+            pass
+
+    @asynccontextmanager
+    async def fake_session_context():
+        nonlocal session_count
+        session_count += 1
+        yield WorkerDb(session_count)
+
+    async def capture_scan(**kwargs):
+        captured["coroutine"] = kwargs["coroutine"]
+        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+
+    class CancelledContext:
+        async def raise_if_cancelled(self):
+            raise cancellation
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+
+    await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="full"),
+        db=FakeDb(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await captured["coroutine"](CancelledContext())
+
+    assert error.value is cancellation
+    assert any("forced scan compensation commit failure" in note for note in error.value.__notes__)
+    assert session_count == 2
 
 
 async def test_scan_domain_commit_failure_uses_fresh_session_to_fail_run(monkeypatch, tmp_path):
@@ -1133,6 +1297,51 @@ async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
     assert calls[0][3]["content_hashes"] == {"minio://knowledgebases/feishu/source/version/page.md": "sha256-value"}
     assert calls[0][5]["filename"] == "Root/Page.md"
     assert calls[0][5]["path"] == "minio://knowledgebases/feishu/source/version/page.md"
+
+
+async def test_publish_activation_failure_with_shared_file_deletes_only_new_file(monkeypatch, tmp_path):
+    engine, session_factory, session_context = await _publish_activation_failure_database(
+        tmp_path / "publish-shared-activation.db"
+    )
+    deleted_files = []
+
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            assert kwargs["file_id"] is None
+            return router_module.PublishResult(file_id="file-new", chunk_count=4)
+
+    class FakeKnowledgeBase:
+        async def delete_file(self, kb_id, file_id):
+            deleted_files.append((kb_id, file_id))
+
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", session_context)
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+
+    async with session_factory() as session:
+        current = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-new")
+        )
+        current.yuxi_file_id = "file-old"
+        await session.commit()
+
+    with pytest.raises(RuntimeError, match="forced activation commit failure"):
+        await router_module._run_publish_worker(
+            "version-new",
+            operator_id="admin",
+            publish_adapter=FakePublishAdapter(),
+        )
+
+    async with session_factory() as session:
+        item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        version = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-new")
+        )
+
+    assert deleted_files == [("kb-1", "file-new")]
+    assert item.active_version_id == "version-old"
+    assert version.processing_status == "publish_failed"
+    assert version.yuxi_file_id == "file-old"
+    await engine.dispose()
 
 
 async def test_minio_archive_adapter_uses_stable_ids_and_safe_extension(monkeypatch):
@@ -1984,6 +2193,60 @@ async def test_processing_cancellation_marks_parse_failed_once_and_propagates(mo
     assert len(failure_events) == 1
 
 
+async def test_processing_compensation_commit_failure_preserves_original_cancellation(monkeypatch):
+    session_count = 0
+    cancellation = asyncio.CancelledError("processing cancelled")
+
+    class WorkerDb:
+        def __init__(self, index):
+            self.index = index
+
+        async def commit(self):
+            if self.index == 2:
+                raise RuntimeError("forced processing compensation commit failure")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        nonlocal session_count
+        session_count += 1
+        yield WorkerDb(session_count)
+
+    class FakeReviewService:
+        def __init__(self, _session):
+            pass
+
+        async def claim_processing(self, version_id):
+            return (
+                SimpleNamespace(
+                    version_id=version_id,
+                    source_object_path="minio://knowledgebases/source.md",
+                    processing_params={},
+                    content_hash="hash",
+                    yuxi_file_id="file-existing",
+                ),
+                SimpleNamespace(path_text="Page", title="Page", item_type="page", source_url=None),
+                SimpleNamespace(target_kb_id="kb-1"),
+            )
+
+        async def mark_processing_failed(self, version_id, *, message):
+            pass
+
+    class CancellingKnowledgeBase:
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            raise cancellation
+
+    monkeypatch.setattr(router_module, "FeishuReviewService", FakeReviewService)
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module, "knowledge_base", CancellingKnowledgeBase())
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await router_module._run_processing_worker("version-new", operator_id="admin")
+
+    assert error.value is cancellation
+    assert any("forced processing compensation commit failure" in note for note in error.value.__notes__)
+    assert session_count == 2
+
+
 async def test_processing_finalization_cancellation_marks_parse_failed_and_propagates(monkeypatch, review_fixture):
     class FakeKnowledgeBase:
         async def add_file_record(self, kb_id, object_path, *, params, operator_id):
@@ -2324,6 +2587,73 @@ async def test_obsolete_publish_cleanup_failure_keeps_newer_active_and_records_e
     assert events[-1].event_type == "publish_obsolete_cleanup_failed"
 
 
+async def test_obsolete_publish_cleanup_cancellation_keeps_newer_active_and_records_event(
+    monkeypatch,
+    review_fixture,
+):
+    cancellation = asyncio.CancelledError("obsolete cleanup cancelled")
+    newer = FeishuMaterialVersion(
+        version_id="version-newer",
+        item_id="item-1",
+        revision="3",
+        content_hash="newer-hash",
+        processing_status="published",
+        review_status="approved",
+        yuxi_file_id="file-newer",
+    )
+    older = await review_fixture.get(FeishuMaterialVersion, 2)
+    older.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    older.processing_status = "publish_queued"
+    older.review_status = "approved"
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    review_fixture.add(newer)
+    await review_fixture.flush()
+    item.active_version_id = newer.version_id
+    await review_fixture.commit()
+
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            return router_module.PublishResult(file_id="file-obsolete")
+
+    class CancellingKnowledgeBase:
+        async def delete_file(self, kb_id, file_id):
+            assert (kb_id, file_id) == ("kb-1", "file-obsolete")
+            raise cancellation
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module, "knowledge_base", CancellingKnowledgeBase())
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await router_module._run_publish_worker(
+            "version-new",
+            operator_id="admin",
+            publish_adapter=FakePublishAdapter(),
+        )
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    older = await review_fixture.get(FeishuMaterialVersion, 2)
+    events = list(
+        (
+            await review_fixture.execute(
+                select(FeishuProcessingEvent).where(
+                    FeishuProcessingEvent.version_id == "version-new",
+                    FeishuProcessingEvent.event_type == "publish_obsolete_cleanup_failed",
+                )
+            )
+        ).scalars()
+    )
+    assert error.value is cancellation
+    assert item.active_version_id == "version-newer"
+    assert older.processing_status == "replaced"
+    assert older.yuxi_file_id == "file-obsolete"
+    assert older.error_message == "obsolete cleanup cancelled"
+    assert len(events) == 1
+
+
 async def test_replacement_cleanup_failure_keeps_new_active_and_records_event(monkeypatch, review_fixture):
     class FakePublishAdapter:
         async def publish(self, **kwargs):
@@ -2358,6 +2688,133 @@ async def test_replacement_cleanup_failure_keeps_new_active_and_records_event(mo
     assert version.processing_status == "published"
     assert version.error_message == "vector cleanup failed"
     assert events[-1].event_type == "replacement_cleanup_failed"
+
+
+async def test_replacement_cleanup_cancellation_keeps_new_active_and_records_event(monkeypatch, review_fixture):
+    cancellation = asyncio.CancelledError("replacement cleanup cancelled")
+
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            return router_module.PublishResult(file_id="file-new")
+
+    class CancellingKnowledgeBase:
+        async def delete_file(self, kb_id, file_id):
+            assert (kb_id, file_id) == ("kb-1", "file-old")
+            raise cancellation
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    await review_fixture.commit()
+    await FeishuReviewService(review_fixture).approve("version-new", operator_id="admin")
+    monkeypatch.setattr(router_module, "knowledge_base", CancellingKnowledgeBase())
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await router_module._run_publish_worker(
+            "version-new",
+            operator_id="admin",
+            publish_adapter=FakePublishAdapter(),
+        )
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    version = await review_fixture.get(FeishuMaterialVersion, 2)
+    events = list(
+        (
+            await review_fixture.execute(
+                select(FeishuProcessingEvent).where(
+                    FeishuProcessingEvent.version_id == "version-new",
+                    FeishuProcessingEvent.event_type == "replacement_cleanup_failed",
+                )
+            )
+        ).scalars()
+    )
+    assert error.value is cancellation
+    assert item.active_version_id == "version-new"
+    assert version.processing_status == "published"
+    assert version.yuxi_file_id == "file-new"
+    assert version.error_message == "replacement cleanup cancelled"
+    assert len(events) == 1
+
+
+async def test_cleanup_recovery_commit_failure_preserves_original_cancellation(monkeypatch):
+    session_count = 0
+    cancellation = asyncio.CancelledError("replacement cleanup cancelled")
+
+    class WorkerDb:
+        def __init__(self, index):
+            self.index = index
+
+        async def scalar(self, statement):
+            return "file-old"
+
+        async def commit(self):
+            if self.index == 3:
+                raise RuntimeError("forced cleanup recovery commit failure")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        nonlocal session_count
+        session_count += 1
+        yield WorkerDb(session_count)
+
+    class FakeReviewService:
+        def __init__(self, _session):
+            pass
+
+        async def claim_publish(self, version_id):
+            return (
+                SimpleNamespace(
+                    version_id=version_id,
+                    source_object_path="minio://knowledgebases/source.md",
+                    processing_params={},
+                    content_hash="hash",
+                    yuxi_file_id=None,
+                ),
+                SimpleNamespace(
+                    active_version_id="version-old",
+                    source_url=None,
+                    path_text="Page",
+                    item_type="page",
+                    title="Page",
+                ),
+                SimpleNamespace(target_kb_id="kb-1"),
+            )
+
+        async def mark_publish_succeeded(self, version_id, *, yuxi_file_id, chunk_count=0):
+            return router_module.PublishSwitchResult(
+                material=SimpleNamespace(version_id=version_id, processing_status="published"),
+                replaced_file_id="file-old",
+            )
+
+        async def mark_replacement_cleanup_failed(self, version_id, *, message):
+            pass
+
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            return router_module.PublishResult(file_id="file-new")
+
+    class CancellingKnowledgeBase:
+        async def delete_file(self, kb_id, file_id):
+            raise cancellation
+
+    monkeypatch.setattr(router_module, "FeishuReviewService", FakeReviewService)
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module, "knowledge_base", CancellingKnowledgeBase())
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await router_module._run_publish_worker(
+            "version-new",
+            operator_id="admin",
+            publish_adapter=FakePublishAdapter(),
+        )
+
+    assert error.value is cancellation
+    assert any("forced cleanup recovery commit failure" in note for note in error.value.__notes__)
+    assert session_count == 3
 
 
 async def test_publish_worker_failure_keeps_old_active_and_records_failure(monkeypatch, review_fixture):
@@ -2428,6 +2885,69 @@ async def test_publish_cancellation_marks_publish_failed_once_and_propagates(mon
     assert version.processing_status == "publish_failed"
     assert version.error_message == "publishing timed out"
     assert len(failure_events) == 1
+
+
+async def test_publish_compensation_commit_failure_preserves_original_cancellation(monkeypatch):
+    session_count = 0
+    cancellation = asyncio.CancelledError("publishing cancelled")
+
+    class WorkerDb:
+        def __init__(self, index):
+            self.index = index
+
+        async def commit(self):
+            if self.index == 2:
+                raise RuntimeError("forced publish compensation commit failure")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        nonlocal session_count
+        session_count += 1
+        yield WorkerDb(session_count)
+
+    class FakeReviewService:
+        def __init__(self, _session):
+            pass
+
+        async def claim_publish(self, version_id):
+            return (
+                SimpleNamespace(
+                    version_id=version_id,
+                    source_object_path="minio://knowledgebases/source.md",
+                    processing_params={},
+                    content_hash="hash",
+                    yuxi_file_id=None,
+                ),
+                SimpleNamespace(
+                    active_version_id=None,
+                    source_url=None,
+                    path_text="Page",
+                    item_type="page",
+                    title="Page",
+                ),
+                SimpleNamespace(target_kb_id="kb-1"),
+            )
+
+        async def mark_publish_failed(self, version_id, *, message):
+            pass
+
+    class CancellingPublishAdapter:
+        async def publish(self, **kwargs):
+            raise cancellation
+
+    monkeypatch.setattr(router_module, "FeishuReviewService", FakeReviewService)
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await router_module._run_publish_worker(
+            "version-new",
+            operator_id="admin",
+            publish_adapter=CancellingPublishAdapter(),
+        )
+
+    assert error.value is cancellation
+    assert any("forced publish compensation commit failure" in note for note in error.value.__notes__)
+    assert session_count == 2
 
 
 async def test_publish_finalization_cancellation_cleans_new_file_and_propagates(monkeypatch, review_fixture):
@@ -2632,6 +3152,57 @@ async def test_publish_activation_commit_failure_cleans_new_file_and_records_ret
     assert result == {"version_id": "version-new", "status": "published", "file_id": "file-new"}
     assert item.active_version_id == "version-new"
     assert version.processing_status == "published"
+    await engine.dispose()
+
+
+async def test_publish_activation_cleanup_cancellation_records_retryable_failure(monkeypatch, tmp_path):
+    engine, session_factory, session_context = await _publish_activation_failure_database(
+        tmp_path / "publish-activation-cleanup-cancelled.db"
+    )
+    cancellation = asyncio.CancelledError("activation cleanup cancelled")
+
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            return router_module.PublishResult(file_id="file-new", chunk_count=4)
+
+    class CancellingKnowledgeBase:
+        async def delete_file(self, kb_id, file_id):
+            assert (kb_id, file_id) == ("kb-1", "file-new")
+            raise cancellation
+
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", session_context)
+    monkeypatch.setattr(router_module, "knowledge_base", CancellingKnowledgeBase())
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await router_module._run_publish_worker(
+            "version-new",
+            operator_id="admin",
+            publish_adapter=FakePublishAdapter(),
+        )
+
+    async with session_factory() as verification_session:
+        item = await verification_session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        version = await verification_session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-new")
+        )
+        events = list(
+            (
+                await verification_session.execute(
+                    select(FeishuProcessingEvent).where(
+                        FeishuProcessingEvent.version_id == "version-new",
+                        FeishuProcessingEvent.event_type == "publish_failed",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert error.value is cancellation
+    assert item.active_version_id == "version-old"
+    assert version.processing_status == "publish_failed"
+    assert version.yuxi_file_id == "file-new"
+    assert "forced activation commit failure" in version.error_message
+    assert "activation cleanup cancelled" in version.error_message
+    assert len(events) == 1
     await engine.dispose()
 
 

@@ -129,6 +129,15 @@ def _cancellation_message(exc: asyncio.CancelledError) -> str:
     return str(exc) or "Task was cancelled"
 
 
+def _note_cancellation_recovery_failure(
+    exc: asyncio.CancelledError,
+    *,
+    operation: str,
+    recovery_exc: BaseException,
+) -> None:
+    exc.add_note(f"{operation} failed: {type(recovery_exc).__name__}: {recovery_exc}")
+
+
 class PublishAdapter(Protocol):
     async def publish(
         self,
@@ -976,14 +985,17 @@ async def scan_source(
                             )
                             await recovery_session.commit()
                         raise
-                    await context.set_result({"run_id": result.run_id, "status": result.status})
                     if result.status != "succeeded":
+                        await context.set_result({"run_id": result.run_id, "status": result.status})
                         raise RuntimeError(result.error_summary or "Feishu scan failed")
+                    if hasattr(context, "raise_if_cancelled"):
+                        await context.raise_if_cancelled()
                     queued_version_ids = await worker_repository.queue_archived_versions_for_processing(
                         source_id=source_id,
                         operator_id=current_user.uid,
                     )
                     await session.commit()
+                    await context.set_result({"run_id": result.run_id, "status": result.status})
                     enqueue_errors = []
                     for version_id in queued_version_ids:
                         try:
@@ -1002,14 +1014,29 @@ async def scan_source(
                     if client is not None:
                         await client.aclose()
         except asyncio.CancelledError as exc:
-            async with pg_manager.get_async_session_context() as recovery_session:
-                await FeishuKnowledgeRepository(recovery_session).fail_sync_run(
-                    run_id=run.run_id,
-                    source_id=source_id,
-                    error_summary=f"CancelledError: {_cancellation_message(exc)}",
-                    operator_id=current_user.uid,
+            try:
+                async with pg_manager.get_async_session_context() as recovery_session:
+                    recovery_repository = FeishuKnowledgeRepository(recovery_session)
+                    status = await recovery_repository.get_sync_run_status(run.run_id)
+                    if status == "succeeded":
+                        await recovery_repository.queue_archived_versions_for_processing(
+                            source_id=source_id,
+                            operator_id=current_user.uid,
+                        )
+                    else:
+                        await recovery_repository.fail_sync_run(
+                            run_id=run.run_id,
+                            source_id=source_id,
+                            error_summary=f"CancelledError: {_cancellation_message(exc)}",
+                            operator_id=current_user.uid,
+                        )
+                    await recovery_session.commit()
+            except (Exception, asyncio.CancelledError) as recovery_exc:
+                _note_cancellation_recovery_failure(
+                    exc,
+                    operation="scan cancellation recovery",
+                    recovery_exc=recovery_exc,
                 )
-                await recovery_session.commit()
             raise
 
     try:
@@ -1151,6 +1178,15 @@ async def _run_publish_worker(
             object_path = version.source_object_path or (version.processing_params or {}).get("object_path")
             if not object_path:
                 raise RuntimeError("Feishu material has no archived source object")
+            publish_file_id = version.yuxi_file_id
+            if item.active_version_id and item.active_version_id != version.version_id:
+                active_file_id = await session.scalar(
+                    select(FeishuMaterialVersion.yuxi_file_id).where(
+                        FeishuMaterialVersion.version_id == item.active_version_id
+                    )
+                )
+                if active_file_id and active_file_id == publish_file_id:
+                    publish_file_id = None
             publish_args = {
                 "kb_id": source.target_kb_id,
                 "object_path": object_path,
@@ -1160,18 +1196,25 @@ async def _run_publish_worker(
                 "content_hash": version.content_hash,
                 "page_info": {"item_type": item.item_type, "title": item.title},
                 "operator_id": operator_id,
-                "file_id": version.yuxi_file_id,
+                "file_id": publish_file_id,
             }
         if context is not None:
             await context.raise_if_cancelled()
         result = await adapter.publish(**publish_args)
     except asyncio.CancelledError as exc:
-        async with pg_manager.get_async_session_context() as session:
-            await FeishuReviewService(session).mark_publish_failed(
-                version_id,
-                message=_cancellation_message(exc),
+        try:
+            async with pg_manager.get_async_session_context() as session:
+                await FeishuReviewService(session).mark_publish_failed(
+                    version_id,
+                    message=_cancellation_message(exc),
+                )
+                await session.commit()
+        except (Exception, asyncio.CancelledError) as recovery_exc:
+            _note_cancellation_recovery_failure(
+                exc,
+                operation="publish cancellation recovery",
+                recovery_exc=recovery_exc,
             )
-            await session.commit()
         raise
     except Exception as exc:
         async with pg_manager.get_async_session_context() as session:
@@ -1192,19 +1235,32 @@ async def _run_publish_worker(
             await session.commit()
     except (Exception, asyncio.CancelledError) as exc:
         if isinstance(exc, asyncio.CancelledError):
-            async with pg_manager.get_async_session_context() as status_session:
-                processing_status = await status_session.scalar(
-                    select(FeishuMaterialVersion.processing_status).where(
-                        FeishuMaterialVersion.version_id == version_id
+            try:
+                async with pg_manager.get_async_session_context() as status_session:
+                    processing_status = await status_session.scalar(
+                        select(FeishuMaterialVersion.processing_status).where(
+                            FeishuMaterialVersion.version_id == version_id
+                        )
                     )
+            except (Exception, asyncio.CancelledError) as recovery_exc:
+                _note_cancellation_recovery_failure(
+                    exc,
+                    operation="publish activation status recovery",
+                    recovery_exc=recovery_exc,
                 )
+                raise exc
             if processing_status in {"published", "replaced"}:
                 raise
         recovery_message = str(exc)
         retained_file_id = None
+        cleanup_cancellation = None
         if result.file_id != publish_args["file_id"]:
             try:
                 await knowledge_base.delete_file(publish_args["kb_id"], result.file_id)
+            except asyncio.CancelledError as cleanup_exc:
+                cleanup_cancellation = cleanup_exc
+                recovery_message = f"{exc}; new file cleanup cancelled: {_cancellation_message(cleanup_exc)}"
+                retained_file_id = result.file_id
             except Exception as cleanup_exc:
                 recovery_message = f"{exc}; new file cleanup failed: {cleanup_exc}"
                 retained_file_id = result.file_id
@@ -1216,13 +1272,20 @@ async def _run_publish_worker(
                     yuxi_file_id=retained_file_id,
                 )
                 await recovery_session.commit()
-        except Exception as recovery_exc:
-            if isinstance(exc, asyncio.CancelledError):
-                exc.add_note(f"{recovery_message}; publish recovery failed: {recovery_exc}")
-                raise
+        except (Exception, asyncio.CancelledError) as recovery_exc:
+            cancellation = exc if isinstance(exc, asyncio.CancelledError) else cleanup_cancellation
+            if cancellation is not None:
+                _note_cancellation_recovery_failure(
+                    cancellation,
+                    operation=f"{recovery_message}; publish recovery",
+                    recovery_exc=recovery_exc,
+                )
+                raise cancellation
             raise RuntimeError(f"{recovery_message}; publish recovery failed: {recovery_exc}") from exc
         if isinstance(exc, asyncio.CancelledError):
             raise
+        if cleanup_cancellation is not None:
+            raise cleanup_cancellation
         if retained_file_id is not None:
             raise RuntimeError(recovery_message) from exc
         raise
@@ -1230,20 +1293,33 @@ async def _run_publish_worker(
     if switch.replaced_file_id:
         try:
             await knowledge_base.delete_file(publish_args["kb_id"], switch.replaced_file_id)
-        except Exception as exc:
-            async with pg_manager.get_async_session_context() as session:
-                service = FeishuReviewService(session)
-                if material.processing_status == "replaced":
-                    await service.mark_publish_obsolete_cleanup_failed(
-                        version_id,
-                        message=str(exc),
+        except (Exception, asyncio.CancelledError) as exc:
+            message = _cancellation_message(exc) if isinstance(exc, asyncio.CancelledError) else str(exc)
+            try:
+                async with pg_manager.get_async_session_context() as session:
+                    service = FeishuReviewService(session)
+                    if material.processing_status == "replaced":
+                        await service.mark_publish_obsolete_cleanup_failed(
+                            version_id,
+                            message=message,
+                        )
+                    else:
+                        await service.mark_replacement_cleanup_failed(
+                            version_id,
+                            message=message,
+                        )
+                    await session.commit()
+            except (Exception, asyncio.CancelledError) as recovery_exc:
+                if isinstance(exc, asyncio.CancelledError):
+                    _note_cancellation_recovery_failure(
+                        exc,
+                        operation="published file cleanup recovery",
+                        recovery_exc=recovery_exc,
                     )
-                else:
-                    await service.mark_replacement_cleanup_failed(
-                        version_id,
-                        message=str(exc),
-                    )
-                await session.commit()
+                    raise exc
+                raise
+            if isinstance(exc, asyncio.CancelledError):
+                raise
     return {"version_id": material.version_id, "status": material.processing_status, "file_id": result.file_id}
 
 
@@ -1290,15 +1366,22 @@ async def _run_processing_worker(
         if parsed.get("status") != "parsed":
             raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
     except asyncio.CancelledError as exc:
-        async with pg_manager.get_async_session_context() as session:
-            try:
-                await FeishuReviewService(session).mark_processing_failed(
-                    version_id,
-                    message=_cancellation_message(exc),
-                )
-                await session.commit()
-            except (LookupError, ValueError):
-                pass
+        try:
+            async with pg_manager.get_async_session_context() as session:
+                try:
+                    await FeishuReviewService(session).mark_processing_failed(
+                        version_id,
+                        message=_cancellation_message(exc),
+                    )
+                    await session.commit()
+                except (LookupError, ValueError):
+                    pass
+        except (Exception, asyncio.CancelledError) as recovery_exc:
+            _note_cancellation_recovery_failure(
+                exc,
+                operation="processing cancellation recovery",
+                recovery_exc=recovery_exc,
+            )
         raise
     except Exception as exc:
         async with pg_manager.get_async_session_context() as session:
@@ -1316,15 +1399,22 @@ async def _run_processing_worker(
                 file_id=existing_file_id,
             )
     except asyncio.CancelledError as exc:
-        async with pg_manager.get_async_session_context() as session:
-            try:
-                await FeishuReviewService(session).mark_processing_failed(
-                    version_id,
-                    message=_cancellation_message(exc),
-                )
-                await session.commit()
-            except (LookupError, ValueError):
-                pass
+        try:
+            async with pg_manager.get_async_session_context() as session:
+                try:
+                    await FeishuReviewService(session).mark_processing_failed(
+                        version_id,
+                        message=_cancellation_message(exc),
+                    )
+                    await session.commit()
+                except (LookupError, ValueError):
+                    pass
+        except (Exception, asyncio.CancelledError) as recovery_exc:
+            _note_cancellation_recovery_failure(
+                exc,
+                operation="processing finalization cancellation recovery",
+                recovery_exc=recovery_exc,
+            )
         raise
     return {"version_id": material.version_id, "status": material.processing_status, "file_id": existing_file_id}
 
