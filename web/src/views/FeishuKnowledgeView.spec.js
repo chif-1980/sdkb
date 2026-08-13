@@ -355,12 +355,12 @@ describe('FeishuMaterialTable', () => {
     })
     expect(disabledActions('retryable')).toEqual({
       审核通过: true,
-      驳回: true,
+      驳回: false,
       重试: false,
       确认下架: true
     })
     expect(disabledActions('missing-review-file').审核通过).toBe(true)
-    expect(disabledActions('missing-review-file').驳回).toBe(true)
+    expect(disabledActions('missing-review-file').驳回).toBe(false)
     expect(disabledActions('removable')).toEqual({
       审核通过: true,
       驳回: true,
@@ -380,6 +380,10 @@ describe('FeishuMaterialTable', () => {
           processing_status: 'parsed',
         }),
         makeMaterial('reviewable-2', { title: '待审核素材二' }),
+        makeMaterial('rejectable-without-file', {
+          title: '缺少知识库文件的待审核素材',
+          yuxi_file_id: ''
+        }),
         makeMaterial('retryable', {
           title: '发布失败素材',
           processing_status: 'publish_failed',
@@ -428,6 +432,23 @@ describe('FeishuMaterialTable', () => {
       .find((button) => button.text() === '审核通过')
     await approveButton.trigger('click')
     expect(wrapper.emitted('batch-action')).toBeUndefined()
+
+    rowSelection.onChange(['retryable-2', 'rejectable-without-file'])
+    await wrapper.vm.$nextTick()
+    expect(batchDisabledActions()).toEqual({
+      审核通过: true,
+      驳回: false,
+      重试: true,
+      确认下架: true
+    })
+    const rejectButton = wrapper
+      .get('.batch-actions')
+      .findAll('button')
+      .find((button) => button.text() === '驳回')
+    await rejectButton.trigger('click')
+    expect(wrapper.emitted('batch-action')).toEqual([
+      [{ action: 'reject', versionIds: ['retryable-2', 'rejectable-without-file'] }]
+    ])
 
     rowSelection.onChange(['reviewable-1', 'reviewable-2'])
     await wrapper.vm.$nextTick()

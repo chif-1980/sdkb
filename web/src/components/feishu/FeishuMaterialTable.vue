@@ -207,7 +207,8 @@ function canPerformAction(material, action) {
     ['parsed', 'awaiting_review'].includes(material.processing_status) &&
     Boolean(material.yuxi_file_id)
 
-  if (action === 'approve' || action === 'reject') return parsedReady
+  if (action === 'approve') return parsedReady
+  if (action === 'reject') return material.review_status === 'pending'
   if (action === 'retry') {
     return ['parse_failed', 'publish_failed'].includes(material.processing_status)
   }
