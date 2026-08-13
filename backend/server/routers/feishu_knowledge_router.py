@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -122,6 +123,10 @@ def _feishu_source_path(*, wiki_path: str | None, title: str | None, item_type: 
     if suffix and len(suffix) < 512:
         return f"{filename[: 512 - len(suffix)]}{suffix}"
     return filename[:512]
+
+
+def _cancellation_message(exc: asyncio.CancelledError) -> str:
+    return str(exc) or "Task was cancelled"
 
 
 class PublishAdapter(Protocol):
@@ -408,8 +413,13 @@ class FeishuReviewService:
             version, item, _ = await self._get_material(version_id, lock=True)
             if version.processing_status not in {"publish_queued", "publishing"}:
                 raise ValueError("Material is not queued for publishing")
+            item = await self.session.scalar(
+                select(FeishuSourceItem).where(FeishuSourceItem.item_id == version.item_id).with_for_update()
+            )
+            if item is None:
+                raise LookupError(f"Feishu source item not found: {version.item_id}")
             old_active_id = item.active_version_id
-            replaced_file_id = None
+            old_version = None
             if old_active_id and old_active_id != version.version_id:
                 old_result = await self.session.execute(
                     select(FeishuMaterialVersion)
@@ -417,10 +427,31 @@ class FeishuReviewService:
                     .with_for_update()
                 )
                 old_version = old_result.scalar_one_or_none()
-                if old_version is not None:
-                    replaced_file_id = old_version.yuxi_file_id
-                    old_version.processing_status = "replaced"
-                    old_version.replaced_at = utc_now()
+            if old_version is not None and old_version.id > version.id:
+                version.processing_status = "replaced"
+                version.yuxi_file_id = yuxi_file_id
+                version.chunk_count = chunk_count
+                version.replaced_at = utc_now()
+                version.error_code = None
+                version.error_message = None
+                self._append_event(
+                    source_id=item.source_id,
+                    item_id=item.item_id,
+                    version_id=version.version_id,
+                    event_type="publish_obsolete",
+                    from_status="publishing",
+                    to_status="replaced",
+                    payload_json={"active_version_id": old_active_id},
+                )
+                await self.session.flush()
+                cleanup_file_id = None if old_version.yuxi_file_id == yuxi_file_id else yuxi_file_id
+                return PublishSwitchResult(material=version, replaced_file_id=cleanup_file_id)
+            cleanup_file_id = None
+            if old_version is not None:
+                if old_version.yuxi_file_id != yuxi_file_id:
+                    cleanup_file_id = old_version.yuxi_file_id
+                old_version.processing_status = "replaced"
+                old_version.replaced_at = utc_now()
             item.active_version_id = version.version_id
             version.processing_status = "published"
             version.yuxi_file_id = yuxi_file_id
@@ -438,7 +469,7 @@ class FeishuReviewService:
                 payload_json={"previous_active_version_id": old_active_id},
             )
             await self.session.flush()
-            return PublishSwitchResult(material=version, replaced_file_id=replaced_file_id)
+            return PublishSwitchResult(material=version, replaced_file_id=cleanup_file_id)
 
     async def mark_replacement_cleanup_failed(self, version_id: str, *, message: str) -> FeishuMaterialVersion:
         async with self._transaction():
@@ -458,19 +489,51 @@ class FeishuReviewService:
             await self.session.flush()
             return version
 
-    async def mark_publish_failed(self, version_id: str, *, message: str) -> FeishuMaterialVersion:
+    async def mark_publish_obsolete_cleanup_failed(
+        self,
+        version_id: str,
+        *,
+        message: str,
+    ) -> FeishuMaterialVersion:
         async with self._transaction():
             version, item, _ = await self._get_material(version_id, lock=True)
-            if version.processing_status not in {"publish_queued", "publishing"}:
-                raise ValueError("Material is not queued for publishing")
-            version.processing_status = "publish_failed"
+            if version.processing_status != "replaced":
+                raise ValueError("Material is not an obsolete published version")
             version.error_message = message
             self._append_event(
                 source_id=item.source_id,
                 item_id=item.item_id,
                 version_id=version.version_id,
+                event_type="publish_obsolete_cleanup_failed",
+                from_status="replaced",
+                to_status="replaced",
+                message=message,
+            )
+            await self.session.flush()
+            return version
+
+    async def mark_publish_failed(
+        self,
+        version_id: str,
+        *,
+        message: str,
+        yuxi_file_id: str | None = None,
+    ) -> FeishuMaterialVersion:
+        async with self._transaction():
+            version, item, _ = await self._get_material(version_id, lock=True)
+            if version.processing_status not in {"publish_queued", "publishing"}:
+                raise ValueError("Material is not queued for publishing")
+            from_status = version.processing_status
+            version.processing_status = "publish_failed"
+            version.error_message = message
+            if yuxi_file_id is not None:
+                version.yuxi_file_id = yuxi_file_id
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
                 event_type="publish_failed",
-                from_status="publish_queued",
+                from_status=from_status,
                 to_status="publish_failed",
                 message=message,
             )
@@ -869,72 +932,85 @@ async def scan_source(
     await db.commit()
 
     async def run_scan(context: TaskContext):
-        async with pg_manager.get_async_session_context() as session:
-            worker_repository = FeishuKnowledgeRepository(session, queued_run_id=run.run_id)
-            client = None
-            try:
+        try:
+            async with pg_manager.get_async_session_context() as session:
+                worker_repository = FeishuKnowledgeRepository(session, queued_run_id=run.run_id)
+                client = None
                 try:
-                    worker_source = await worker_repository.get_source(source_id)
-                    if worker_source is None:
-                        raise LookupError(f"Feishu source not found: {source_id}")
-                    client = FeishuClient(credential_env_name=worker_source.credential_env_name)
-                    result = await FeishuScanService(
-                        repository=worker_repository,
-                        client=client,
-                        archive_adapter=MinioFeishuArchiveAdapter(),
-                    ).scan(
-                        source_id=source_id,
-                        mode=payload.mode,
-                        operator_id=current_user.uid,
-                    )
-                except Exception as exc:
-                    await worker_repository.fail_sync_run(
-                        run_id=run.run_id,
-                        source_id=source_id,
-                        error_summary=f"{type(exc).__name__}: {exc}",
-                        operator_id=current_user.uid,
-                    )
-                    await session.commit()
-                    raise
-                try:
-                    await session.commit()
-                except Exception as commit_exc:
-                    await session.rollback()
-                    error_summary = result.error_summary or f"{type(commit_exc).__name__}: {commit_exc}"
-                    async with pg_manager.get_async_session_context() as recovery_session:
-                        await FeishuKnowledgeRepository(recovery_session).fail_sync_run(
-                            run_id=run.run_id,
+                    try:
+                        if hasattr(context, "raise_if_cancelled"):
+                            await context.raise_if_cancelled()
+                        worker_source = await worker_repository.get_source(source_id)
+                        if worker_source is None:
+                            raise LookupError(f"Feishu source not found: {source_id}")
+                        client = FeishuClient(credential_env_name=worker_source.credential_env_name)
+                        result = await FeishuScanService(
+                            repository=worker_repository,
+                            client=client,
+                            archive_adapter=MinioFeishuArchiveAdapter(),
+                        ).scan(
                             source_id=source_id,
-                            error_summary=error_summary,
+                            mode=payload.mode,
                             operator_id=current_user.uid,
                         )
-                        await recovery_session.commit()
-                    raise
-                await context.set_result({"run_id": result.run_id, "status": result.status})
-                if result.status != "succeeded":
-                    raise RuntimeError(result.error_summary or "Feishu scan failed")
-                queued_version_ids = await worker_repository.queue_archived_versions_for_processing(
-                    source_id=source_id,
-                    operator_id=current_user.uid,
-                )
-                await session.commit()
-                enqueue_errors = []
-                for version_id in queued_version_ids:
-                    try:
-                        await _enqueue_processing(version_id, operator_id=current_user.uid)
                     except Exception as exc:
-                        enqueue_errors.append(exc)
-                        await FeishuReviewService(session).mark_processing_queue_failed(
-                            version_id,
-                            message=str(exc),
+                        await worker_repository.fail_sync_run(
+                            run_id=run.run_id,
+                            source_id=source_id,
+                            error_summary=f"{type(exc).__name__}: {exc}",
+                            operator_id=current_user.uid,
                         )
                         await session.commit()
-                if enqueue_errors:
-                    raise enqueue_errors[0]
-                return {"run_id": result.run_id, "status": result.status}
-            finally:
-                if client is not None:
-                    await client.aclose()
+                        raise
+                    try:
+                        await session.commit()
+                    except Exception as commit_exc:
+                        await session.rollback()
+                        error_summary = result.error_summary or f"{type(commit_exc).__name__}: {commit_exc}"
+                        async with pg_manager.get_async_session_context() as recovery_session:
+                            await FeishuKnowledgeRepository(recovery_session).fail_sync_run(
+                                run_id=run.run_id,
+                                source_id=source_id,
+                                error_summary=error_summary,
+                                operator_id=current_user.uid,
+                            )
+                            await recovery_session.commit()
+                        raise
+                    await context.set_result({"run_id": result.run_id, "status": result.status})
+                    if result.status != "succeeded":
+                        raise RuntimeError(result.error_summary or "Feishu scan failed")
+                    queued_version_ids = await worker_repository.queue_archived_versions_for_processing(
+                        source_id=source_id,
+                        operator_id=current_user.uid,
+                    )
+                    await session.commit()
+                    enqueue_errors = []
+                    for version_id in queued_version_ids:
+                        try:
+                            await _enqueue_processing(version_id, operator_id=current_user.uid)
+                        except Exception as exc:
+                            enqueue_errors.append(exc)
+                            await FeishuReviewService(session).mark_processing_queue_failed(
+                                version_id,
+                                message=str(exc),
+                            )
+                            await session.commit()
+                    if enqueue_errors:
+                        raise enqueue_errors[0]
+                    return {"run_id": result.run_id, "status": result.status}
+                finally:
+                    if client is not None:
+                        await client.aclose()
+        except asyncio.CancelledError as exc:
+            async with pg_manager.get_async_session_context() as recovery_session:
+                await FeishuKnowledgeRepository(recovery_session).fail_sync_run(
+                    run_id=run.run_id,
+                    source_id=source_id,
+                    error_summary=f"CancelledError: {_cancellation_message(exc)}",
+                    operator_id=current_user.uid,
+                )
+                await recovery_session.commit()
+            raise
 
     try:
         task, created = await tasker.enqueue_unique_by_payload(
@@ -1066,6 +1142,7 @@ async def _run_publish_worker(
     *,
     operator_id: str,
     publish_adapter: PublishAdapter | None = None,
+    context: TaskContext | None = None,
 ) -> dict:
     adapter = publish_adapter or KnowledgePublishAdapter()
     try:
@@ -1085,7 +1162,17 @@ async def _run_publish_worker(
                 "operator_id": operator_id,
                 "file_id": version.yuxi_file_id,
             }
+        if context is not None:
+            await context.raise_if_cancelled()
         result = await adapter.publish(**publish_args)
+    except asyncio.CancelledError as exc:
+        async with pg_manager.get_async_session_context() as session:
+            await FeishuReviewService(session).mark_publish_failed(
+                version_id,
+                message=_cancellation_message(exc),
+            )
+            await session.commit()
+        raise
     except Exception as exc:
         async with pg_manager.get_async_session_context() as session:
             service = FeishuReviewService(session)
@@ -1095,28 +1182,77 @@ async def _run_publish_worker(
                 pass
         raise
 
-    async with pg_manager.get_async_session_context() as session:
-        switch = await FeishuReviewService(session).mark_publish_succeeded(
-            version_id,
-            yuxi_file_id=result.file_id,
-            chunk_count=result.chunk_count,
-        )
-        await session.commit()
+    try:
+        async with pg_manager.get_async_session_context() as session:
+            switch = await FeishuReviewService(session).mark_publish_succeeded(
+                version_id,
+                yuxi_file_id=result.file_id,
+                chunk_count=result.chunk_count,
+            )
+            await session.commit()
+    except (Exception, asyncio.CancelledError) as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            async with pg_manager.get_async_session_context() as status_session:
+                processing_status = await status_session.scalar(
+                    select(FeishuMaterialVersion.processing_status).where(
+                        FeishuMaterialVersion.version_id == version_id
+                    )
+                )
+            if processing_status in {"published", "replaced"}:
+                raise
+        recovery_message = str(exc)
+        retained_file_id = None
+        if result.file_id != publish_args["file_id"]:
+            try:
+                await knowledge_base.delete_file(publish_args["kb_id"], result.file_id)
+            except Exception as cleanup_exc:
+                recovery_message = f"{exc}; new file cleanup failed: {cleanup_exc}"
+                retained_file_id = result.file_id
+        try:
+            async with pg_manager.get_async_session_context() as recovery_session:
+                await FeishuReviewService(recovery_session).mark_publish_failed(
+                    version_id,
+                    message=recovery_message,
+                    yuxi_file_id=retained_file_id,
+                )
+                await recovery_session.commit()
+        except Exception as recovery_exc:
+            if isinstance(exc, asyncio.CancelledError):
+                exc.add_note(f"{recovery_message}; publish recovery failed: {recovery_exc}")
+                raise
+            raise RuntimeError(f"{recovery_message}; publish recovery failed: {recovery_exc}") from exc
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        if retained_file_id is not None:
+            raise RuntimeError(recovery_message) from exc
+        raise
     material = switch.material
-    if switch.replaced_file_id and switch.replaced_file_id != result.file_id:
+    if switch.replaced_file_id:
         try:
             await knowledge_base.delete_file(publish_args["kb_id"], switch.replaced_file_id)
         except Exception as exc:
             async with pg_manager.get_async_session_context() as session:
-                await FeishuReviewService(session).mark_replacement_cleanup_failed(
-                    version_id,
-                    message=str(exc),
-                )
+                service = FeishuReviewService(session)
+                if material.processing_status == "replaced":
+                    await service.mark_publish_obsolete_cleanup_failed(
+                        version_id,
+                        message=str(exc),
+                    )
+                else:
+                    await service.mark_replacement_cleanup_failed(
+                        version_id,
+                        message=str(exc),
+                    )
                 await session.commit()
     return {"version_id": material.version_id, "status": material.processing_status, "file_id": result.file_id}
 
 
-async def _run_processing_worker(version_id: str, *, operator_id: str) -> dict:
+async def _run_processing_worker(
+    version_id: str,
+    *,
+    operator_id: str,
+    context: TaskContext | None = None,
+) -> dict:
     try:
         async with pg_manager.get_async_session_context() as session:
             version, item, source = await FeishuReviewService(session).claim_processing(version_id)
@@ -1140,6 +1276,8 @@ async def _run_processing_worker(version_id: str, *, operator_id: str) -> dict:
             }
             kb_id = source.target_kb_id
             existing_file_id = version.yuxi_file_id
+        if context is not None:
+            await context.raise_if_cancelled()
         if existing_file_id is None:
             file_meta = await knowledge_base.add_file_record(kb_id, object_path, params=params, operator_id=operator_id)
             existing_file_id = file_meta["file_id"]
@@ -1151,6 +1289,17 @@ async def _run_processing_worker(version_id: str, *, operator_id: str) -> dict:
         parsed = await knowledge_base.parse_file(kb_id, existing_file_id, operator_id=operator_id)
         if parsed.get("status") != "parsed":
             raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
+    except asyncio.CancelledError as exc:
+        async with pg_manager.get_async_session_context() as session:
+            try:
+                await FeishuReviewService(session).mark_processing_failed(
+                    version_id,
+                    message=_cancellation_message(exc),
+                )
+                await session.commit()
+            except (LookupError, ValueError):
+                pass
+        raise
     except Exception as exc:
         async with pg_manager.get_async_session_context() as session:
             service = FeishuReviewService(session)
@@ -1160,14 +1309,29 @@ async def _run_processing_worker(version_id: str, *, operator_id: str) -> dict:
                 pass
         raise
 
-    async with pg_manager.get_async_session_context() as session:
-        material = await FeishuReviewService(session).mark_processing_succeeded(version_id, file_id=existing_file_id)
+    try:
+        async with pg_manager.get_async_session_context() as session:
+            material = await FeishuReviewService(session).mark_processing_succeeded(
+                version_id,
+                file_id=existing_file_id,
+            )
+    except asyncio.CancelledError as exc:
+        async with pg_manager.get_async_session_context() as session:
+            try:
+                await FeishuReviewService(session).mark_processing_failed(
+                    version_id,
+                    message=_cancellation_message(exc),
+                )
+                await session.commit()
+            except (LookupError, ValueError):
+                pass
+        raise
     return {"version_id": material.version_id, "status": material.processing_status, "file_id": existing_file_id}
 
 
 async def _enqueue_publish(version_id: str, *, operator_id: str):
     async def run_publish(context: TaskContext):
-        result = await _run_publish_worker(version_id, operator_id=operator_id)
+        result = await _run_publish_worker(version_id, operator_id=operator_id, context=context)
         await context.set_result(result)
         return result
 
@@ -1184,7 +1348,7 @@ async def _enqueue_publish(version_id: str, *, operator_id: str):
 
 async def _enqueue_processing(version_id: str, *, operator_id: str):
     async def run_processing(context: TaskContext):
-        result = await _run_processing_worker(version_id, operator_id=operator_id)
+        result = await _run_processing_worker(version_id, operator_id=operator_id, context=context)
         await context.set_result(result)
         return result
 
