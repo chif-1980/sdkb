@@ -6,6 +6,7 @@ import pytest
 import yuxi.integrations.feishu.client as feishu_client_module
 from yuxi.integrations.feishu import (
     FeishuAuthenticationError,
+    FeishuApiError,
     FeishuClient,
     FeishuCredentialError,
     FeishuPermissionError,
@@ -31,6 +32,17 @@ async def test_injected_client_does_not_require_a_base_url() -> None:
 
     assert node.node_token == "page-token"
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_does_not_close_an_injected_client() -> None:
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    client = FeishuClient(client=http_client, environ={"FEISHU_ACCESS_TOKEN": "test-token"})
+
+    await client.aclose()
+
+    assert http_client.is_closed is False
+    await http_client.aclose()
 
 
 @pytest.mark.asyncio
@@ -152,6 +164,54 @@ async def test_list_attachments_follows_page_token() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["list_children", "list_attachments"])
+@pytest.mark.parametrize("page_token", [None, "", 123])
+async def test_paginated_response_missing_or_invalid_page_token_raises(entrypoint: str, page_token: object) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/get_node"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"node": {"space_id": "space-1", "node_token": "root-token"}}},
+            )
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"items": [], "files": [], "has_more": True, "page_token": page_token}},
+        )
+
+    client = _client(handler)
+    with pytest.raises(FeishuApiError, match="page token"):
+        await getattr(client, entrypoint)("root-token")
+
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["list_children", "list_attachments"])
+async def test_paginated_response_reusing_page_token_raises(entrypoint: str) -> None:
+    requests = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        if request.url.path.endswith("/get_node"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"node": {"space_id": "space-1", "node_token": "root-token"}}},
+            )
+        requests += 1
+        assert requests < 3, "client requested a repeated page token indefinitely"
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"items": [], "files": [], "has_more": True, "page_token": "repeat"}},
+        )
+
+    client = _client(handler)
+    with pytest.raises(FeishuApiError, match="repeated page token"):
+        await getattr(client, entrypoint)("root-token")
+
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_download_returns_binary_content_and_metadata() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
@@ -187,6 +247,23 @@ async def test_auth_errors_are_normalized(status_code: int, error_type: type[Exc
 
     assert raised.value.status_code == status_code
     assert raised.value.request_id == "request-1"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_field", ["msg", "message"])
+async def test_business_error_uses_feishu_message(error_field: str) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": 999, error_field: "Readable Feishu error", "token": "response-secret"},
+        )
+
+    client = _client(handler)
+    with pytest.raises(FeishuApiError, match="Readable Feishu error") as raised:
+        await client.get_node("page-token")
+
+    assert "response-secret" not in str(raised.value)
     await client.aclose()
 
 

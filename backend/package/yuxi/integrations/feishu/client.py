@@ -12,6 +12,8 @@ from yuxi.utils import logger
 
 FEISHU_OPEN_API_BASE_URL = "https://open.feishu.cn"
 DEFAULT_CREDENTIAL_ENV_NAME = "FEISHU_ACCESS_TOKEN"
+
+
 class FeishuClientError(RuntimeError):
     def __init__(self, message: str, *, error: FeishuError | None = None) -> None:
         super().__init__(message)
@@ -62,12 +64,14 @@ class FeishuClient:
             raise ValueError("max_retries must be non-negative")
 
         self._token = token
+        self._owns_client = client is None
         self._client = client or httpx.AsyncClient(base_url=FEISHU_OPEN_API_BASE_URL, timeout=30.0)
         self._max_retries = max_retries
         self._sleep = sleep
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._owns_client:
+            await self._client.aclose()
 
     async def get_node(self, node_token: str) -> FeishuNode:
         payload = await self._get("/open-apis/wiki/v2/spaces/get_node", params={"token": node_token})
@@ -82,6 +86,7 @@ class FeishuClient:
 
         nodes: list[FeishuNode] = []
         page_token: str | None = None
+        seen_page_tokens: set[str] = set()
         while True:
             params: dict[str, str] = {"parent_node_token": parent_node_token}
             if page_token:
@@ -94,13 +99,12 @@ class FeishuClient:
             nodes.extend(self._node_from_payload(self._as_mapping(item, "node item")) for item in items)
             if not data.get("has_more"):
                 return nodes
-            page_token = data.get("page_token")
-            if not isinstance(page_token, str) or not page_token:
-                return nodes
+            page_token = self._next_page_token(data, seen_page_tokens)
 
     async def list_attachments(self, folder_token: str) -> list[FeishuAttachment]:
         attachments: list[FeishuAttachment] = []
         page_token: str | None = None
+        seen_page_tokens: set[str] = set()
         while True:
             params: dict[str, str] = {"folder_token": folder_token}
             if page_token:
@@ -113,9 +117,7 @@ class FeishuClient:
             attachments.extend(self._attachment_from_payload(self._as_mapping(item, "file item")) for item in files)
             if not data.get("has_more"):
                 return attachments
-            page_token = data.get("page_token")
-            if not isinstance(page_token, str) or not page_token:
-                return attachments
+            page_token = self._next_page_token(data, seen_page_tokens)
 
     async def download(self, file_token: str) -> FeishuDownload:
         response = await self._get_response(f"/open-apis/drive/v1/files/{file_token}/download")
@@ -140,12 +142,15 @@ class FeishuClient:
             )
         if payload.get("code", 0) != 0:
             code = payload.get("code")
+            message = payload.get("msg") or payload.get("message")
+            error_message = message if isinstance(message, str) and message else "Feishu API returned an error"
             raise FeishuApiError(
-                "Feishu API returned an error",
+                error_message,
                 error=FeishuError(
                     status_code=response.status_code,
                     request_id=self._request_id(response),
                     code=code if isinstance(code, int) else None,
+                    message=error_message,
                 ),
             )
         return payload
@@ -182,6 +187,16 @@ class FeishuClient:
         if not isinstance(value, Mapping):
             raise FeishuApiError(f"Feishu response had invalid {field_name}")
         return value
+
+    @staticmethod
+    def _next_page_token(data: Mapping[str, Any], seen_page_tokens: set[str]) -> str:
+        page_token = data.get("page_token")
+        if not isinstance(page_token, str) or not page_token:
+            raise FeishuApiError("Feishu paginated response was missing a page token")
+        if page_token in seen_page_tokens:
+            raise FeishuApiError("Feishu paginated response reused a repeated page token")
+        seen_page_tokens.add(page_token)
+        return page_token
 
     @staticmethod
     def _node_from_payload(value: Mapping[str, Any]) -> FeishuNode:
