@@ -17,7 +17,7 @@ from yuxi.integrations.feishu.client import FeishuPermissionError
 from yuxi.integrations.feishu.schemas import FeishuNode, FeishuPageContent
 from yuxi.knowledge.utils.kb_utils import prepare_item_metadata
 from yuxi.repositories.feishu_knowledge_repository import ConcurrentSyncRunError, FeishuKnowledgeRepository
-from yuxi.storage.postgres.models_business import Base
+from yuxi.storage.postgres.models_business import Base, User
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
     FeishuProcessingEvent,
@@ -2061,6 +2061,167 @@ async def test_confirm_removal_calls_external_adapter_outside_transaction(review
     assert calls == [("kb-1", "file-old", False)]
     assert removed.processing_status == "removed"
     assert item.active_version_id is None
+
+
+async def test_confirm_removal_commits_claim_before_external_delete_when_auth_opened_transaction(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'removal-claim.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    class RequestSession(AsyncSession):
+        fail_finalization_commit = False
+
+        async def commit(self):
+            if self.fail_finalization_commit:
+                raise RuntimeError("forced request finalization commit failure")
+            await super().commit()
+
+    session_factory = async_sessionmaker(
+        engine,
+        class_=RequestSession,
+        expire_on_commit=False,
+    )
+
+    async with session_factory() as seed_session:
+        seed_session.add_all(
+            [
+                User(
+                    id=1,
+                    username="Admin",
+                    uid="admin",
+                    password_hash="unused",
+                    role="admin",
+                ),
+                FeishuSource(
+                    source_id="source-1",
+                    name="Source",
+                    wiki_root_token="root",
+                    target_kb_id="kb-1",
+                    credential_env_name="FEISHU_ACCESS_TOKEN",
+                ),
+                FeishuSourceItem(
+                    item_id="item-1",
+                    source_id="source-1",
+                    item_key="page:space:node",
+                    item_type="page",
+                    title="Page",
+                    source_validity="invalid",
+                    active_version_id="version-old",
+                ),
+                FeishuMaterialVersion(
+                    version_id="version-old",
+                    item_id="item-1",
+                    revision="1",
+                    content_hash="old-hash",
+                    processing_status="published",
+                    review_status="approved",
+                    yuxi_file_id="file-old",
+                ),
+            ]
+        )
+        await seed_session.commit()
+
+    adapter_transaction_states = []
+
+    @asynccontextmanager
+    async def failing_request_context():
+        async with session_factory() as request_session:
+            try:
+                yield request_session
+                request_session.fail_finalization_commit = True
+                await request_session.commit()
+            except Exception:
+                await request_session.rollback()
+                raise
+
+    with pytest.raises(RuntimeError, match="forced request finalization commit failure"):
+        async with failing_request_context() as request_session:
+            await request_session.scalar(select(User).where(User.id == 1))
+
+            class RemovalAdapter:
+                async def remove(self, *, kb_id: str, file_id: str) -> None:
+                    adapter_transaction_states.append(request_session.in_transaction())
+
+            await FeishuReviewService(
+                request_session,
+                removal_adapter=RemovalAdapter(),
+            ).confirm_removal("version-old", operator_id="admin")
+
+    async with session_factory() as verification_session:
+        item = await verification_session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        version = await verification_session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-old")
+        )
+
+    assert adapter_transaction_states == [False]
+    assert version.processing_status == "removed"
+    assert version.yuxi_file_id is None
+    assert item.active_version_id is None
+    await engine.dispose()
+
+
+async def test_confirm_removal_claim_commit_failure_rolls_back_without_external_delete(monkeypatch, review_fixture):
+    calls = []
+    rollback_calls = 0
+
+    class UnexpectedRemovalAdapter:
+        async def remove(self, *, kb_id: str, file_id: str) -> None:
+            calls.append((kb_id, file_id))
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    item.source_validity = "invalid"
+    await review_fixture.commit()
+    await review_fixture.scalar(select(User).limit(1))
+    original_rollback = review_fixture.rollback
+
+    async def fail_commit():
+        raise RuntimeError("forced claim commit failure")
+
+    async def track_rollback():
+        nonlocal rollback_calls
+        rollback_calls += 1
+        await original_rollback()
+
+    monkeypatch.setattr(review_fixture, "commit", fail_commit)
+    monkeypatch.setattr(review_fixture, "rollback", track_rollback)
+
+    with pytest.raises(RuntimeError, match="forced claim commit failure"):
+        await FeishuReviewService(
+            review_fixture,
+            removal_adapter=UnexpectedRemovalAdapter(),
+        ).confirm_removal("version-old", operator_id="admin")
+
+    assert calls == []
+    assert rollback_calls == 1
+
+
+async def test_removal_claim_rejects_second_worker_after_first_claim_is_committed(review_fixture):
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    item.source_validity = "invalid"
+    await review_fixture.commit()
+    service = FeishuReviewService(review_fixture)
+
+    await service._claim_removal("version-old", operator_id="admin-1")
+    await review_fixture.commit()
+
+    with pytest.raises(ValueError, match="active published version"):
+        await service._claim_removal("version-old", operator_id="admin-2")
+
+    status = await review_fixture.scalar(
+        select(FeishuMaterialVersion.processing_status).where(FeishuMaterialVersion.version_id == "version-old")
+    )
+    assert status == "removal_pending"
+    events = list(
+        (
+            await review_fixture.execute(
+                select(FeishuProcessingEvent).where(
+                    FeishuProcessingEvent.version_id == "version-old",
+                    FeishuProcessingEvent.event_type == "removal_started",
+                )
+            )
+        ).scalars()
+    )
+    assert len(events) == 1
 
 
 async def test_batch_action_reports_each_version_and_supports_reject(monkeypatch):

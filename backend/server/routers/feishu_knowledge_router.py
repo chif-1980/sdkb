@@ -479,6 +479,11 @@ class FeishuReviewService:
 
     async def confirm_removal(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
         version, item, source = await self._claim_removal(version_id, operator_id=operator_id)
+        try:
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         external_file_already_missing = False
         try:
             await self.removal_adapter.remove(kb_id=source.target_kb_id, file_id=version.yuxi_file_id)
