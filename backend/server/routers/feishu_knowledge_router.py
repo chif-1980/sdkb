@@ -1038,6 +1038,8 @@ async def scan_source(
     await db.commit()
 
     async def run_scan(context: TaskContext):
+        queued_version_ids = []
+        enqueued_version_ids = set()
         try:
             async with pg_manager.get_async_session_context() as session:
                 worker_repository = FeishuKnowledgeRepository(session, queued_run_id=run.run_id)
@@ -1087,16 +1089,18 @@ async def scan_source(
                         raise RuntimeError(result.error_summary or "Feishu scan failed")
                     if hasattr(context, "raise_if_cancelled"):
                         await context.raise_if_cancelled()
-                    queued_version_ids = await worker_repository.queue_archived_versions_for_processing(
+                    claimed_version_ids = await worker_repository.queue_archived_versions_for_processing(
                         source_id=source_id,
                         operator_id=current_user.uid,
                     )
                     await session.commit()
+                    queued_version_ids = claimed_version_ids
                     await context.set_result({"run_id": result.run_id, "status": result.status})
                     enqueue_errors = []
                     for version_id in queued_version_ids:
                         try:
                             await _enqueue_processing(version_id, operator_id=current_user.uid)
+                            enqueued_version_ids.add(version_id)
                         except Exception as exc:
                             enqueue_errors.append(exc)
                             await FeishuReviewService(session).mark_processing_queue_failed(
@@ -1111,16 +1115,19 @@ async def scan_source(
                     if client is not None:
                         await client.aclose()
         except asyncio.CancelledError as exc:
-            queued_version_ids = []
+            remaining_version_ids = []
             try:
                 async with pg_manager.get_async_session_context() as recovery_session:
                     recovery_repository = FeishuKnowledgeRepository(recovery_session)
                     status = await recovery_repository.get_sync_run_status(run.run_id)
                     if status == "succeeded":
-                        claimed_version_ids = await recovery_repository.queue_archived_versions_for_processing(
-                            source_id=source_id,
-                            operator_id=current_user.uid,
-                        )
+                        if not queued_version_ids:
+                            claimed_version_ids = await recovery_repository.queue_archived_versions_for_processing(
+                                source_id=source_id,
+                                operator_id=current_user.uid,
+                            )
+                        else:
+                            claimed_version_ids = queued_version_ids
                     else:
                         await recovery_repository.fail_sync_run(
                             run_id=run.run_id,
@@ -1131,15 +1138,19 @@ async def scan_source(
                     await recovery_session.commit()
                     if status == "succeeded":
                         queued_version_ids = claimed_version_ids
+                        remaining_version_ids = [
+                            version_id for version_id in queued_version_ids if version_id not in enqueued_version_ids
+                        ]
             except (Exception, asyncio.CancelledError) as recovery_exc:
                 _note_cancellation_recovery_failure(
                     exc,
                     operation="scan cancellation recovery",
                     recovery_exc=recovery_exc,
                 )
-            for version_id in queued_version_ids:
+            for version_id in remaining_version_ids:
                 try:
                     await _enqueue_processing(version_id, operator_id=current_user.uid)
+                    enqueued_version_ids.add(version_id)
                 except (Exception, asyncio.CancelledError) as enqueue_exc:
                     if isinstance(enqueue_exc, asyncio.CancelledError):
                         _note_cancellation_recovery_failure(

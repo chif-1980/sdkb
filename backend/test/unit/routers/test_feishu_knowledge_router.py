@@ -168,6 +168,89 @@ async def _seed_feishu_source(session_factory):
         await session.commit()
 
 
+async def _prepare_succeeded_scan(monkeypatch, database_path, processing_task):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def aclose(self):
+            pass
+
+    class FakeScanService:
+        def __init__(self, **kwargs):
+            self.repository = kwargs["repository"]
+
+        async def scan(self, **kwargs):
+            run = await self.repository.session.scalar(
+                select(FeishuSyncRun).where(FeishuSyncRun.run_id == self.repository.queued_run_id)
+            )
+            run.status = "succeeded"
+            run.finished_at = datetime.now(UTC)
+            return SimpleNamespace(run_id=run.run_id, status="succeeded")
+
+    async def capture_task(**kwargs):
+        if kwargs["task_type"] == "feishu_scan":
+            captured["coroutine"] = kwargs["coroutine"]
+            return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+        return await processing_task(**kwargs)
+
+    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        lambda: _production_session_context(session_factory),
+    )
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_task)
+
+    await _seed_feishu_source(session_factory)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                FeishuSourceItem(
+                    item_id=f"item-discovered-{index}",
+                    source_id="source-1",
+                    item_key=f"page:space:discovered-{index}",
+                    item_type="page",
+                    title=f"Discovered {index}",
+                    source_validity="valid",
+                )
+                for index in (1, 2, 3)
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                FeishuMaterialVersion(
+                    version_id=f"version-discovered-{index}",
+                    item_id=f"item-discovered-{index}",
+                    revision="1",
+                    content_hash=f"discovered-hash-{index}",
+                    source_object_path=(f"minio://knowledgebases/feishu/source-1/item-{index}/source.md"),
+                    processing_status="discovered",
+                    review_status="pending",
+                )
+                for index in (1, 2, 3)
+            ]
+        )
+        await session.commit()
+
+    async with session_factory() as request_session:
+        response = await router_module.scan_source(
+            "source-1",
+            router_module.ScanRequest(mode="full"),
+            db=request_session,
+            current_user=SimpleNamespace(uid="admin"),
+        )
+    return engine, session_factory, captured, response
+
+
 async def _publish_activation_failure_database(database_path, *, failure_session=2):
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
     async with engine.begin() as connection:
@@ -957,6 +1040,116 @@ async def test_scan_cancellation_processing_enqueue_failure_is_recorded_and_othe
     assert [version.processing_status for version in versions] == ["parse_failed", "processing_queued"]
     assert len(events) == 1
     assert events[0].message == "processing queue unavailable"
+    await engine.dispose()
+
+
+async def test_scan_set_result_cancellation_enqueues_all_claimed_versions(monkeypatch, tmp_path):
+    processing_calls = []
+    cancellation = asyncio.CancelledError("scan result cancelled")
+
+    async def capture_processing(**kwargs):
+        version_id = kwargs["payload"]["version_id"]
+        processing_calls.append(version_id)
+        assert kwargs["payload_match"] == {"version_id": version_id}
+        assert kwargs["statuses"] == {"pending"}
+        return SimpleNamespace(id=f"task-{version_id}"), True
+
+    engine, session_factory, captured, response = await _prepare_succeeded_scan(
+        monkeypatch,
+        tmp_path / "cancelled-scan-result.db",
+        capture_processing,
+    )
+
+    class Context:
+        async def raise_if_cancelled(self):
+            pass
+
+        async def set_result(self, value):
+            raise cancellation
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await captured["coroutine"](Context())
+
+    async with session_factory() as session:
+        run = await session.scalar(select(FeishuSyncRun).where(FeishuSyncRun.run_id == response["run_id"]))
+        versions = list(
+            (
+                await session.execute(
+                    select(FeishuMaterialVersion)
+                    .where(FeishuMaterialVersion.version_id.like("version-discovered-%"))
+                    .order_by(FeishuMaterialVersion.version_id)
+                )
+            ).scalars()
+        )
+
+    assert error.value is cancellation
+    assert processing_calls == [
+        "version-discovered-1",
+        "version-discovered-2",
+        "version-discovered-3",
+    ]
+    assert run.status == "succeeded"
+    assert [version.processing_status for version in versions] == ["processing_queued"] * 3
+    await engine.dispose()
+
+
+async def test_scan_enqueue_cancellation_recovers_only_not_yet_enqueued_versions(monkeypatch, tmp_path):
+    processing_calls = []
+    attempts = {}
+    cancellation = asyncio.CancelledError("second processing enqueue cancelled")
+
+    async def capture_processing(**kwargs):
+        version_id = kwargs["payload"]["version_id"]
+        processing_calls.append(version_id)
+        attempts[version_id] = attempts.get(version_id, 0) + 1
+        assert kwargs["payload_match"] == {"version_id": version_id}
+        assert kwargs["statuses"] == {"pending"}
+        if version_id == "version-discovered-2" and attempts[version_id] == 1:
+            raise cancellation
+        return SimpleNamespace(id=f"task-{version_id}"), True
+
+    engine, session_factory, captured, response = await _prepare_succeeded_scan(
+        monkeypatch,
+        tmp_path / "cancelled-processing-enqueue.db",
+        capture_processing,
+    )
+
+    class Context:
+        async def raise_if_cancelled(self):
+            pass
+
+        async def set_result(self, value):
+            pass
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await captured["coroutine"](Context())
+
+    async with session_factory() as session:
+        run = await session.scalar(select(FeishuSyncRun).where(FeishuSyncRun.run_id == response["run_id"]))
+        versions = list(
+            (
+                await session.execute(
+                    select(FeishuMaterialVersion)
+                    .where(FeishuMaterialVersion.version_id.like("version-discovered-%"))
+                    .order_by(FeishuMaterialVersion.version_id)
+                )
+            ).scalars()
+        )
+
+    assert error.value is cancellation
+    assert processing_calls == [
+        "version-discovered-1",
+        "version-discovered-2",
+        "version-discovered-2",
+        "version-discovered-3",
+    ]
+    assert attempts == {
+        "version-discovered-1": 1,
+        "version-discovered-2": 2,
+        "version-discovered-3": 1,
+    }
+    assert run.status == "succeeded"
+    assert [version.processing_status for version in versions] == ["processing_queued"] * 3
     await engine.dispose()
 
 
