@@ -3,10 +3,23 @@
     <div v-if="selectedRowKeys.length" class="batch-bar">
       <span>已选 {{ selectedRowKeys.length }} 条</span>
       <div class="batch-actions">
-        <a-button size="small" @click="emitBatch('approve')">审核通过</a-button>
-        <a-button size="small" @click="emitBatch('reject')">驳回</a-button>
-        <a-button size="small" @click="emitBatch('retry')">重试</a-button>
-        <a-button size="small" danger @click="emitBatch('confirm_removal')">确认下架</a-button>
+        <a-button size="small" :disabled="!canBatch('approve')" @click="emitBatch('approve')">
+          审核通过
+        </a-button>
+        <a-button size="small" :disabled="!canBatch('reject')" @click="emitBatch('reject')">
+          驳回
+        </a-button>
+        <a-button size="small" :disabled="!canBatch('retry')" @click="emitBatch('retry')">
+          重试
+        </a-button>
+        <a-button
+          size="small"
+          danger
+          :disabled="!canBatch('confirm_removal')"
+          @click="emitBatch('confirm_removal')"
+        >
+          确认下架
+        </a-button>
       </div>
     </div>
     <div class="table-scroll">
@@ -61,11 +74,23 @@
                   <MoreHorizontal :size="17" />
                 </a-button>
                 <template #overlay>
-                  <a-menu @click="({ key }) => emit('action', { action: key, material: record })">
-                    <a-menu-item key="approve" :disabled="isUnsupported(record.item_type)">审核通过</a-menu-item>
-                    <a-menu-item key="reject">驳回</a-menu-item>
-                    <a-menu-item key="retry" :disabled="isUnsupported(record.item_type)">重试</a-menu-item>
-                    <a-menu-item key="confirm_removal" danger>确认下架</a-menu-item>
+                  <a-menu @click="({ key }) => emitAction(record, key)">
+                    <a-menu-item key="approve" :disabled="!canPerformAction(record, 'approve')">
+                      审核通过
+                    </a-menu-item>
+                    <a-menu-item key="reject" :disabled="!canPerformAction(record, 'reject')">
+                      驳回
+                    </a-menu-item>
+                    <a-menu-item key="retry" :disabled="!canPerformAction(record, 'retry')">
+                      重试
+                    </a-menu-item>
+                    <a-menu-item
+                      key="confirm_removal"
+                      danger
+                      :disabled="!canPerformAction(record, 'confirm_removal')"
+                    >
+                      确认下架
+                    </a-menu-item>
                   </a-menu>
                 </template>
               </a-dropdown>
@@ -89,6 +114,10 @@ const props = defineProps({
 
 const emit = defineEmits(['open-detail', 'action', 'batch-action', 'selection-limit'])
 const selectedRowKeys = ref([])
+const selectedMaterials = computed(() => {
+  const selectedIds = new Set(selectedRowKeys.value)
+  return props.materials.filter((item) => selectedIds.has(item.version_id))
+})
 
 const columns = [
   { title: '素材', key: 'title', width: 270 },
@@ -172,6 +201,35 @@ function isUnsupported(value) {
   return value === 'audio' || value === 'video'
 }
 
+function canPerformAction(material, action) {
+  const parsedReady =
+    material.review_status === 'pending' &&
+    ['parsed', 'awaiting_review'].includes(material.processing_status) &&
+    Boolean(material.yuxi_file_id)
+
+  if (action === 'approve' || action === 'reject') return parsedReady
+  if (action === 'retry') {
+    return ['parse_failed', 'publish_failed'].includes(material.processing_status)
+  }
+  if (action === 'confirm_removal') {
+    return (
+      material.source_validity === 'invalid' &&
+      material.active === true &&
+      ['published', 'removal_failed'].includes(material.processing_status) &&
+      Boolean(material.yuxi_file_id)
+    )
+  }
+  return false
+}
+
+function canBatch(action) {
+  return (
+    selectedMaterials.value.length > 0 &&
+    selectedMaterials.value.length === selectedRowKeys.value.length &&
+    selectedMaterials.value.every((material) => canPerformAction(material, action))
+  )
+}
+
 function processingStatus(value) {
   return processingStatuses[value] || { label: value || '未知', color: 'default' }
 }
@@ -192,7 +250,13 @@ function formatTime(value) {
 }
 
 function emitBatch(action) {
+  if (!canBatch(action)) return
   emit('batch-action', { action, versionIds: [...selectedRowKeys.value] })
+}
+
+function emitAction(material, action) {
+  if (!canPerformAction(material, action)) return
+  emit('action', { action, material })
 }
 
 defineExpose({ clearSelection: () => (selectedRowKeys.value = []) })

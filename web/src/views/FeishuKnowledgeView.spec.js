@@ -51,6 +51,20 @@ const source = {
   source_invalid_count: 2
 }
 
+function makeMaterial(versionId, overrides = {}) {
+  return {
+    version_id: versionId,
+    title: versionId,
+    item_type: 'page',
+    processing_status: 'awaiting_review',
+    review_status: 'pending',
+    source_validity: 'valid',
+    active: false,
+    yuxi_file_id: `file-${versionId}`,
+    ...overrides
+  }
+}
+
 function mountView() {
   return mount(FeishuKnowledgeView, {
     global: {
@@ -80,7 +94,7 @@ function mountMaterialTable(props = {}) {
   return mount(FeishuMaterialTable, {
     props: {
       materials: [
-        { version_id: 'version-page', title: '产品手册', item_type: 'page' },
+        makeMaterial('version-page', { title: '产品手册' }),
         { version_id: 'version-audio', title: '客户访谈', item_type: 'audio' }
       ],
       ...props
@@ -89,12 +103,22 @@ function mountMaterialTable(props = {}) {
       stubs: {
         'a-table': {
           name: 'ATable',
-          props: ['rowSelection'],
-          template: '<div />'
+          props: ['rowSelection', 'dataSource'],
+          template:
+            '<div><section v-for="record in dataSource" :key="record.version_id" :data-version-id="record.version_id"><slot name="bodyCell" :column="{ key: \'action\' }" :record="record" /></section></div>'
         },
         'a-button': {
+          props: ['disabled'],
           emits: ['click'],
-          template: '<button @click="$emit(\'click\')"><slot /></button>'
+          template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>'
+        },
+        'a-tag': { template: '<span><slot /></span>' },
+        'a-tooltip': { template: '<div><slot /></div>' },
+        'a-dropdown': { template: '<div><slot /><slot name="overlay" /></div>' },
+        'a-menu': { template: '<div><slot /></div>' },
+        'a-menu-item': {
+          props: ['disabled'],
+          template: '<button class="menu-action" :disabled="disabled"><slot /></button>'
         }
       }
     }
@@ -271,6 +295,167 @@ describe('FeishuMaterialTable', () => {
       [{ action: 'approve', versionIds: ['version-page'] }]
     ])
   })
+
+  it('按后端状态机禁用单条素材操作', () => {
+    const wrapper = mountMaterialTable({
+      materials: [
+        makeMaterial('reviewable', { title: '待审核素材' }),
+        makeMaterial('missing-review-file', {
+          title: '缺少待审核文件',
+          yuxi_file_id: ''
+        }),
+        makeMaterial('retryable', {
+          title: '解析失败素材',
+          processing_status: 'parse_failed'
+        }),
+        makeMaterial('removable', {
+          title: '可下架素材',
+          processing_status: 'published',
+          review_status: 'approved',
+          source_validity: 'invalid',
+          active: true
+        }),
+        makeMaterial('inactive-removal', {
+          title: '非活跃素材',
+          processing_status: 'published',
+          review_status: 'approved',
+          source_validity: 'invalid'
+        }),
+        makeMaterial('missing-file-removal', {
+          title: '缺少知识库文件',
+          processing_status: 'removal_failed',
+          review_status: 'approved',
+          source_validity: 'invalid',
+          active: true,
+          yuxi_file_id: ''
+        }),
+        makeMaterial('failed-removal', {
+          title: '下架失败素材',
+          processing_status: 'removal_failed',
+          review_status: 'approved',
+          source_validity: 'invalid',
+          active: true
+        })
+      ]
+    })
+
+    const disabledActions = (versionId) =>
+      Object.fromEntries(
+        wrapper
+          .get(`[data-version-id="${versionId}"]`)
+          .findAll('.menu-action')
+          .map((button) => [button.text(), button.attributes('disabled') !== undefined])
+      )
+
+    expect(disabledActions('reviewable')).toEqual({
+      审核通过: false,
+      驳回: false,
+      重试: true,
+      确认下架: true
+    })
+    expect(disabledActions('retryable')).toEqual({
+      审核通过: true,
+      驳回: true,
+      重试: false,
+      确认下架: true
+    })
+    expect(disabledActions('missing-review-file').审核通过).toBe(true)
+    expect(disabledActions('missing-review-file').驳回).toBe(true)
+    expect(disabledActions('removable')).toEqual({
+      审核通过: true,
+      驳回: true,
+      重试: true,
+      确认下架: false
+    })
+    expect(disabledActions('inactive-removal').确认下架).toBe(true)
+    expect(disabledActions('missing-file-removal').确认下架).toBe(true)
+    expect(disabledActions('failed-removal').确认下架).toBe(false)
+  })
+
+  it('仅当全部所选素材符合对应条件时启用四种批量操作', async () => {
+    const wrapper = mountMaterialTable({
+      materials: [
+        makeMaterial('reviewable-1', {
+          title: '待审核素材一',
+          processing_status: 'parsed',
+        }),
+        makeMaterial('reviewable-2', { title: '待审核素材二' }),
+        makeMaterial('retryable', {
+          title: '发布失败素材',
+          processing_status: 'publish_failed',
+          review_status: 'approved'
+        }),
+        makeMaterial('retryable-2', {
+          title: '解析失败素材',
+          processing_status: 'parse_failed',
+        }),
+        makeMaterial('removable-1', {
+          title: '可下架素材一',
+          processing_status: 'published',
+          review_status: 'approved',
+          source_validity: 'invalid',
+          active: true
+        }),
+        makeMaterial('removable-2', {
+          title: '可下架素材二',
+          processing_status: 'removal_failed',
+          review_status: 'approved',
+          source_validity: 'invalid',
+          active: true
+        })
+      ]
+    })
+    const rowSelection = wrapper.findComponent({ name: 'ATable' }).props('rowSelection')
+    const batchDisabledActions = () =>
+      Object.fromEntries(
+        wrapper
+          .get('.batch-actions')
+          .findAll('button')
+          .map((button) => [button.text(), button.attributes('disabled') !== undefined])
+      )
+
+    rowSelection.onChange(['reviewable-1', 'retryable'])
+    await wrapper.vm.$nextTick()
+    expect(batchDisabledActions()).toEqual({
+      审核通过: true,
+      驳回: true,
+      重试: true,
+      确认下架: true
+    })
+    const approveButton = wrapper
+      .get('.batch-actions')
+      .findAll('button')
+      .find((button) => button.text() === '审核通过')
+    await approveButton.trigger('click')
+    expect(wrapper.emitted('batch-action')).toBeUndefined()
+
+    rowSelection.onChange(['reviewable-1', 'reviewable-2'])
+    await wrapper.vm.$nextTick()
+    expect(batchDisabledActions()).toEqual({
+      审核通过: false,
+      驳回: false,
+      重试: true,
+      确认下架: true
+    })
+
+    rowSelection.onChange(['retryable', 'retryable-2'])
+    await wrapper.vm.$nextTick()
+    expect(batchDisabledActions()).toEqual({
+      审核通过: true,
+      驳回: true,
+      重试: false,
+      确认下架: true
+    })
+
+    rowSelection.onChange(['removable-1', 'removable-2'])
+    await wrapper.vm.$nextTick()
+    expect(batchDisabledActions()).toEqual({
+      审核通过: true,
+      驳回: true,
+      重试: true,
+      确认下架: false
+    })
+  })
 })
 
 describe('FeishuMaterialDetailDrawer', () => {
@@ -364,6 +549,95 @@ describe('FeishuKnowledgeView', () => {
     expect(apiAdminGet).toHaveBeenCalledWith('/api/feishu-knowledge/runs/run-1')
     expect(apiAdminGet.mock.calls.filter(([url]) => url === '/api/feishu-knowledge/sources')).toHaveLength(2)
     expect(message.success).toHaveBeenCalledWith('增量扫描完成')
+  })
+
+  it('进度和批次列表连续失败后仍轮询同一批次直至终态', async () => {
+    let runRequests = 0
+    let listRunRequests = 0
+    apiAdminPost.mockResolvedValue({ run_id: 'run-retry', status: 'queued' })
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/runs/run-retry')) {
+        runRequests += 1
+        if (runRequests <= 2) return Promise.reject(new Error('temporary network error'))
+        return Promise.resolve({
+          run_id: 'run-retry',
+          run_type: 'incremental',
+          status: 'succeeded'
+        })
+      }
+      if (url.endsWith('/runs')) {
+        listRunRequests += 1
+        if (listRunRequests === 2 || listRunRequests === 3) {
+          return Promise.reject(new Error('temporary list error'))
+        }
+        return Promise.resolve({ items: [] })
+      }
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="scan-incremental"]').trigger('click')
+    await flushPromises()
+
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeDefined()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(runRequests).toBe(3)
+    expect(message.success).toHaveBeenCalledWith('增量扫描完成')
+    expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('卸载后忽略在途轮询响应且不再调度', async () => {
+    let resolveFirstRun
+    let runRequests = 0
+    apiAdminPost.mockResolvedValue({ run_id: 'run-unmount', status: 'queued' })
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/runs/run-unmount')) {
+        runRequests += 1
+        if (runRequests === 1) {
+          return new Promise((resolve) => (resolveFirstRun = resolve))
+        }
+        return Promise.resolve({
+          run_id: 'run-unmount',
+          run_type: 'incremental',
+          status: 'succeeded'
+        })
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="scan-incremental"]').trigger('click')
+    await flushPromises()
+    vi.advanceTimersByTime(2000)
+    expect(runRequests).toBe(1)
+
+    wrapper.unmount()
+    resolveFirstRun({
+      run_id: 'run-unmount',
+      run_type: 'incremental',
+      status: 'running'
+    })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(10000)
+    await flushPromises()
+
+    expect(runRequests).toBe(1)
+    expect(
+      apiAdminGet.mock.calls.filter(([url]) => url === '/api/feishu-knowledge/sources')
+    ).toHaveLength(1)
+    expect(message.success).not.toHaveBeenCalledWith('增量扫描完成')
   })
 
   it('审核通过前要求确认，确认后调用接口并刷新素材', async () => {

@@ -201,6 +201,7 @@ const updatedRange = ref([])
 const materialTableRef = ref(null)
 let pollTimer = null
 let detailRequestSeq = 0
+let isAlive = true
 
 function emptyDetailContent() {
   return { content: '', lines: [], loading: false, error: '' }
@@ -367,14 +368,17 @@ async function startScan(mode) {
 }
 
 function schedulePoll() {
+  if (!isAlive || !activeRunId.value) return
   clearTimeout(pollTimer)
   pollTimer = setTimeout(pollActiveRun, 2000)
 }
 
 async function pollActiveRun() {
-  if (!activeRunId.value) return
+  const runId = activeRunId.value
+  if (!isAlive || !runId) return
   try {
-    const run = await feishuKnowledgeApi.getRun(activeRunId.value)
+    const run = await feishuKnowledgeApi.getRun(runId)
+    if (!isAlive || activeRunId.value !== runId) return
     const index = runs.value.findIndex((item) => item.run_id === run.run_id)
     const runType = run.run_type || (index >= 0 ? runs.value[index].run_type : '')
     if (index >= 0) runs.value.splice(index, 1, run)
@@ -382,6 +386,7 @@ async function pollActiveRun() {
     if (TERMINAL_RUN_STATUSES.has(run.status)) {
       activeRunId.value = ''
       await refreshAll()
+      if (!isAlive) return
       if (run.status === 'succeeded') {
         message.success(`${runType === 'full' ? '全量' : '增量'}扫描完成`)
       } else {
@@ -391,9 +396,14 @@ async function pollActiveRun() {
     }
     schedulePoll()
   } catch (error) {
-    activeRunId.value = ''
+    if (!isAlive || activeRunId.value !== runId) return
     message.error(feishuKnowledgeApi.getErrorMessage(error, '获取扫描进度失败'))
-    await loadRuns()
+    try {
+      await loadRuns()
+    } catch {
+      // 仅 getRun 返回明确终态时才结束当前轮询。
+    }
+    if (isAlive && activeRunId.value === runId) schedulePoll()
   }
 }
 
@@ -603,7 +613,10 @@ function formatTime(value) {
 }
 
 onMounted(initialize)
-onBeforeUnmount(() => clearTimeout(pollTimer))
+onBeforeUnmount(() => {
+  isAlive = false
+  clearTimeout(pollTimer)
+})
 </script>
 
 <style scoped lang="less">
