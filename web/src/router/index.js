@@ -85,6 +85,19 @@ const router = createRouter({
       ]
     },
     {
+      path: '/feishu-knowledge',
+      name: 'feishu-knowledge',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'FeishuKnowledgeComp',
+          component: () => import('../views/FeishuKnowledgeView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+        }
+      ]
+    },
+    {
       path: '/model-manage',
       name: 'model-manage',
       component: AppLayout,

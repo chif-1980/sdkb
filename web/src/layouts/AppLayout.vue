@@ -11,6 +11,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   MessageCirclePlus,
+  Workflow,
   Search
 } from 'lucide-vue-next'
 
@@ -155,6 +156,15 @@ const mainList = computed(() => {
     icon: Box,
     activeIcon: Box
   })
+
+  if (userStore.isAdmin) {
+    items.push({
+      name: '知识加工',
+      path: '/feishu-knowledge',
+      icon: Workflow,
+      activeIcon: Workflow
+    })
+  }
 
   if (userStore.isSuperAdmin) {
     items.push({
