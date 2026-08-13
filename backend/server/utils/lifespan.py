@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from yuxi.services.task_service import tasker
+from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.models.providers.service import ensure_builtin_model_providers_in_db
 from yuxi.services.run_queue_service import close_queue_clients, get_redis_client
@@ -105,6 +106,11 @@ async def lifespan(app: FastAPI):
     print("LangGraph Checkpoint tables verified/created!")
 
     await tasker.start()
+    try:
+        async with pg_manager.get_async_session_context() as session:
+            await FeishuKnowledgeRepository(session).reconcile_interrupted_work()
+    except Exception as e:
+        logger.error(f"Failed to reconcile interrupted Feishu work during startup: {e}")
     logger.info(f"""
 
 ░██     ░██                       ░██

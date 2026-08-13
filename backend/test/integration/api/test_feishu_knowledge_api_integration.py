@@ -66,6 +66,9 @@ class FakeDatabase:
     async def execute(self, _statement):
         return FakeResult([self.source])
 
+    async def commit(self):
+        pass
+
 
 def _app() -> FastAPI:
     app = FastAPI()
@@ -269,12 +272,14 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
     assert ("approve", "version-1", "admin-1") in calls
 
 
-async def test_lifespan_does_not_scan_or_schedule_feishu_work():
+async def test_lifespan_reconciles_feishu_state_after_tasker_start_without_external_work():
     source = inspect.getsource(lifespan)
 
     assert "ensure_knowledge_schema" in source
-    assert "await tasker.start()" in source
-    assert "feishu" not in source.lower()
+    assert source.index("await tasker.start()") < source.index("reconcile_interrupted_work") < source.index("yield")
+    assert "FeishuClient" not in source
+    assert "FeishuScanService" not in source
+    assert "enqueue" not in source
 
 
 @pytest.mark.skipif(not os.getenv("FEISHU_ACCESS_TOKEN"), reason="Real Feishu credentials are not configured")

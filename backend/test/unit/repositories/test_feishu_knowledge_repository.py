@@ -17,6 +17,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
     FeishuProcessingEvent,
     FeishuSourceItem,
+    FeishuSyncRun,
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -188,6 +189,146 @@ async def test_upsert_and_version_methods_preserve_active_version(repository):
     assert duplicate_created is False
     assert duplicate.version_id == version.version_id
     assert await repository.find_current_version(item.item_id) == version
+
+
+async def test_queue_archived_versions_for_processing_is_atomic_and_filters_unsupported(repository, session):
+    page, _ = await repository.upsert_source_item(
+        source_id="source-1",
+        item_key="page:space-1:root",
+        item_type="page",
+        title="Root",
+        parent_item_key=None,
+        path_text="Root",
+        source_url="https://example.feishu.cn/wiki/root",
+        source_updated_at=None,
+    )
+    attachment, _ = await repository.upsert_source_item(
+        source_id="source-1",
+        item_key="attachment:file-1",
+        item_type="attachment",
+        title="Guide.pdf",
+        parent_item_key=page.item_key,
+        path_text="Root / Guide.pdf",
+        source_url=None,
+        source_updated_at=None,
+    )
+    audio, _ = await repository.upsert_source_item(
+        source_id="source-1",
+        item_key="audio:file-2",
+        item_type="audio",
+        title="Call.mp3",
+        parent_item_key=page.item_key,
+        path_text="Root / Call.mp3",
+        source_url=None,
+        source_updated_at=None,
+    )
+    page_version, _ = await repository.create_material_version(
+        item_id=page.item_id,
+        revision="page-1",
+        content_hash="page-hash",
+        processing_status="discovered",
+        processing_params={},
+    )
+    attachment_version, _ = await repository.create_material_version(
+        item_id=attachment.item_id,
+        revision="attachment-1",
+        content_hash="attachment-hash",
+        processing_status="discovered",
+        processing_params={},
+    )
+    audio_version, _ = await repository.create_material_version(
+        item_id=audio.item_id,
+        revision="audio-1",
+        content_hash="audio-hash",
+        processing_status="discovered",
+        processing_params={},
+    )
+    page_version.source_object_path = "minio://knowledgebases/page.md"
+    audio_version.source_object_path = "minio://knowledgebases/call.mp3"
+    await session.commit()
+
+    claimed = await repository.queue_archived_versions_for_processing(
+        source_id="source-1",
+        operator_id="admin",
+    )
+    claimed_again = await repository.queue_archived_versions_for_processing(
+        source_id="source-1",
+        operator_id="admin",
+    )
+
+    assert claimed == [page_version.version_id]
+    assert claimed_again == []
+    assert page_version.processing_status == "processing_queued"
+    assert attachment_version.processing_status == "discovered"
+    assert audio_version.processing_status == "discovered"
+    events = list((await session.execute(select(FeishuProcessingEvent))).scalars())
+    assert [(event.version_id, event.event_type, event.from_status, event.to_status) for event in events] == [
+        (page_version.version_id, "processing_queued", "discovered", "processing_queued")
+    ]
+
+
+async def test_startup_reconciliation_recovers_interrupted_states_once(repository, session):
+    transitions = [
+        ("processing-queued", "processing_queued", "parse_failed"),
+        ("processing", "processing", "parse_failed"),
+        ("publish-queued", "publish_queued", "publish_failed"),
+        ("publishing", "publishing", "publish_failed"),
+        ("removal", "removal_pending", "published"),
+    ]
+    versions = []
+    for index, (name, status, _) in enumerate(transitions):
+        item = FeishuSourceItem(
+            item_id=f"item-{name}",
+            source_id="source-1",
+            item_key=f"page:space-1:{name}",
+            item_type="page",
+            title=name,
+            source_validity="valid",
+            active_version_id=f"version-{name}" if status == "removal_pending" else None,
+        )
+        version = FeishuMaterialVersion(
+            version_id=f"version-{name}",
+            item_id=item.item_id,
+            revision=str(index),
+            content_hash=f"hash-{name}",
+            processing_status=status,
+        )
+        session.add_all([item, version])
+        versions.append(version)
+    runs = [
+        FeishuSyncRun(run_id="run-queued", source_id="source-1", run_type="full", status="queued"),
+        FeishuSyncRun(run_id="run-running", source_id="source-1", run_type="incremental", status="running"),
+        FeishuSyncRun(run_id="run-succeeded", source_id="source-1", run_type="full", status="succeeded"),
+    ]
+    session.add_all(runs)
+    await session.commit()
+
+    first = await repository.reconcile_interrupted_work()
+    event_count = len(list((await session.execute(select(FeishuProcessingEvent))).scalars()))
+    second = await repository.reconcile_interrupted_work()
+
+    assert first == {"sync_runs": 2, "material_versions": 5}
+    assert second == {"sync_runs": 0, "material_versions": 0}
+    assert [(version.version_id, version.processing_status) for version in versions] == [
+        (f"version-{name}", expected) for name, _, expected in transitions
+    ]
+    assert runs[0].status == runs[1].status == "failed"
+    assert runs[0].finished_at is not None and runs[1].finished_at is not None
+    assert runs[2].status == "succeeded"
+    removal_item = await session.get(FeishuSourceItem, 5)
+    assert removal_item.active_version_id == "version-removal"
+    events = list((await session.execute(select(FeishuProcessingEvent))).scalars())
+    assert len(events) == event_count == 7
+    assert {event.event_type for event in events} == {"startup_reconciled"}
+    assert {(event.from_status, event.to_status) for event in events} == {
+        ("queued", "failed"),
+        ("running", "failed"),
+        ("processing_queued", "parse_failed"),
+        ("processing", "parse_failed"),
+        ("publish_queued", "publish_failed"),
+        ("publishing", "publish_failed"),
+        ("removal_pending", "published"),
+    }
 
 
 async def test_seen_and_invalidation_updates_are_scoped_and_preserve_active_version(repository, session):

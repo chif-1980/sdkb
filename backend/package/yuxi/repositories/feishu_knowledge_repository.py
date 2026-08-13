@@ -318,6 +318,111 @@ class FeishuKnowledgeRepository:
             await self.session.flush()
             return version, True
 
+    async def queue_archived_versions_for_processing(
+        self,
+        *,
+        source_id: str,
+        operator_id: str | None,
+    ) -> list[str]:
+        queued_version_ids: list[str] = []
+        async with self._write_transaction():
+            candidates = await self.session.execute(
+                select(FeishuMaterialVersion.version_id, FeishuSourceItem.item_id)
+                .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+                .where(
+                    FeishuSourceItem.source_id == source_id,
+                    FeishuSourceItem.item_type.in_({"page", "attachment"}),
+                    FeishuMaterialVersion.processing_status == "discovered",
+                    FeishuMaterialVersion.source_object_path.is_not(None),
+                )
+                .order_by(FeishuMaterialVersion.id)
+            )
+            for version_id, item_id in candidates:
+                result = await self.session.execute(
+                    update(FeishuMaterialVersion)
+                    .where(
+                        FeishuMaterialVersion.version_id == version_id,
+                        FeishuMaterialVersion.processing_status == "discovered",
+                    )
+                    .values(processing_status="processing_queued")
+                )
+                if result.rowcount != 1:
+                    continue
+                queued_version_ids.append(version_id)
+                self.session.add(
+                    FeishuProcessingEvent(
+                        source_id=source_id,
+                        item_id=item_id,
+                        version_id=version_id,
+                        event_type="processing_queued",
+                        from_status="discovered",
+                        to_status="processing_queued",
+                        operator_id=operator_id,
+                    )
+                )
+            await self.session.flush()
+        return queued_version_ids
+
+    async def reconcile_interrupted_work(self) -> dict[str, int]:
+        reconciled_runs = 0
+        reconciled_versions = 0
+        interrupted_message = "Interrupted by service restart"
+        material_transitions = {
+            "processing_queued": "parse_failed",
+            "processing": "parse_failed",
+            "publish_queued": "publish_failed",
+            "publishing": "publish_failed",
+            "removal_pending": "published",
+        }
+        async with self._write_transaction():
+            run_result = await self.session.execute(
+                select(FeishuSyncRun).where(FeishuSyncRun.status.in_({"queued", "running"})).with_for_update()
+            )
+            for run in run_result.scalars():
+                from_status = run.status
+                run.status = "failed"
+                run.finished_at = utc_now()
+                run.error_summary = interrupted_message
+                run.failed_count = max(run.failed_count or 0, 1)
+                self.session.add(
+                    FeishuProcessingEvent(
+                        source_id=run.source_id,
+                        event_type="startup_reconciled",
+                        from_status=from_status,
+                        to_status="failed",
+                        message=interrupted_message,
+                        payload_json={"run_id": run.run_id},
+                    )
+                )
+                reconciled_runs += 1
+
+            version_result = await self.session.execute(
+                select(FeishuMaterialVersion, FeishuSourceItem)
+                .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+                .where(FeishuMaterialVersion.processing_status.in_(material_transitions))
+                .with_for_update()
+            )
+            for version, item in version_result:
+                from_status = version.processing_status
+                to_status = material_transitions[from_status]
+                version.processing_status = to_status
+                if to_status.endswith("_failed"):
+                    version.error_message = interrupted_message
+                self.session.add(
+                    FeishuProcessingEvent(
+                        source_id=item.source_id,
+                        item_id=item.item_id,
+                        version_id=version.version_id,
+                        event_type="startup_reconciled",
+                        from_status=from_status,
+                        to_status=to_status,
+                        message=interrupted_message,
+                    )
+                )
+                reconciled_versions += 1
+            await self.session.flush()
+        return {"sync_runs": reconciled_runs, "material_versions": reconciled_versions}
+
     async def mark_seen_items(self, *, source_id: str, item_keys: set[str], seen_at: datetime) -> int:
         async with self._write_transaction():
             return await self._mark_seen_items(source_id=source_id, item_keys=item_keys, seen_at=seen_at)

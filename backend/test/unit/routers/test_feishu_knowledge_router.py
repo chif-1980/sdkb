@@ -159,7 +159,7 @@ async def test_publish_success_switches_active_and_replaces_old_version(review_f
     service = FeishuReviewService(review_fixture)
     await service.approve("version-new", operator_id="admin")
 
-    await service.mark_publish_succeeded("version-new", yuxi_file_id="file-new")
+    switch = await service.mark_publish_succeeded("version-new", yuxi_file_id="file-new")
 
     item = await review_fixture.get(FeishuSourceItem, 1)
     old = await review_fixture.get(FeishuMaterialVersion, 1)
@@ -169,6 +169,8 @@ async def test_publish_success_switches_active_and_replaces_old_version(review_f
     assert old.replaced_at is not None
     assert new.processing_status == "published"
     assert new.yuxi_file_id == "file-new"
+    assert switch.material == new
+    assert switch.replaced_file_id == "file-old"
 
 
 async def test_publish_failure_keeps_old_active_and_records_event(review_fixture):
@@ -241,10 +243,14 @@ async def test_scan_uses_unique_task_by_source_and_returns_task_and_run_ids(monk
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
     monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", fake_enqueue_unique_by_payload)
 
+    class FakeDb:
+        async def commit(self):
+            pass
+
     result = await router_module.scan_source(
         "source-1",
         router_module.ScanRequest(mode="full"),
-        db=SimpleNamespace(),
+        db=FakeDb(),
         current_user=SimpleNamespace(uid="admin"),
     )
 
@@ -253,8 +259,131 @@ async def test_scan_uses_unique_task_by_source_and_returns_task_and_run_ids(monk
     assert captured["task"]["statuses"] == {"pending", "running"}
 
 
+async def test_scan_commits_before_task_enqueue(monkeypatch):
+    calls = []
+
+    class FakeDb:
+        async def commit(self):
+            calls.append("commit")
+
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(source_id=source_id, name="Source")
+
+        async def queue_sync_run(self, **kwargs):
+            return SimpleNamespace(run_id="run-1")
+
+    async def fake_enqueue_unique_by_payload(**kwargs):
+        calls.append("enqueue")
+        return SimpleNamespace(id="task-1", payload=kwargs["payload"]), True
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", fake_enqueue_unique_by_payload)
+
+    await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="full"),
+        db=FakeDb(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    assert calls == ["commit", "enqueue"]
+
+
+async def test_successful_scan_queues_archived_material_processing(monkeypatch):
+    captured = {}
+    calls = []
+
+    class FakeDb:
+        async def commit(self):
+            calls.append("request_commit")
+
+    class FakeRepository:
+        def __init__(self, _session, *, queued_run_id=None):
+            self.queued_run_id = queued_run_id
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(
+                source_id=source_id,
+                name="Source",
+                credential_env_name="FEISHU_TOKEN",
+            )
+
+        async def queue_sync_run(self, **kwargs):
+            return SimpleNamespace(run_id="run-1")
+
+        async def queue_archived_versions_for_processing(self, *, source_id, operator_id):
+            calls.append(("claim", source_id, operator_id))
+            return ["version-1"]
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def aclose(self):
+            pass
+
+    class FakeScanService:
+        def __init__(self, **kwargs):
+            pass
+
+        async def scan(self, **kwargs):
+            return SimpleNamespace(run_id="run-1", status="succeeded")
+
+    class WorkerDb:
+        async def commit(self):
+            calls.append("worker_commit")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield WorkerDb()
+
+    async def capture_scan(**kwargs):
+        captured["coroutine"] = kwargs["coroutine"]
+        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+
+    async def enqueue_processing(version_id, *, operator_id):
+        calls.append(("processing", version_id, operator_id))
+        return SimpleNamespace(id="task-process")
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+    monkeypatch.setattr(router_module, "_enqueue_processing", enqueue_processing)
+
+    await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="full"),
+        db=FakeDb(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+    context = SimpleNamespace(set_result=lambda value: None)
+
+    async def set_result(value):
+        captured["result"] = value
+
+    context.set_result = set_result
+    await captured["coroutine"](context)
+
+    assert calls == [
+        "request_commit",
+        ("claim", "source-1", "admin"),
+        "worker_commit",
+        ("processing", "version-1", "admin"),
+    ]
+
+
 async def test_duplicate_scan_returns_existing_task_and_rolls_back_unused_run(monkeypatch):
-    captured = {"cancelled": []}
+    captured = {"cancelled": [], "commits": 0}
+
+    class FakeDb:
+        async def commit(self):
+            captured["commits"] += 1
 
     class FakeRepository:
         def __init__(self, _session):
@@ -278,7 +407,7 @@ async def test_duplicate_scan_returns_existing_task_and_rolls_back_unused_run(mo
     result = await router_module.scan_source(
         "source-1",
         router_module.ScanRequest(mode="incremental"),
-        db=SimpleNamespace(),
+        db=FakeDb(),
         current_user=SimpleNamespace(uid="admin"),
     )
 
@@ -286,6 +415,7 @@ async def test_duplicate_scan_returns_existing_task_and_rolls_back_unused_run(mo
     assert result["run_id"] == "run-existing"
     assert result["created"] is False
     assert captured["cancelled"] == ["run-unused"]
+    assert captured["commits"] == 2
 
 
 async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
@@ -314,6 +444,7 @@ async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
         version_id="version-new",
         page_info={"page_number": 2},
         operator_id="admin",
+        content_hash="sha256-value",
     )
 
     assert result.file_id == "file-new"
@@ -325,6 +456,8 @@ async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
         "page_info": {"page_number": 2},
     }
     assert [call[0] for call in calls] == ["add", "parse", "index"]
+    assert calls[0][3]["source_path"] == "minio://knowledgebases/feishu/source/version/page.md"
+    assert calls[0][3]["content_hashes"] == {"minio://knowledgebases/feishu/source/version/page.md": "sha256-value"}
 
 
 async def test_minio_archive_adapter_uses_stable_ids_and_safe_extension(monkeypatch):
@@ -563,20 +696,27 @@ async def test_approve_endpoint_queues_real_publish_task(monkeypatch):
             calls.append(("approve", version_id, operator_id))
             return SimpleNamespace(version_id=version_id, processing_status="publish_queued")
 
+    class FakeDb:
+        async def commit(self):
+            calls.append(("commit",))
+
     async def fake_enqueue(**kwargs):
         calls.append(("enqueue", kwargs))
-        return SimpleNamespace(id="task-publish")
+        return SimpleNamespace(id="task-publish"), True
 
     monkeypatch.setattr(router_module, "FeishuReviewService", FakeReviewService)
-    monkeypatch.setattr(router_module.tasker, "enqueue", fake_enqueue)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", fake_enqueue)
     result = await router_module.approve_material(
         "version-new",
-        db=SimpleNamespace(),
+        db=FakeDb(),
         current_user=SimpleNamespace(uid="admin"),
     )
     assert result == {"version_id": "version-new", "status": "publish_queued", "task_id": "task-publish"}
-    assert calls[1][1]["task_type"] == "feishu_publish"
-    assert calls[1][1]["payload"] == {"version_id": "version-new"}
+    assert calls[1] == ("commit",)
+    assert calls[2][1]["task_type"] == "feishu_publish"
+    assert calls[2][1]["payload"] == {"version_id": "version-new"}
+    assert calls[2][1]["payload_match"] == {"version_id": "version-new"}
+    assert calls[2][1]["statuses"] == {"pending", "running"}
 
 
 async def test_batch_reject_requires_reason_even_when_field_is_omitted():
@@ -746,19 +886,104 @@ async def test_retry_endpoint_increments_and_queues_processing_task(monkeypatch)
             calls.append(("retry", version_id, operator_id))
             return SimpleNamespace(version_id=version_id, processing_status="processing_queued")
 
+    class FakeDb:
+        async def commit(self):
+            calls.append(("commit",))
+
     async def fake_enqueue(**kwargs):
         calls.append(("enqueue", kwargs))
-        return SimpleNamespace(id="task-process")
+        return SimpleNamespace(id="task-process"), True
 
     monkeypatch.setattr(router_module, "FeishuReviewService", FakeReviewService)
-    monkeypatch.setattr(router_module.tasker, "enqueue", fake_enqueue)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", fake_enqueue)
     result = await router_module.retry_material(
         "version-new",
-        db=SimpleNamespace(),
+        db=FakeDb(),
         current_user=SimpleNamespace(uid="admin"),
     )
     assert result == {"version_id": "version-new", "status": "processing_queued", "task_id": "task-process"}
-    assert calls[1][1]["task_type"] == "feishu_process"
+    assert calls[1] == ("commit",)
+    assert calls[2][1]["task_type"] == "feishu_process"
+    assert calls[2][1]["payload_match"] == {"version_id": "version-new"}
+    assert calls[2][1]["statuses"] == {"pending", "running"}
+
+
+@pytest.mark.parametrize(
+    ("action", "initial_status", "expected_status"),
+    [
+        ("approve", "parsed", "publish_failed"),
+        ("retry", "parse_failed", "parse_failed"),
+    ],
+)
+async def test_action_enqueue_failure_is_committed_as_retryable_failure(
+    monkeypatch,
+    review_fixture,
+    action,
+    initial_status,
+    expected_status,
+):
+    version = await review_fixture.get(FeishuMaterialVersion, 2)
+    version.processing_status = initial_status
+    await review_fixture.commit()
+
+    async def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("task queue unavailable")
+
+    monkeypatch.setattr(
+        router_module,
+        "_enqueue_publish" if action == "approve" else "_enqueue_processing",
+        fail_enqueue,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        if action == "approve":
+            await router_module.approve_material(
+                "version-new",
+                db=review_fixture,
+                current_user=SimpleNamespace(uid="admin"),
+            )
+        else:
+            await router_module.retry_material(
+                "version-new",
+                db=review_fixture,
+                current_user=SimpleNamespace(uid="admin"),
+            )
+
+    await review_fixture.refresh(version)
+    assert exc_info.value.status_code == 500
+    assert version.processing_status == expected_status
+    assert version.error_message == "task queue unavailable"
+
+
+async def test_processing_worker_passes_archived_source_and_content_hash(monkeypatch, review_fixture):
+    calls = []
+
+    class FakeKnowledgeBase:
+        async def add_file_record(self, kb_id, object_path, *, params, operator_id):
+            calls.append(("add", kb_id, object_path, params, operator_id))
+            return {"file_id": "file-new"}
+
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            calls.append(("parse", kb_id, file_id, operator_id))
+            return {"status": "parsed"}
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.processing_status = "processing_queued"
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    await review_fixture.commit()
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    result = await router_module._run_processing_worker("version-new", operator_id="admin")
+
+    assert result == {"version_id": "version-new", "status": "awaiting_review", "file_id": "file-new"}
+    params = calls[0][3]
+    assert params["source_path"] == current.source_object_path
+    assert params["content_hashes"] == {current.source_object_path: "new-hash"}
 
 
 async def test_publish_worker_archives_then_publishes_and_switches_active(monkeypatch, review_fixture):
@@ -794,6 +1019,102 @@ async def test_publish_worker_archives_then_publishes_and_switches_active(monkey
     assert version.source_object_path.endswith("/source.md")
     assert version.chunk_count == 4
     assert item.active_version_id == "version-new"
+
+
+async def test_publish_worker_commits_active_switch_before_deleting_replaced_file(monkeypatch, review_fixture):
+    deletions = []
+
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            return router_module.PublishResult(file_id="file-new", chunk_count=4)
+
+    class FakeKnowledgeBase:
+        async def delete_file(self, kb_id, file_id):
+            deletions.append((kb_id, file_id, review_fixture.in_transaction()))
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    await review_fixture.commit()
+    await FeishuReviewService(review_fixture).approve("version-new", operator_id="admin")
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    await router_module._run_publish_worker(
+        "version-new",
+        operator_id="admin",
+        publish_adapter=FakePublishAdapter(),
+    )
+
+    assert deletions == [("kb-1", "file-old", False)]
+
+
+async def test_publish_worker_does_not_delete_when_replacement_reuses_file_id(monkeypatch, review_fixture):
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            return router_module.PublishResult(file_id="file-old")
+
+    class FakeKnowledgeBase:
+        async def delete_file(self, kb_id, file_id):
+            raise AssertionError("shared knowledge file must not be deleted")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    await review_fixture.commit()
+    await FeishuReviewService(review_fixture).approve("version-new", operator_id="admin")
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    result = await router_module._run_publish_worker(
+        "version-new",
+        operator_id="admin",
+        publish_adapter=FakePublishAdapter(),
+    )
+
+    assert result["status"] == "published"
+
+
+async def test_replacement_cleanup_failure_keeps_new_active_and_records_event(monkeypatch, review_fixture):
+    class FakePublishAdapter:
+        async def publish(self, **kwargs):
+            return router_module.PublishResult(file_id="file-new")
+
+    class FailingKnowledgeBase:
+        async def delete_file(self, kb_id, file_id):
+            raise RuntimeError("vector cleanup failed")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    current = await review_fixture.get(FeishuMaterialVersion, 2)
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    await review_fixture.commit()
+    await FeishuReviewService(review_fixture).approve("version-new", operator_id="admin")
+    monkeypatch.setattr(router_module, "knowledge_base", FailingKnowledgeBase())
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    result = await router_module._run_publish_worker(
+        "version-new",
+        operator_id="admin",
+        publish_adapter=FakePublishAdapter(),
+    )
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    version = await review_fixture.get(FeishuMaterialVersion, 2)
+    events = list((await review_fixture.execute(FeishuProcessingEvent.__table__.select())).all())
+    assert result["status"] == "published"
+    assert item.active_version_id == "version-new"
+    assert version.processing_status == "published"
+    assert version.error_message == "vector cleanup failed"
+    assert events[-1].event_type == "replacement_cleanup_failed"
 
 
 async def test_publish_worker_failure_keeps_old_active_and_records_failure(monkeypatch, review_fixture):
