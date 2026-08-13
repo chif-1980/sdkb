@@ -261,6 +261,29 @@ async def test_server_error_retries_with_bounded_backoff() -> None:
     await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_any_server_error_retries_with_bounded_backoff() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(507, headers={"x-request-id": "request-1"})
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    client = _client(handler, sleep=fake_sleep)
+    await client.get_node("page-token")
+
+    assert attempts == 2
+    assert delays == [1.0]
+    await client.aclose()
+
+
 def test_missing_credential_is_explicit() -> None:
     with pytest.raises(FeishuCredentialError, match="FEISHU_ACCESS_TOKEN"):
         FeishuClient(credential_env_name="FEISHU_ACCESS_TOKEN", environ={})

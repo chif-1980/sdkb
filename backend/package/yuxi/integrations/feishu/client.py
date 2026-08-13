@@ -12,9 +12,6 @@ from yuxi.utils import logger
 
 FEISHU_OPEN_API_BASE_URL = "https://open.feishu.cn"
 DEFAULT_CREDENTIAL_ENV_NAME = "FEISHU_ACCESS_TOKEN"
-RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
-
-
 class FeishuClientError(RuntimeError):
     def __init__(self, message: str, *, error: FeishuError | None = None) -> None:
         super().__init__(message)
@@ -164,7 +161,7 @@ class FeishuClient:
                 await self._sleep(self._backoff_delay(attempt))
                 continue
 
-            if response.status_code in RETRY_STATUS_CODES and attempt < self._max_retries:
+            if (response.status_code == 429 or 500 <= response.status_code < 600) and attempt < self._max_retries:
                 self._log_response(response)
                 await self._sleep(self._retry_delay(response, attempt))
                 continue
