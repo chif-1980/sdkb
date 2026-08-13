@@ -168,7 +168,7 @@ async def _seed_feishu_source(session_factory):
         await session.commit()
 
 
-async def _publish_activation_failure_database(database_path):
+async def _publish_activation_failure_database(database_path, *, failure_session=2):
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -250,7 +250,7 @@ async def _publish_activation_failure_database(database_path):
         nonlocal session_count
         session_count += 1
         async with session_factory() as session:
-            if session_count == 2:
+            if session_count == failure_session:
                 session.transaction_failure_message = "forced activation commit failure"
             try:
                 yield session
@@ -260,6 +260,55 @@ async def _publish_activation_failure_database(database_path):
                 raise
 
     return engine, session_factory, session_context
+
+
+async def _shared_publish_database(database_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                FeishuSource(
+                    source_id="source-1",
+                    name="Source",
+                    wiki_root_token="root",
+                    target_kb_id="kb-1",
+                    credential_env_name="FEISHU_ACCESS_TOKEN",
+                ),
+                FeishuSourceItem(
+                    item_id="item-1",
+                    source_id="source-1",
+                    item_key="page:space:node",
+                    item_type="page",
+                    title="Page",
+                    source_validity="valid",
+                    active_version_id="version-old",
+                ),
+                FeishuMaterialVersion(
+                    version_id="version-old",
+                    item_id="item-1",
+                    revision="1",
+                    content_hash="old-hash",
+                    processing_status="published",
+                    review_status="approved",
+                    yuxi_file_id="file-old",
+                ),
+                FeishuMaterialVersion(
+                    version_id="version-new",
+                    item_id="item-1",
+                    revision="2",
+                    content_hash="new-hash",
+                    source_object_path="minio://knowledgebases/feishu/source-1/item-1/version-new/source.md",
+                    processing_status="publish_queued",
+                    review_status="approved",
+                    yuxi_file_id="file-old",
+                ),
+            ]
+        )
+        await session.commit()
+    return engine, session_factory
 
 
 async def test_router_module_exposes_all_admin_endpoints():
@@ -644,7 +693,7 @@ async def test_scan_cancellation_after_success_commit_queues_discovered_versions
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    captured = {}
+    captured = {"processing": []}
 
     class FakeClient:
         def __init__(self, **kwargs):
@@ -665,9 +714,12 @@ async def test_scan_cancellation_after_success_commit_queues_discovered_versions
             run.finished_at = datetime.now(UTC)
             return SimpleNamespace(run_id=run.run_id, status="succeeded")
 
-    async def capture_scan(**kwargs):
-        captured["coroutine"] = kwargs["coroutine"]
-        return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+    async def capture_task(**kwargs):
+        if kwargs["task_type"] == "feishu_scan":
+            captured["coroutine"] = kwargs["coroutine"]
+            return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+        captured["processing"].append((kwargs["payload"], kwargs["payload_match"], kwargs["statuses"]))
+        return SimpleNamespace(id=f"task-{kwargs['payload']['version_id']}"), True
 
     monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
     monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
@@ -676,31 +728,52 @@ async def test_scan_cancellation_after_success_commit_queues_discovered_versions
         "get_async_session_context",
         lambda: _production_session_context(session_factory),
     )
-    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_task)
 
     await _seed_feishu_source(session_factory)
     async with session_factory() as session:
-        session.add(
-            FeishuSourceItem(
-                item_id="item-discovered",
-                source_id="source-1",
-                item_key="page:space:discovered",
-                item_type="page",
-                title="Discovered",
-                source_validity="valid",
-            )
+        session.add_all(
+            [
+                FeishuSourceItem(
+                    item_id="item-discovered-1",
+                    source_id="source-1",
+                    item_key="page:space:discovered-1",
+                    item_type="page",
+                    title="Discovered 1",
+                    source_validity="valid",
+                ),
+                FeishuSourceItem(
+                    item_id="item-discovered-2",
+                    source_id="source-1",
+                    item_key="page:space:discovered-2",
+                    item_type="page",
+                    title="Discovered 2",
+                    source_validity="valid",
+                ),
+            ]
         )
         await session.flush()
-        session.add(
-            FeishuMaterialVersion(
-                version_id="version-discovered",
-                item_id="item-discovered",
-                revision="1",
-                content_hash="discovered-hash",
-                source_object_path="minio://knowledgebases/feishu/source-1/item-discovered/source.md",
-                processing_status="discovered",
-                review_status="pending",
-            )
+        session.add_all(
+            [
+                FeishuMaterialVersion(
+                    version_id="version-discovered-1",
+                    item_id="item-discovered-1",
+                    revision="1",
+                    content_hash="discovered-hash-1",
+                    source_object_path="minio://knowledgebases/feishu/source-1/item-discovered-1/source.md",
+                    processing_status="discovered",
+                    review_status="pending",
+                ),
+                FeishuMaterialVersion(
+                    version_id="version-discovered-2",
+                    item_id="item-discovered-2",
+                    revision="1",
+                    content_hash="discovered-hash-2",
+                    source_object_path="minio://knowledgebases/feishu/source-1/item-discovered-2/source.md",
+                    processing_status="discovered",
+                    review_status="pending",
+                ),
+            ]
         )
         await session.commit()
 
@@ -728,12 +801,162 @@ async def test_scan_cancellation_after_success_commit_queues_discovered_versions
 
     async with session_factory() as session:
         run = await session.scalar(select(FeishuSyncRun).where(FeishuSyncRun.run_id == response["run_id"]))
-        version = await session.scalar(
-            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-discovered")
+        versions = list(
+            (
+                await session.execute(
+                    select(FeishuMaterialVersion)
+                    .where(FeishuMaterialVersion.version_id.like("version-discovered-%"))
+                    .order_by(FeishuMaterialVersion.version_id)
+                )
+            ).scalars()
         )
 
     assert run.status == "succeeded"
-    assert version.processing_status == "processing_queued"
+    assert [version.processing_status for version in versions] == ["processing_queued", "processing_queued"]
+    assert captured["processing"] == [
+        (
+            {"version_id": "version-discovered-1"},
+            {"version_id": "version-discovered-1"},
+            {"pending"},
+        ),
+        (
+            {"version_id": "version-discovered-2"},
+            {"version_id": "version-discovered-2"},
+            {"pending"},
+        ),
+    ]
+    await engine.dispose()
+
+
+async def test_scan_cancellation_processing_enqueue_failure_is_recorded_and_other_versions_continue(
+    monkeypatch,
+    tmp_path,
+):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cancelled-scan-enqueue-failure.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    captured = {"processing": []}
+    cancellation = asyncio.CancelledError("scan cancelled after success commit")
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def aclose(self):
+            pass
+
+    class FakeScanService:
+        def __init__(self, **kwargs):
+            self.repository = kwargs["repository"]
+
+        async def scan(self, **kwargs):
+            run = await self.repository.session.scalar(
+                select(FeishuSyncRun).where(FeishuSyncRun.run_id == self.repository.queued_run_id)
+            )
+            run.status = "succeeded"
+            run.finished_at = datetime.now(UTC)
+            return SimpleNamespace(run_id=run.run_id, status="succeeded")
+
+    async def capture_task(**kwargs):
+        if kwargs["task_type"] == "feishu_scan":
+            captured["coroutine"] = kwargs["coroutine"]
+            return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
+        version_id = kwargs["payload"]["version_id"]
+        captured["processing"].append(version_id)
+        if version_id == "version-discovered-1":
+            raise RuntimeError("processing queue unavailable")
+        return SimpleNamespace(id=f"task-{version_id}"), True
+
+    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        lambda: _production_session_context(session_factory),
+    )
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_task)
+
+    await _seed_feishu_source(session_factory)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                FeishuSourceItem(
+                    item_id=f"item-discovered-{index}",
+                    source_id="source-1",
+                    item_key=f"page:space:discovered-{index}",
+                    item_type="page",
+                    title=f"Discovered {index}",
+                    source_validity="valid",
+                )
+                for index in (1, 2)
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                FeishuMaterialVersion(
+                    version_id=f"version-discovered-{index}",
+                    item_id=f"item-discovered-{index}",
+                    revision="1",
+                    content_hash=f"discovered-hash-{index}",
+                    source_object_path=(f"minio://knowledgebases/feishu/source-1/item-discovered-{index}/source.md"),
+                    processing_status="discovered",
+                    review_status="pending",
+                )
+                for index in (1, 2)
+            ]
+        )
+        await session.commit()
+
+    async with session_factory() as request_session:
+        await router_module.scan_source(
+            "source-1",
+            router_module.ScanRequest(mode="full"),
+            db=request_session,
+            current_user=SimpleNamespace(uid="admin"),
+        )
+
+    class Context:
+        calls = 0
+
+        async def raise_if_cancelled(self):
+            self.calls += 1
+            if self.calls == 2:
+                raise cancellation
+
+        async def set_result(self, value):
+            pass
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await captured["coroutine"](Context())
+
+    async with session_factory() as session:
+        versions = list(
+            (
+                await session.execute(
+                    select(FeishuMaterialVersion)
+                    .where(FeishuMaterialVersion.version_id.like("version-discovered-%"))
+                    .order_by(FeishuMaterialVersion.version_id)
+                )
+            ).scalars()
+        )
+        events = list(
+            (
+                await session.execute(
+                    select(FeishuProcessingEvent).where(
+                        FeishuProcessingEvent.version_id == "version-discovered-1",
+                        FeishuProcessingEvent.event_type == "processing_enqueue_failed",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert error.value is cancellation
+    assert captured["processing"] == ["version-discovered-1", "version-discovered-2"]
+    assert [version.processing_status for version in versions] == ["parse_failed", "processing_queued"]
+    assert len(events) == 1
+    assert events[0].message == "processing queue unavailable"
     await engine.dispose()
 
 
@@ -1301,13 +1524,18 @@ async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
 
 async def test_publish_activation_failure_with_shared_file_deletes_only_new_file(monkeypatch, tmp_path):
     engine, session_factory, session_context = await _publish_activation_failure_database(
-        tmp_path / "publish-shared-activation.db"
+        tmp_path / "publish-shared-activation.db",
+        failure_session=3,
     )
     deleted_files = []
 
     class FakePublishAdapter:
+        async def prepare_file(self, **kwargs):
+            return "file-new"
+
         async def publish(self, **kwargs):
-            assert kwargs["file_id"] is None
+            assert kwargs["file_id"] == "file-new"
+            assert kwargs["parse_before_index"] is True
             return router_module.PublishResult(file_id="file-new", chunk_count=4)
 
     class FakeKnowledgeBase:
@@ -1340,7 +1568,209 @@ async def test_publish_activation_failure_with_shared_file_deletes_only_new_file
     assert deleted_files == [("kb-1", "file-new")]
     assert item.active_version_id == "version-old"
     assert version.processing_status == "publish_failed"
-    assert version.yuxi_file_id == "file-old"
+    assert version.yuxi_file_id is None
+    await engine.dispose()
+
+
+@pytest.mark.parametrize("failure_stage", ["parse", "index"])
+async def test_shared_publish_failure_persists_then_cleans_only_new_candidate(
+    monkeypatch,
+    tmp_path,
+    failure_stage,
+):
+    engine, session_factory = await _shared_publish_database(tmp_path / f"shared-{failure_stage}-failure.db")
+    calls = []
+
+    class FailingKnowledgeBase:
+        async def add_file_record(self, kb_id, object_path, *, params, operator_id):
+            calls.append(("add", kb_id, object_path))
+            return {"file_id": "file-new", "status": "uploaded"}
+
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            async with session_factory() as session:
+                candidate = await session.scalar(
+                    select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-new")
+                )
+                active = await session.scalar(
+                    select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-old")
+                )
+            calls.append(("parse", kb_id, file_id, candidate.yuxi_file_id, active.yuxi_file_id))
+            if failure_stage == "parse":
+                raise RuntimeError("parse failed")
+            return {"status": "parsed"}
+
+        async def index_file(self, kb_id, file_id, *, operator_id, params):
+            calls.append(("index", kb_id, file_id))
+            raise RuntimeError("index failed")
+
+        async def delete_file(self, kb_id, file_id):
+            calls.append(("delete", kb_id, file_id))
+
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        lambda: _production_session_context(session_factory),
+    )
+    monkeypatch.setattr(router_module, "knowledge_base", FailingKnowledgeBase())
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        await router_module._run_publish_worker("version-new", operator_id="admin")
+
+    async with session_factory() as session:
+        item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        old = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-old")
+        )
+        candidate = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-new")
+        )
+
+    assert calls[0][0] == "add"
+    assert calls[1] == ("parse", "kb-1", "file-new", "file-new", "file-old")
+    assert calls[-1] == ("delete", "kb-1", "file-new")
+    assert item.active_version_id == "version-old"
+    assert old.yuxi_file_id == "file-old"
+    assert old.processing_status == "published"
+    assert candidate.processing_status == "publish_failed"
+    assert candidate.yuxi_file_id is None
+    await engine.dispose()
+
+
+async def test_shared_publish_index_cancellation_cleans_new_candidate_and_propagates(monkeypatch, tmp_path):
+    engine, session_factory = await _shared_publish_database(tmp_path / "shared-index-cancellation.db")
+    calls = []
+    cancellation = asyncio.CancelledError("index cancelled")
+
+    class CancellingKnowledgeBase:
+        async def add_file_record(self, kb_id, object_path, *, params, operator_id):
+            calls.append(("add", kb_id, object_path))
+            return {"file_id": "file-new", "status": "uploaded"}
+
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            calls.append(("parse", kb_id, file_id))
+            return {"status": "parsed"}
+
+        async def index_file(self, kb_id, file_id, *, operator_id, params):
+            calls.append(("index", kb_id, file_id))
+            raise cancellation
+
+        async def delete_file(self, kb_id, file_id):
+            calls.append(("delete", kb_id, file_id))
+
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        lambda: _production_session_context(session_factory),
+    )
+    monkeypatch.setattr(router_module, "knowledge_base", CancellingKnowledgeBase())
+
+    with pytest.raises(asyncio.CancelledError) as error:
+        await router_module._run_publish_worker("version-new", operator_id="admin")
+
+    async with session_factory() as session:
+        item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        old = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-old")
+        )
+        candidate = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-new")
+        )
+
+    assert error.value is cancellation
+    assert calls == [
+        ("add", "kb-1", candidate.source_object_path),
+        ("parse", "kb-1", "file-new"),
+        ("index", "kb-1", "file-new"),
+        ("delete", "kb-1", "file-new"),
+    ]
+    assert item.active_version_id == "version-old"
+    assert old.yuxi_file_id == "file-old"
+    assert candidate.processing_status == "publish_failed"
+    assert candidate.yuxi_file_id is None
+    await engine.dispose()
+
+
+async def test_shared_publish_cleanup_failure_retains_candidate_for_retry(monkeypatch, tmp_path):
+    engine, session_factory = await _shared_publish_database(tmp_path / "shared-cleanup-failure.db")
+    calls = []
+    index_attempts = 0
+
+    class RetryKnowledgeBase:
+        async def add_file_record(self, kb_id, object_path, *, params, operator_id):
+            calls.append(("add", kb_id, object_path))
+            return {"file_id": "file-new", "status": "uploaded"}
+
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            calls.append(("parse", kb_id, file_id))
+            return {"status": "parsed"}
+
+        async def index_file(self, kb_id, file_id, *, operator_id, params):
+            nonlocal index_attempts
+            index_attempts += 1
+            calls.append(("index", kb_id, file_id))
+            if index_attempts == 1:
+                raise RuntimeError("index failed")
+            return {"status": "indexed", "chunk_count": 2}
+
+        async def delete_file(self, kb_id, file_id):
+            calls.append(("delete", kb_id, file_id))
+            raise RuntimeError("candidate cleanup failed")
+
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        lambda: _production_session_context(session_factory),
+    )
+    monkeypatch.setattr(router_module, "knowledge_base", RetryKnowledgeBase())
+
+    with pytest.raises(RuntimeError) as error:
+        await router_module._run_publish_worker("version-new", operator_id="admin")
+
+    assert "index failed" in str(error.value)
+    assert "candidate cleanup failed" in str(error.value)
+    async with session_factory() as session:
+        item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        old = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-old")
+        )
+        candidate = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-new")
+        )
+        events = list(
+            (
+                await session.execute(
+                    select(FeishuProcessingEvent).where(
+                        FeishuProcessingEvent.version_id == "version-new",
+                        FeishuProcessingEvent.event_type == "publish_failed",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert item.active_version_id == "version-old"
+    assert old.yuxi_file_id == "file-old"
+    assert candidate.processing_status == "publish_failed"
+    assert candidate.yuxi_file_id == "file-new"
+    assert "index failed" in candidate.error_message
+    assert "candidate cleanup failed" in candidate.error_message
+    assert len(events) == 1
+
+    async with session_factory() as session:
+        await FeishuReviewService(session).retry("version-new", operator_id="admin")
+        await session.commit()
+    result = await router_module._run_publish_worker("version-new", operator_id="admin")
+
+    assert result == {"version_id": "version-new", "status": "published", "file_id": "file-new"}
+    assert [call[0] for call in calls].count("add") == 1
+    assert [call[0] for call in calls].count("parse") == 2
+    async with session_factory() as session:
+        item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        candidate = await session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-new")
+        )
+    assert item.active_version_id == "version-new"
+    assert candidate.processing_status == "published"
+    assert candidate.yuxi_file_id == "file-new"
     await engine.dispose()
 
 
