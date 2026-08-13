@@ -101,6 +101,25 @@ class PublishSwitchResult:
     replaced_file_id: str | None
 
 
+def _feishu_source_path(*, wiki_path: str | None, title: str | None, item_type: str) -> str:
+    raw_path = wiki_path or title or "Untitled"
+    parts = []
+    for raw_part in raw_path.split(" / "):
+        part = "".join("_" if ord(char) < 32 else char for char in raw_part.strip())
+        part = part.replace("\\", "_").replace("/", "_").replace(":", "_").lstrip(".")
+        parts.append(part or "Untitled")
+    if item_type == "page" and not parts[-1].lower().endswith(".md"):
+        parts[-1] += ".md"
+    display_path = "/".join(parts)
+    if len(display_path) <= 512:
+        return display_path
+    filename = parts[-1]
+    suffix = Path(filename).suffix
+    if suffix and len(suffix) < 512:
+        return f"{filename[: 512 - len(suffix)]}{suffix}"
+    return filename[:512]
+
+
 class PublishAdapter(Protocol):
     async def publish(
         self,
@@ -141,7 +160,11 @@ class KnowledgePublishAdapter:
         }
         params = {
             "content_type": "file",
-            "source_path": object_path,
+            "source_path": _feishu_source_path(
+                wiki_path=wiki_path,
+                title=page_info.get("title"),
+                item_type=page_info.get("item_type", "page"),
+            ),
             "content_hashes": {object_path: content_hash},
             "feishu": citation,
         }
@@ -828,6 +851,18 @@ async def scan_source(
             statuses={"pending", "running"},
             coroutine=run_scan,
         )
+        if not created:
+            existing_run_id = task.payload.get("run_id")
+            existing_run_status = await repository.get_sync_run_status(existing_run_id) if existing_run_id else None
+            if existing_run_status not in {"queued", "running"}:
+                task, created = await tasker.enqueue_unique_by_payload(
+                    name=f"Feishu scan ({source.name})",
+                    task_type="feishu_scan",
+                    payload={"source_id": source_id, "run_id": run.run_id, "mode": payload.mode},
+                    payload_match={"source_id": source_id},
+                    statuses={"pending"},
+                    coroutine=run_scan,
+                )
     except Exception:
         await repository.cancel_queued_run(run.run_id)
         await db.commit()
@@ -977,7 +1012,11 @@ async def _run_processing_worker(version_id: str, *, operator_id: str) -> dict:
                 raise RuntimeError("Feishu material has no archived source object")
             params = {
                 "content_type": "file",
-                "source_path": object_path,
+                "source_path": _feishu_source_path(
+                    wiki_path=item.path_text,
+                    title=item.title,
+                    item_type=item.item_type,
+                ),
                 "content_hashes": {object_path: version.content_hash},
                 "feishu": {
                     "source_url": item.source_url,
@@ -1019,7 +1058,7 @@ async def _enqueue_publish(version_id: str, *, operator_id: str):
         task_type="feishu_publish",
         payload={"version_id": version_id},
         payload_match={"version_id": version_id},
-        statuses={"pending", "running"},
+        statuses={"pending"},
         coroutine=run_publish,
     )
     return task
@@ -1036,7 +1075,7 @@ async def _enqueue_processing(version_id: str, *, operator_id: str):
         task_type="feishu_process",
         payload={"version_id": version_id},
         payload_match={"version_id": version_id},
-        statuses={"pending", "running"},
+        statuses={"pending"},
         coroutine=run_processing,
     )
     return task

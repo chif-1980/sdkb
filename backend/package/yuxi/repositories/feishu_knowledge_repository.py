@@ -53,6 +53,11 @@ class FeishuKnowledgeRepository:
             )
             return result.scalar_one_or_none() is not None
 
+    async def get_sync_run_status(self, run_id: str) -> str | None:
+        async with self._read_transaction():
+            result = await self.session.execute(select(FeishuSyncRun.status).where(FeishuSyncRun.run_id == run_id))
+            return result.scalar_one_or_none()
+
     async def get_or_create_source(
         self,
         *,

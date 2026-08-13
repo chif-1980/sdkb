@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from server.routers import feishu_knowledge_router as router_module
 from server.routers.feishu_knowledge_router import FeishuReviewService, feishu_knowledge
 from server.utils.auth_middleware import get_admin_user, get_current_user, get_db
+from yuxi.knowledge.utils.kb_utils import prepare_item_metadata
 from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
@@ -398,6 +399,10 @@ async def test_duplicate_scan_returns_existing_task_and_rolls_back_unused_run(mo
         async def cancel_queued_run(self, run_id):
             captured["cancelled"].append(run_id)
 
+        async def get_sync_run_status(self, run_id):
+            assert run_id == "run-existing"
+            return "running"
+
     async def fake_enqueue_unique_by_payload(**kwargs):
         return SimpleNamespace(id="task-existing", payload={"run_id": "run-existing"}), False
 
@@ -418,12 +423,63 @@ async def test_duplicate_scan_returns_existing_task_and_rolls_back_unused_run(mo
     assert captured["commits"] == 2
 
 
+async def test_scan_does_not_reuse_running_task_for_terminal_run(monkeypatch):
+    captured = {"cancelled": [], "enqueue_statuses": []}
+
+    class FakeDb:
+        async def commit(self):
+            pass
+
+    class FakeRepository:
+        def __init__(self, _session):
+            pass
+
+        async def get_source(self, source_id):
+            return SimpleNamespace(source_id=source_id, name="Source")
+
+        async def queue_sync_run(self, **kwargs):
+            return SimpleNamespace(run_id="run-new")
+
+        async def get_sync_run_status(self, run_id):
+            assert run_id == "run-old"
+            return "failed"
+
+        async def cancel_queued_run(self, run_id):
+            captured["cancelled"].append(run_id)
+
+    async def fake_enqueue_unique_by_payload(**kwargs):
+        captured["enqueue_statuses"].append(kwargs["statuses"])
+        if "running" in kwargs["statuses"]:
+            return SimpleNamespace(id="task-old", payload={"run_id": "run-old"}), False
+        return SimpleNamespace(id="task-new", payload=kwargs["payload"]), True
+
+    monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", fake_enqueue_unique_by_payload)
+
+    result = await router_module.scan_source(
+        "source-1",
+        router_module.ScanRequest(mode="incremental"),
+        db=FakeDb(),
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    assert result == {
+        "task_id": "task-new",
+        "run_id": "run-new",
+        "status": "queued",
+        "created": True,
+    }
+    assert captured["enqueue_statuses"] == [{"pending", "running"}, {"pending"}]
+    assert captured["cancelled"] == []
+
+
 async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
     calls = []
 
     class FakeKnowledgeBase:
         async def add_file_record(self, kb_id, object_path, *, params, operator_id):
-            calls.append(("add", kb_id, object_path, params, operator_id))
+            metadata = await prepare_item_metadata(object_path, params["content_type"], kb_id, params=params)
+            calls.append(("add", kb_id, object_path, params, operator_id, metadata))
             return {"file_id": "file-new", "status": "uploaded"}
 
         async def parse_file(self, kb_id, file_id, *, operator_id):
@@ -442,7 +498,7 @@ async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
         source_url="https://feishu.example/wiki/node",
         wiki_path="Root / Page",
         version_id="version-new",
-        page_info={"page_number": 2},
+        page_info={"item_type": "page", "title": "Page"},
         operator_id="admin",
         content_hash="sha256-value",
     )
@@ -453,11 +509,13 @@ async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
         "source_url": "https://feishu.example/wiki/node",
         "wiki_path": "Root / Page",
         "material_version": "version-new",
-        "page_info": {"page_number": 2},
+        "page_info": {"item_type": "page", "title": "Page"},
     }
     assert [call[0] for call in calls] == ["add", "parse", "index"]
-    assert calls[0][3]["source_path"] == "minio://knowledgebases/feishu/source/version/page.md"
+    assert calls[0][3]["source_path"] == "Root/Page.md"
     assert calls[0][3]["content_hashes"] == {"minio://knowledgebases/feishu/source/version/page.md": "sha256-value"}
+    assert calls[0][5]["filename"] == "Root/Page.md"
+    assert calls[0][5]["path"] == "minio://knowledgebases/feishu/source/version/page.md"
 
 
 async def test_minio_archive_adapter_uses_stable_ids_and_safe_extension(monkeypatch):
@@ -716,7 +774,7 @@ async def test_approve_endpoint_queues_real_publish_task(monkeypatch):
     assert calls[2][1]["task_type"] == "feishu_publish"
     assert calls[2][1]["payload"] == {"version_id": "version-new"}
     assert calls[2][1]["payload_match"] == {"version_id": "version-new"}
-    assert calls[2][1]["statuses"] == {"pending", "running"}
+    assert calls[2][1]["statuses"] == {"pending"}
 
 
 async def test_batch_reject_requires_reason_even_when_field_is_omitted():
@@ -905,7 +963,44 @@ async def test_retry_endpoint_increments_and_queues_processing_task(monkeypatch)
     assert calls[1] == ("commit",)
     assert calls[2][1]["task_type"] == "feishu_process"
     assert calls[2][1]["payload_match"] == {"version_id": "version-new"}
-    assert calls[2][1]["statuses"] == {"pending", "running"}
+    assert calls[2][1]["statuses"] == {"pending"}
+
+
+@pytest.mark.parametrize(
+    ("initial_status", "expected_task_type"),
+    [
+        ("parse_failed", "feishu_process"),
+        ("publish_failed", "feishu_publish"),
+    ],
+)
+async def test_retry_does_not_reuse_running_task_that_is_finishing(
+    monkeypatch,
+    review_fixture,
+    initial_status,
+    expected_task_type,
+):
+    version = await review_fixture.get(FeishuMaterialVersion, 2)
+    version.processing_status = initial_status
+    await review_fixture.commit()
+    enqueued = []
+
+    async def fake_enqueue_unique_by_payload(**kwargs):
+        if "running" in kwargs["statuses"]:
+            return SimpleNamespace(id="task-old", status="running"), False
+        enqueued.append(kwargs)
+        return SimpleNamespace(id="task-new", status="pending"), True
+
+    monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", fake_enqueue_unique_by_payload)
+
+    result = await router_module.retry_material(
+        "version-new",
+        db=review_fixture,
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    assert result["task_id"] == "task-new"
+    assert enqueued[0]["task_type"] == expected_task_type
+    assert enqueued[0]["statuses"] == {"pending"}
 
 
 @pytest.mark.parametrize(
@@ -960,7 +1055,8 @@ async def test_processing_worker_passes_archived_source_and_content_hash(monkeyp
 
     class FakeKnowledgeBase:
         async def add_file_record(self, kb_id, object_path, *, params, operator_id):
-            calls.append(("add", kb_id, object_path, params, operator_id))
+            metadata = await prepare_item_metadata(object_path, params["content_type"], kb_id, params=params)
+            calls.append(("add", kb_id, object_path, params, operator_id, metadata))
             return {"file_id": "file-new"}
 
         async def parse_file(self, kb_id, file_id, *, operator_id):
@@ -973,7 +1069,12 @@ async def test_processing_worker_passes_archived_source_and_content_hash(monkeyp
 
     current = await review_fixture.get(FeishuMaterialVersion, 2)
     current.processing_status = "processing_queued"
-    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.md"
+    current.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-new/source.pdf"
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    item.item_type = "attachment"
+    item.title = "Quarterly Report.PDF"
+    item.path_text = "Root / Finance / Quarterly Report.PDF"
+    item.source_url = "https://feishu.example/wiki/finance"
     await review_fixture.commit()
     monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
     monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
@@ -982,8 +1083,16 @@ async def test_processing_worker_passes_archived_source_and_content_hash(monkeyp
 
     assert result == {"version_id": "version-new", "status": "awaiting_review", "file_id": "file-new"}
     params = calls[0][3]
-    assert params["source_path"] == current.source_object_path
+    assert params["source_path"] == "Root/Finance/Quarterly Report.PDF"
     assert params["content_hashes"] == {current.source_object_path: "new-hash"}
+    assert params["feishu"] == {
+        "source_url": "https://feishu.example/wiki/finance",
+        "wiki_path": "Root / Finance / Quarterly Report.PDF",
+        "material_version": "version-new",
+        "page_info": {"item_type": "attachment", "title": "Quarterly Report.PDF"},
+    }
+    assert calls[0][5]["filename"] == "Root/Finance/Quarterly Report.PDF"
+    assert calls[0][5]["path"] == current.source_object_path
 
 
 async def test_publish_worker_archives_then_publishes_and_switches_active(monkeypatch, review_fixture):
