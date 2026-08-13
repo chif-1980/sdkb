@@ -2224,6 +2224,296 @@ async def test_removal_claim_rejects_second_worker_after_first_claim_is_committe
     assert len(events) == 1
 
 
+async def test_finish_removal_commit_failure_is_compensated_and_can_retry(monkeypatch, tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'finish-removal.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as seed_session:
+        seed_session.add_all(
+            [
+                FeishuSource(
+                    source_id="source-1",
+                    name="Source",
+                    wiki_root_token="root",
+                    target_kb_id="kb-1",
+                    credential_env_name="FEISHU_ACCESS_TOKEN",
+                ),
+                FeishuSourceItem(
+                    item_id="item-1",
+                    source_id="source-1",
+                    item_key="page:space:node",
+                    item_type="page",
+                    title="Page",
+                    source_validity="invalid",
+                    active_version_id="version-old",
+                ),
+                FeishuMaterialVersion(
+                    version_id="version-old",
+                    item_id="item-1",
+                    revision="1",
+                    content_hash="old-hash",
+                    processing_status="published",
+                    review_status="approved",
+                    yuxi_file_id="file-old",
+                ),
+            ]
+        )
+        await seed_session.commit()
+
+    @asynccontextmanager
+    async def recovery_session_context():
+        async with session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        recovery_session_context,
+    )
+
+    class FailingTransactionContext:
+        def __init__(self, transaction):
+            self.transaction = transaction
+
+        async def __aenter__(self):
+            return await self.transaction.__aenter__()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            if exc_type is None:
+                raise RuntimeError("forced finish commit failure")
+            return await self.transaction.__aexit__(exc_type, exc_value, traceback)
+
+    class FinishFailingSession(AsyncSession):
+        fail_next_transaction_commit = False
+
+        def begin(self):
+            transaction = super().begin()
+            if not self.fail_next_transaction_commit:
+                return transaction
+            self.fail_next_transaction_commit = False
+            return FailingTransactionContext(transaction)
+
+    failing_session_factory = async_sessionmaker(
+        engine,
+        class_=FinishFailingSession,
+        expire_on_commit=False,
+    )
+    adapter_calls = []
+
+    class RemovedThenMissingAdapter:
+        async def remove(self, *, kb_id: str, file_id: str) -> None:
+            adapter_calls.append((kb_id, file_id))
+            if len(adapter_calls) == 1:
+                failing_session.fail_next_transaction_commit = True
+                return
+            raise FileNotFoundError(file_id)
+
+    adapter = RemovedThenMissingAdapter()
+    async with failing_session_factory() as failing_session:
+        with pytest.raises(RuntimeError, match="forced finish commit failure"):
+            await FeishuReviewService(
+                failing_session,
+                removal_adapter=adapter,
+            ).confirm_removal("version-old", operator_id="admin")
+
+    async with session_factory() as verification_session:
+        failed_item = await verification_session.scalar(
+            select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1")
+        )
+        failed_version = await verification_session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-old")
+        )
+        failed_events = list(
+            (
+                await verification_session.execute(
+                    select(FeishuProcessingEvent)
+                    .where(FeishuProcessingEvent.version_id == "version-old")
+                    .order_by(FeishuProcessingEvent.id)
+                )
+            ).scalars()
+        )
+
+        assert failed_version.processing_status == "removal_failed"
+        assert failed_version.error_message == "forced finish commit failure"
+        assert failed_version.yuxi_file_id == "file-old"
+        assert failed_item.active_version_id == "version-old"
+        assert [event.event_type for event in failed_events] == ["removal_started", "removal_failed"]
+
+    async with session_factory() as retry_session:
+        removed = await FeishuReviewService(
+            retry_session,
+            removal_adapter=adapter,
+        ).confirm_removal("version-old", operator_id="admin")
+
+    async with session_factory() as verification_session:
+        item = await verification_session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        version = await verification_session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-old")
+        )
+        events = list(
+            (
+                await verification_session.execute(
+                    select(FeishuProcessingEvent)
+                    .where(FeishuProcessingEvent.version_id == "version-old")
+                    .order_by(FeishuProcessingEvent.id)
+                )
+            ).scalars()
+        )
+
+    assert adapter_calls == [("kb-1", "file-old"), ("kb-1", "file-old")]
+    assert removed.processing_status == "removed"
+    assert version.processing_status == "removed"
+    assert version.yuxi_file_id is None
+    assert item.active_version_id is None
+    assert [event.event_type for event in events] == [
+        "removal_started",
+        "removal_failed",
+        "removal_started",
+        "removal_confirmed",
+    ]
+    assert events[-1].payload_json == {"external_file_already_missing": True}
+    await engine.dispose()
+
+
+async def test_finish_and_compensation_commit_failures_leave_pending_for_startup_reconciliation(
+    monkeypatch,
+    tmp_path,
+):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'finish-and-recovery-failure.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as seed_session:
+        seed_session.add_all(
+            [
+                FeishuSource(
+                    source_id="source-1",
+                    name="Source",
+                    wiki_root_token="root",
+                    target_kb_id="kb-1",
+                    credential_env_name="FEISHU_ACCESS_TOKEN",
+                ),
+                FeishuSourceItem(
+                    item_id="item-1",
+                    source_id="source-1",
+                    item_key="page:space:node",
+                    item_type="page",
+                    title="Page",
+                    source_validity="invalid",
+                    active_version_id="version-old",
+                ),
+                FeishuMaterialVersion(
+                    version_id="version-old",
+                    item_id="item-1",
+                    revision="1",
+                    content_hash="old-hash",
+                    processing_status="published",
+                    review_status="approved",
+                    yuxi_file_id="file-old",
+                ),
+            ]
+        )
+        await seed_session.commit()
+
+    class FailingTransactionContext:
+        def __init__(self, transaction, message):
+            self.transaction = transaction
+            self.message = message
+
+        async def __aenter__(self):
+            return await self.transaction.__aenter__()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            if exc_type is None:
+                raise RuntimeError(self.message)
+            return await self.transaction.__aexit__(exc_type, exc_value, traceback)
+
+    class CommitFailingSession(AsyncSession):
+        failure_message = None
+
+        def begin(self):
+            transaction = super().begin()
+            if self.failure_message is None:
+                return transaction
+            message = self.failure_message
+            self.failure_message = None
+            return FailingTransactionContext(transaction, message)
+
+    failing_session_factory = async_sessionmaker(
+        engine,
+        class_=CommitFailingSession,
+        expire_on_commit=False,
+    )
+
+    @asynccontextmanager
+    async def recovery_session_context():
+        async with failing_session_factory() as session:
+            session.failure_message = "forced compensation commit failure"
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    monkeypatch.setattr(
+        router_module.pg_manager,
+        "get_async_session_context",
+        recovery_session_context,
+    )
+
+    adapter_calls = []
+
+    class RemovalAdapter:
+        async def remove(self, *, kb_id: str, file_id: str) -> None:
+            adapter_calls.append((kb_id, file_id))
+            request_session.failure_message = "forced finish commit failure"
+
+    async with failing_session_factory() as request_session:
+        with pytest.raises(RuntimeError) as error:
+            await FeishuReviewService(
+                request_session,
+                removal_adapter=RemovalAdapter(),
+            ).confirm_removal("version-old", operator_id="admin")
+
+    assert "forced finish commit failure" in str(error.value)
+    assert "forced compensation commit failure" in str(error.value)
+    assert adapter_calls == [("kb-1", "file-old")]
+
+    async with session_factory() as verification_session:
+        item = await verification_session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+        version = await verification_session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-old")
+        )
+        events = list(
+            (
+                await verification_session.execute(
+                    select(FeishuProcessingEvent)
+                    .where(FeishuProcessingEvent.version_id == "version-old")
+                    .order_by(FeishuProcessingEvent.id)
+                )
+            ).scalars()
+        )
+        assert version.processing_status == "removal_pending"
+        assert version.yuxi_file_id == "file-old"
+        assert item.active_version_id == "version-old"
+        assert [event.event_type for event in events] == ["removal_started"]
+
+        reconciled = await FeishuKnowledgeRepository(verification_session).reconcile_interrupted_work()
+        await verification_session.commit()
+        assert reconciled == {"sync_runs": 0, "material_versions": 1}
+
+    await engine.dispose()
+
+
 async def test_batch_action_reports_each_version_and_supports_reject(monkeypatch):
     calls = []
 

@@ -492,11 +492,24 @@ class FeishuReviewService:
         except Exception as exc:
             await self._restore_removal(version_id, message=str(exc))
             raise
-        return await self._finish_removal(
-            version_id,
-            operator_id=operator_id,
-            external_file_already_missing=external_file_already_missing,
-        )
+        try:
+            return await self._finish_removal(
+                version_id,
+                operator_id=operator_id,
+                external_file_already_missing=external_file_already_missing,
+            )
+        except Exception as exc:
+            await self.session.rollback()
+            try:
+                async with pg_manager.get_async_session_context() as recovery_session:
+                    await FeishuReviewService(recovery_session)._restore_removal(
+                        version_id,
+                        message=str(exc),
+                    )
+                    await recovery_session.commit()
+            except Exception as recovery_exc:
+                raise RuntimeError(f"{exc}; removal recovery failed: {recovery_exc}") from exc
+            raise
 
     async def _claim_removal(
         self, version_id: str, *, operator_id: str
