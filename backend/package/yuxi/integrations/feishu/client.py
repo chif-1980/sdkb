@@ -46,6 +46,10 @@ class FeishuPermissionError(FeishuClientError):
     pass
 
 
+class FeishuNotFoundError(FeishuClientError):
+    pass
+
+
 class FeishuApiError(FeishuClientError):
     pass
 
@@ -129,6 +133,13 @@ class FeishuClient:
         if node.obj_type != "docx":
             raise FeishuApiError(f"Unsupported Feishu Wiki obj_type: {node.obj_type!r}")
         document_id = node.obj_token or node.node_token
+        document_payload = await self._get(f"/open-apis/docx/v1/documents/{document_id}", params={})
+        document_data = self._as_mapping(document_payload.get("data"), "data")
+        document = self._as_mapping(document_data.get("document"), "document")
+        revision_id = document.get("revision_id")
+        if not isinstance(revision_id, int):
+            raise FeishuApiError("Feishu document response did not include a numeric revision ID")
+        revision = str(revision_id)
         content_payload = await self._get(
             f"/open-apis/docx/v1/documents/{document_id}/raw_content",
             params={},
@@ -138,7 +149,7 @@ class FeishuClient:
         if not isinstance(content, str):
             raise FeishuApiError("Feishu document response did not include string content")
 
-        blocks = await self._list_document_blocks(document_id, node.revision)
+        blocks = await self._list_document_blocks(document_id, revision)
         attachments: list[FeishuAttachment] = []
         seen_tokens: set[str] = set()
         visited_blocks: set[str] = set()
@@ -147,18 +158,27 @@ class FeishuClient:
         for block in blocks:
             await self._collect_block_attachments(
                 document_id=document_id,
+                revision=revision,
                 block=block,
                 attachments=attachments,
                 seen_tokens=seen_tokens,
                 visited_blocks=visited_blocks,
             )
-        return FeishuPageContent(content=content.encode("utf-8"), attachments=tuple(attachments))
+        return FeishuPageContent(content=content.encode("utf-8"), attachments=tuple(attachments), revision=revision)
 
     async def _list_document_blocks(self, document_id: str, revision: str | None) -> list[Mapping[str, Any]]:
         return await self._list_blocks(f"/open-apis/docx/v1/documents/{document_id}/blocks", revision=revision)
 
-    async def _list_block_children(self, document_id: str, block_id: str) -> list[Mapping[str, Any]]:
-        return await self._list_blocks(f"/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children")
+    async def _list_block_children(
+        self,
+        document_id: str,
+        block_id: str,
+        revision: str,
+    ) -> list[Mapping[str, Any]]:
+        return await self._list_blocks(
+            f"/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children",
+            revision=revision,
+        )
 
     async def _list_blocks(self, path: str, *, revision: str | None = None) -> list[Mapping[str, Any]]:
         blocks: list[Mapping[str, Any]] = []
@@ -184,6 +204,7 @@ class FeishuClient:
         self,
         *,
         document_id: str,
+        revision: str,
         block: Mapping[str, Any],
         attachments: list[FeishuAttachment],
         seen_tokens: set[str],
@@ -197,10 +218,11 @@ class FeishuClient:
         children = block.get("children")
         if not isinstance(block_id, str) or not block_id or not isinstance(children, list) or not children:
             return
-        for child in await self._list_block_children(document_id, block_id):
+        for child in await self._list_block_children(document_id, block_id, revision):
             self._append_block_attachments(child, attachments, seen_tokens)
             await self._collect_block_attachments(
                 document_id=document_id,
+                revision=revision,
                 block=child,
                 attachments=attachments,
                 seen_tokens=seen_tokens,
@@ -225,6 +247,7 @@ class FeishuClient:
                         file_token=token,
                         name=name if isinstance(name, str) and name else f"file-{token}",
                         file_type="file",
+                        download_type="media",
                     )
                 )
         image_block = block.get("image")
@@ -232,7 +255,14 @@ class FeishuClient:
             token = image_block.get("token") or image_block.get("file_token")
             if isinstance(token, str) and token and token not in seen_tokens:
                 seen_tokens.add(token)
-                attachments.append(FeishuAttachment(file_token=token, name=f"image-{token}", file_type="image"))
+                attachments.append(
+                    FeishuAttachment(
+                        file_token=token,
+                        name=f"image-{token}",
+                        file_type="image",
+                        download_type="media",
+                    )
+                )
         text_block = block.get("text")
         if not isinstance(text_block, Mapping):
             return
@@ -248,10 +278,19 @@ class FeishuClient:
             token = inline_file.get("file_token") or inline_file.get("token")
             if isinstance(token, str) and token and token not in seen_tokens:
                 seen_tokens.add(token)
-                attachments.append(FeishuAttachment(file_token=token, name=f"image-{token}", file_type="image"))
+                attachments.append(
+                    FeishuAttachment(
+                        file_token=token,
+                        name=f"image-{token}",
+                        file_type="image",
+                        download_type="media",
+                    )
+                )
 
-    async def download(self, file_token: str) -> FeishuDownload:
-        response = await self._get_response(f"/open-apis/drive/v1/files/{file_token}/download")
+    async def download(self, file_token: str, *, download_type: str = "file") -> FeishuDownload:
+        if download_type not in {"file", "media"}:
+            raise ValueError("download_type must be 'file' or 'media'")
+        response = await self._get_response(f"/open-apis/drive/v1/{download_type}s/{file_token}/download")
         return FeishuDownload(
             file_token=file_token,
             content=response.content,
@@ -307,6 +346,8 @@ class FeishuClient:
                 )
             if response.status_code == 403:
                 raise FeishuPermissionError("Feishu permission denied", error=self._error_from_response(response))
+            if response.status_code == 404:
+                raise FeishuNotFoundError("Feishu resource not found", error=self._error_from_response(response))
             if response.is_error:
                 raise FeishuApiError("Feishu request failed", error=self._error_from_response(response))
             self._log_response(response)

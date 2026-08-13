@@ -21,6 +21,7 @@ class FeishuAttachment:
     file_token: str
     name: str
     file_type: str | None = None
+    download_type: str = "file"
     size: int | None = None
     revision: str | None = None
     source_updated_at: str | None = None
@@ -30,6 +31,7 @@ class FeishuAttachment:
 class FeishuPageContent:
     content: bytes
     attachments: tuple[FeishuAttachment, ...] = ()
+    revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

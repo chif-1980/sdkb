@@ -5,7 +5,7 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
-from yuxi.integrations.feishu.client import FeishuClient
+from yuxi.integrations.feishu.client import FeishuClient, FeishuNotFoundError
 from yuxi.integrations.feishu.schemas import FeishuAttachment, FeishuNode
 from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository
 from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion, FeishuSource
@@ -70,6 +70,8 @@ class FeishuScanService:
         source = await self.repository.get_source(source_id)
         if source is None:
             raise LookupError(f"Feishu source not found: {source_id}")
+        if mode == "incremental" and not await self.repository.has_successful_full_scan(source_id):
+            raise ValueError("Feishu incremental scan requires a successful full scan")
         run = await self.repository.start_sync_run(
             source_id=source_id,
             run_type=mode,
@@ -91,6 +93,7 @@ class FeishuScanService:
                 seen_at=seen_at,
                 visited=set(),
             )
+            await self._verify_unseen_page_roots(source_id=source_id, seen_item_keys=seen_item_keys)
             invalidated_count = await self.repository.complete_successful_scan(
                 run_id=run_id,
                 source_id=source_id,
@@ -131,6 +134,22 @@ class FeishuScanService:
         )
         return result
 
+    async def _verify_unseen_page_roots(self, *, source_id: str, seen_item_keys: set[str]) -> None:
+        unseen_roots = await self.repository.list_unseen_valid_page_roots(
+            source_id=source_id,
+            seen_item_keys=seen_item_keys,
+        )
+        for item in unseen_roots:
+            prefix, _, node_token = item.item_key.partition(":")
+            if prefix != "page" or ":" not in node_token:
+                raise RuntimeError(f"Invalid Feishu page item key: {item.item_key}")
+            node_token = node_token.rsplit(":", 1)[-1]
+            try:
+                await self.client.get_node(node_token)
+            except FeishuNotFoundError:
+                continue
+            raise RuntimeError(f"Feishu page omitted from traversal but remains readable: {node_token}")
+
     async def _scan_node(
         self,
         *,
@@ -159,7 +178,7 @@ class FeishuScanService:
             path_text=path_text,
             source_url=self._page_url(source.wiki_root_url, node.node_token),
             token=node.obj_token or node.node_token,
-            revision=node.revision,
+            revision=page_content.revision,
             source_updated_at=node.source_updated_at,
             supported=True,
             counts=counts,
@@ -217,6 +236,7 @@ class FeishuScanService:
             counts=counts,
             seen_item_keys=seen_item_keys,
             seen_at=seen_at,
+            download_type=attachment.download_type,
         )
 
     async def _record_material(
@@ -237,6 +257,7 @@ class FeishuScanService:
         seen_item_keys: set[str],
         seen_at: datetime,
         content: bytes | None = None,
+        download_type: str = "file",
     ) -> None:
         updated_at = coerce_any_to_utc_datetime(source_updated_at)
         normalized_updated_at = updated_at.isoformat() if updated_at is not None else None
@@ -272,7 +293,7 @@ class FeishuScanService:
             counts.unchanged += 1
             return
         if content is None:
-            download = await self.client.download(token)
+            download = await self.client.download(token, download_type=download_type)
             content = download.content
         content_hash = sha256(content).hexdigest()
         if (

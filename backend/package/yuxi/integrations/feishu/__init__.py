@@ -5,6 +5,7 @@ from yuxi.integrations.feishu.client import (
     FeishuClient,
     FeishuClientError,
     FeishuCredentialError,
+    FeishuNotFoundError,
     FeishuPermissionError,
 )
 from yuxi.integrations.feishu.schemas import (
@@ -26,6 +27,7 @@ __all__ = [
     "FeishuDownload",
     "FeishuError",
     "FeishuNode",
+    "FeishuNotFoundError",
     "FeishuPageContent",
     "FeishuPermissionError",
 ]

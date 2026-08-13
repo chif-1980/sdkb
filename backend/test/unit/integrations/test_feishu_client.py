@@ -9,6 +9,7 @@ from yuxi.integrations.feishu import (
     FeishuApiError,
     FeishuClient,
     FeishuCredentialError,
+    FeishuNotFoundError,
     FeishuPermissionError,
 )
 from yuxi.integrations.feishu.schemas import FeishuNode
@@ -166,11 +167,22 @@ async def test_list_attachments_follows_page_token() -> None:
 
 @pytest.mark.asyncio
 async def test_get_wiki_document_reads_docx_content_and_nested_block_attachments() -> None:
-    requests: list[tuple[str, str | None]] = []
+    requests: list[tuple[str, str | None, str | None]] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        requests.append((request.url.path, request.url.params.get("page_token")))
+        requests.append(
+            (
+                request.url.path,
+                request.url.params.get("page_token"),
+                request.url.params.get("document_revision_id"),
+            )
+        )
+        if request.url.path == "/open-apis/docx/v1/documents/doc-token":
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"document": {"document_id": "doc-token", "revision_id": 42}}},
+            )
         if request.url.path.endswith("/raw_content"):
             assert request.url.path == "/open-apis/docx/v1/documents/doc-token/raw_content"
             return httpx.Response(200, json={"code": 0, "data": {"content": "# Hello"}})
@@ -243,17 +255,20 @@ async def test_get_wiki_document_reads_docx_content_and_nested_block_attachments
     )
 
     assert document.content == b"# Hello"
+    assert document.revision == "42"
     assert [(item.file_token, item.name, item.file_type) for item in document.attachments] == [
         ("file-1", "guide.pdf", "file"),
         ("image-1", "image-image-1", "image"),
         ("inline-1", "image-inline-1", "image"),
     ]
+    assert {item.download_type for item in document.attachments} == {"media"}
     assert requests == [
-        ("/open-apis/docx/v1/documents/doc-token/raw_content", None),
-        ("/open-apis/docx/v1/documents/doc-token/blocks", None),
-        ("/open-apis/docx/v1/documents/doc-token/blocks", "blocks-next"),
-        ("/open-apis/docx/v1/documents/doc-token/blocks/root-1/children", None),
-        ("/open-apis/docx/v1/documents/doc-token/blocks/container-1/children", None),
+        ("/open-apis/docx/v1/documents/doc-token", None, None),
+        ("/open-apis/docx/v1/documents/doc-token/raw_content", None, None),
+        ("/open-apis/docx/v1/documents/doc-token/blocks", None, "42"),
+        ("/open-apis/docx/v1/documents/doc-token/blocks", "blocks-next", "42"),
+        ("/open-apis/docx/v1/documents/doc-token/blocks/root-1/children", None, "42"),
+        ("/open-apis/docx/v1/documents/doc-token/blocks/container-1/children", None, "42"),
     ]
     await client.aclose()
 
@@ -340,6 +355,20 @@ async def test_download_returns_binary_content_and_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_download_media_uses_document_media_endpoint() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/open-apis/drive/v1/medias/media-1/download"
+        return httpx.Response(200, content=b"image")
+
+    client = _client(handler)
+    download = await client.download("media-1", download_type="media")
+
+    assert download.content == b"image"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status_code", "error_type"),
     [(401, FeishuAuthenticationError), (403, FeishuPermissionError)],
@@ -354,6 +383,18 @@ async def test_auth_errors_are_normalized(status_code: int, error_type: type[Exc
 
     assert raised.value.status_code == status_code
     assert raised.value.request_id == "request-1"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_not_found_is_normalized() -> None:
+    client = _client(lambda request: httpx.Response(404, headers={"x-tt-logid": "request-404"}))
+
+    with pytest.raises(FeishuNotFoundError) as raised:
+        await client.get_node("missing-node")
+
+    assert raised.value.status_code == 404
+    assert raised.value.request_id == "request-404"
     await client.aclose()
 
 

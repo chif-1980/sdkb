@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.repositories.feishu_knowledge_repository import (
@@ -63,6 +64,26 @@ async def test_get_or_create_source_updates_configuration_without_storing_creden
     assert not hasattr(source, "credential")
 
 
+async def test_postgres_source_upsert_is_atomic(repository):
+    statement = repository._build_postgres_source_upsert(
+        source_id="source-1",
+        name="Engineering Wiki",
+        wiki_root_token="root",
+        wiki_root_url="https://example.feishu.cn/wiki/root",
+        target_kb_id="kb-1",
+        credential_env_name="FEISHU_ACCESS_TOKEN",
+        enabled=True,
+        created_by="admin-1",
+    )
+
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "INSERT INTO feishu_sources" in sql
+    assert "ON CONFLICT (source_id) DO UPDATE" in sql
+    for column in ("name", "wiki_root_token", "wiki_root_url", "target_kb_id", "credential_env_name", "enabled"):
+        assert f"{column} = excluded.{column}" in sql
+
+
 async def test_start_sync_run_rejects_a_second_running_scan(repository):
     run = await repository.start_sync_run(source_id="source-1", run_type="full", operator_id="admin-1")
 
@@ -70,6 +91,49 @@ async def test_start_sync_run_rejects_a_second_running_scan(repository):
         await repository.start_sync_run(source_id="source-1", run_type="incremental", operator_id="admin-2")
 
     assert run.status == "running"
+
+
+async def test_successful_full_scan_is_the_only_incremental_prerequisite(repository):
+    failed_full = await repository.start_sync_run(source_id="source-1", run_type="full")
+    await repository.finish_sync_run(
+        run_id=failed_full.run_id,
+        status="failed",
+        scanned_count=0,
+        new_count=0,
+        changed_count=0,
+        unchanged_count=0,
+        unsupported_count=0,
+        failed_count=1,
+        invalidated_count=0,
+    )
+    succeeded_incremental = await repository.start_sync_run(source_id="source-1", run_type="incremental")
+    await repository.finish_sync_run(
+        run_id=succeeded_incremental.run_id,
+        status="succeeded",
+        scanned_count=0,
+        new_count=0,
+        changed_count=0,
+        unchanged_count=0,
+        unsupported_count=0,
+        failed_count=0,
+        invalidated_count=0,
+    )
+    running_full = await repository.start_sync_run(source_id="source-1", run_type="full")
+
+    assert await repository.has_successful_full_scan("source-1") is False
+
+    await repository.finish_sync_run(
+        run_id=running_full.run_id,
+        status="succeeded",
+        scanned_count=0,
+        new_count=0,
+        changed_count=0,
+        unchanged_count=0,
+        unsupported_count=0,
+        failed_count=0,
+        invalidated_count=0,
+    )
+    assert await repository.has_successful_full_scan("source-1") is True
 
 
 async def test_upsert_and_version_methods_preserve_active_version(repository):

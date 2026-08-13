@@ -7,7 +7,7 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from yuxi.integrations.feishu.client import FeishuPermissionError
+from yuxi.integrations.feishu.client import FeishuNotFoundError, FeishuPermissionError
 from yuxi.integrations.feishu.schemas import FeishuAttachment, FeishuDownload, FeishuNode, FeishuPageContent
 from yuxi.integrations.feishu.service import FeishuScanService
 from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository
@@ -29,19 +29,23 @@ class FakeFeishuClient:
         children: dict[str, list[FeishuNode]] | None = None,
         page_attachments: dict[str, list[FeishuAttachment]] | None = None,
         page_contents: dict[str, bytes] | None = None,
+        page_revisions: dict[str, str | None] | None = None,
         contents: dict[str, bytes] | None = None,
         error_at: tuple[str, str] | None = None,
+        not_found_tokens: set[str] | None = None,
     ) -> None:
         self.nodes = nodes
         self.children = children or {}
         self.page_attachments = page_attachments or {}
         self.page_contents = page_contents or {}
+        self.page_revisions = page_revisions or {}
         self.contents = contents or {}
         self.error_at = error_at
+        self.not_found_tokens = not_found_tokens or set()
         self.get_calls: list[str] = []
         self.children_calls: list[str] = []
         self.attachment_calls: list[str] = []
-        self.download_calls: list[str] = []
+        self.download_calls: list[tuple[str, str]] = []
         self.page_calls: list[str] = []
 
     def _raise_if_requested(self, operation: str, token: str) -> None:
@@ -51,6 +55,8 @@ class FakeFeishuClient:
     async def get_node(self, node_token: str) -> FeishuNode:
         self.get_calls.append(node_token)
         self._raise_if_requested("get", node_token)
+        if node_token in self.not_found_tokens:
+            raise FeishuNotFoundError("not found")
         return self.nodes[node_token]
 
     async def list_children(self, parent_node_token: str) -> list[FeishuNode]:
@@ -68,10 +74,11 @@ class FakeFeishuClient:
         return FeishuPageContent(
             content=self.page_contents[token],
             attachments=self.page_attachments.get(token, []),
+            revision=self.page_revisions.get(token, "1"),
         )
 
-    async def download(self, file_token: str) -> FeishuDownload:
-        self.download_calls.append(file_token)
+    async def download(self, file_token: str, *, download_type: str = "file") -> FeishuDownload:
+        self.download_calls.append((file_token, download_type))
         self._raise_if_requested("download", file_token)
         return FeishuDownload(file_token=file_token, content=self.contents[file_token])
 
@@ -81,7 +88,6 @@ def node(
     title: str,
     *,
     parent: str | None = None,
-    revision: str | None = "1",
     updated_at: str | None = "2026-08-13T00:00:00Z",
     has_child: bool = False,
 ) -> FeishuNode:
@@ -93,7 +99,6 @@ def node(
         title=title,
         parent_node_token=parent,
         has_child=has_child,
-        revision=revision,
         source_updated_at=updated_at,
     )
 
@@ -154,9 +159,21 @@ async def test_scan_recurses_from_configured_root_and_builds_page_paths(reposito
     assert [item.path_text for item in items] == ["Root", "Root / Child", "Root / Child / Grandchild"]
 
 
+async def test_incremental_scan_requires_a_successful_full_run(repository, session):
+    fake = FakeFeishuClient(nodes={"root": node("root", "Root")}, page_contents={"obj-root": b"root"})
+
+    with pytest.raises(ValueError, match="successful full"):
+        await FeishuScanService(repository=repository, client=fake).scan(
+            source_id="source-1",
+            mode="incremental",
+        )
+
+    assert await session.scalar(select(func.count()).select_from(FeishuSyncRun)) == 0
+
+
 async def test_page_body_and_attachments_are_independent_source_items(repository, session):
     root = node("root", "Root")
-    attachment = FeishuAttachment(file_token="pdf-1", name="Guide.PDF", revision="7")
+    attachment = FeishuAttachment(file_token="pdf-1", name="Guide.PDF", revision="7", download_type="media")
     fake = FakeFeishuClient(
         nodes={"root": root},
         page_attachments={"obj-root": [attachment]},
@@ -170,17 +187,18 @@ async def test_page_body_and_attachments_are_independent_source_items(repository
     assert result.new_count == 2
     assert {(item.item_type, item.title) for item in items} == {("page", "Root"), ("attachment", "Guide.PDF")}
     assert len({item.item_id for item in items}) == 2
-    assert fake.download_calls == ["pdf-1"]
+    assert fake.download_calls == [("pdf-1", "media")]
 
 
 async def test_incremental_scan_creates_version_only_for_changed_item(repository, session):
-    root = node("root", "Root", revision="page-1")
+    root = node("root", "Root")
     pdf = FeishuAttachment(file_token="pdf-1", name="guide.pdf", revision="pdf-1")
     video = FeishuAttachment(file_token="video-1", name="demo.mp4", revision="video-1")
     fake = FakeFeishuClient(
         nodes={"root": root},
         page_attachments={"obj-root": [pdf, video]},
         page_contents={"obj-root": b"page-v1"},
+        page_revisions={"obj-root": "page-1"},
         contents={"pdf-1": b"pdf-v1"},
     )
     service = FeishuScanService(repository=repository, client=fake)
@@ -197,19 +215,20 @@ async def test_incremental_scan_creates_version_only_for_changed_item(repository
     assert result.changed_count == 1
     assert result.unchanged_count == 1
     assert result.unsupported_count == 1
-    assert fake.download_calls == ["pdf-1"]
+    assert fake.download_calls == [("pdf-1", "file")]
     assert await _version_count(session, items["Root renamed"].item_id) == 1
     assert await _version_count(session, items["guide.pdf"].item_id) == 2
     assert await _version_count(session, items["demo.mp4"].item_id) == 1
 
 
 async def test_version_fallback_prefers_update_time_then_content_hash(repository, session):
-    root = node("root", "Root", revision=None, updated_at="2026-08-13T00:00:00Z")
+    root = node("root", "Root", updated_at="2026-08-13T00:00:00Z")
     without_metadata = FeishuAttachment(file_token="text-1", name="notes.txt", revision=None, source_updated_at=None)
     fake = FakeFeishuClient(
         nodes={"root": root},
         page_attachments={"obj-root": [without_metadata]},
         page_contents={"obj-root": b"page-v1"},
+        page_revisions={"obj-root": None},
         contents={"text-1": b"same text"},
     )
     service = FeishuScanService(repository=repository, client=fake)
@@ -219,7 +238,7 @@ async def test_version_fallback_prefers_update_time_then_content_hash(repository
 
     unchanged = await service.scan(source_id="source-1", mode="incremental")
     assert unchanged.unchanged_count == 2
-    assert fake.download_calls == ["text-1"]
+    assert fake.download_calls == [("text-1", "file")]
 
     fake.nodes["root"] = replace(root, source_updated_at="2026-08-14T00:00:00Z")
     changed = await service.scan(source_id="source-1", mode="incremental")
@@ -231,8 +250,12 @@ async def test_version_fallback_prefers_update_time_then_content_hash(repository
 
 
 async def test_equivalent_update_time_formats_do_not_create_a_version(repository, session):
-    root = node("root", "Root", revision=None, updated_at="2026-08-13T00:00:00Z")
-    fake = FakeFeishuClient(nodes={"root": root}, page_contents={"obj-root": b"page-v1"})
+    root = node("root", "Root", updated_at="2026-08-13T00:00:00Z")
+    fake = FakeFeishuClient(
+        nodes={"root": root},
+        page_contents={"obj-root": b"page-v1"},
+        page_revisions={"obj-root": None},
+    )
     service = FeishuScanService(repository=repository, client=fake)
     await service.scan(source_id="source-1", mode="full")
     fake.nodes["root"] = replace(root, source_updated_at="2026-08-13T00:00:00+00:00")
@@ -242,6 +265,33 @@ async def test_equivalent_update_time_formats_do_not_create_a_version(repository
 
     assert result.unchanged_count == 1
     assert fake.download_calls == []
+
+
+async def test_page_version_uses_docx_revision(repository, session):
+    root = node("root", "Root")
+    fake = FakeFeishuClient(
+        nodes={"root": root},
+        page_contents={"obj-root": b"same page"},
+        page_revisions={"obj-root": "41"},
+    )
+    service = FeishuScanService(repository=repository, client=fake)
+    await service.scan(source_id="source-1", mode="full")
+    fake.page_revisions["obj-root"] = "42"
+
+    result = await service.scan(source_id="source-1", mode="incremental")
+    item = (await _items(session))[0]
+    versions = list(
+        (
+            await session.execute(
+                select(FeishuMaterialVersion)
+                .where(FeishuMaterialVersion.item_id == item.item_id)
+                .order_by(FeishuMaterialVersion.id)
+            )
+        ).scalars()
+    )
+
+    assert result.changed_count == 1
+    assert [version.revision for version in versions] == ["41", "42"]
 
 
 async def test_attachment_extensions_and_media_statuses_are_classified(repository, session):
@@ -303,7 +353,7 @@ async def test_partial_or_permission_error_never_invalidates_unseen_items(reposi
     root = node("root", "Root")
     fake = FakeFeishuClient(nodes={"root": root}, page_contents={"obj-root": b"page"}, error_at=error_at)
 
-    result = await FeishuScanService(repository=repository, client=fake).scan(source_id="source-1", mode="incremental")
+    result = await FeishuScanService(repository=repository, client=fake).scan(source_id="source-1", mode="full")
     await session.refresh(stale)
     run = await session.scalar(select(FeishuSyncRun).order_by(FeishuSyncRun.id.desc()).limit(1))
 
@@ -338,6 +388,58 @@ async def test_complete_scan_invalidates_unseen_item_without_changing_active_ver
     assert result.invalidated_count == 1
     assert stale.source_validity == "invalid"
     assert stale.active_version_id == "published-version"
+
+
+@pytest.mark.parametrize("probe_result", ["permission", "still-readable"])
+async def test_filtered_child_page_never_invalidates_existing_subtree(repository, session, probe_result):
+    root = node("root", "Root", has_child=True)
+    child = node("child", "Child", parent="root")
+    attachment = FeishuAttachment(file_token="child-file", name="child.pdf")
+    fake = FakeFeishuClient(
+        nodes={"root": root, "child": child},
+        children={"root": [child]},
+        page_attachments={"obj-child": [attachment]},
+        page_contents={"obj-root": b"root", "obj-child": b"child"},
+        contents={"child-file": b"attachment"},
+    )
+    service = FeishuScanService(repository=repository, client=fake)
+    await service.scan(source_id="source-1", mode="full")
+    fake.children["root"] = []
+    if probe_result == "permission":
+        fake.error_at = ("get", "child")
+
+    result = await service.scan(source_id="source-1", mode="full")
+    items = {item.title: item for item in await _items(session)}
+
+    assert result.status == "failed"
+    assert result.invalidated_count == 0
+    assert items["Child"].source_validity == "valid"
+    assert items["child.pdf"].source_validity == "valid"
+
+
+async def test_not_found_child_page_allows_subtree_invalidation(repository, session):
+    root = node("root", "Root", has_child=True)
+    child = node("child", "Child", parent="root")
+    attachment = FeishuAttachment(file_token="child-file", name="child.pdf")
+    fake = FakeFeishuClient(
+        nodes={"root": root, "child": child},
+        children={"root": [child]},
+        page_attachments={"obj-child": [attachment]},
+        page_contents={"obj-root": b"root", "obj-child": b"child"},
+        contents={"child-file": b"attachment"},
+    )
+    service = FeishuScanService(repository=repository, client=fake)
+    await service.scan(source_id="source-1", mode="full")
+    fake.children["root"] = []
+    fake.not_found_tokens.add("child")
+
+    result = await service.scan(source_id="source-1", mode="full")
+    items = {item.title: item for item in await _items(session)}
+
+    assert result.status == "succeeded"
+    assert result.invalidated_count == 2
+    assert items["Child"].source_validity == "invalid"
+    assert items["child.pdf"].source_validity == "invalid"
 
 
 async def test_invalidation_rolls_back_when_successful_run_update_loses_a_race(repository, session, monkeypatch):

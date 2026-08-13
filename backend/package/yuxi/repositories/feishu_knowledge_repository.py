@@ -6,6 +6,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import case, func, select, update
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_knowledge import (
@@ -39,6 +40,19 @@ class FeishuKnowledgeRepository:
             result = await self.session.execute(select(FeishuSource).where(FeishuSource.source_id == source_id))
             return result.scalar_one_or_none()
 
+    async def has_successful_full_scan(self, source_id: str) -> bool:
+        async with self._read_transaction():
+            result = await self.session.execute(
+                select(FeishuSyncRun.run_id)
+                .where(
+                    FeishuSyncRun.source_id == source_id,
+                    FeishuSyncRun.run_type == "full",
+                    FeishuSyncRun.status == "succeeded",
+                )
+                .limit(1)
+            )
+            return result.scalar_one_or_none() is not None
+
     async def get_or_create_source(
         self,
         *,
@@ -52,6 +66,20 @@ class FeishuKnowledgeRepository:
         created_by: str | None = None,
     ) -> FeishuSource:
         async with self._write_transaction():
+            if self.session.get_bind().dialect.name == "postgresql":
+                result = await self.session.execute(
+                    self._build_postgres_source_upsert(
+                        source_id=source_id,
+                        name=name,
+                        wiki_root_token=wiki_root_token,
+                        wiki_root_url=wiki_root_url,
+                        target_kb_id=target_kb_id,
+                        credential_env_name=credential_env_name,
+                        enabled=enabled,
+                        created_by=created_by,
+                    ).returning(FeishuSource)
+                )
+                return result.scalar_one()
             result = await self.session.execute(
                 select(FeishuSource).where(FeishuSource.source_id == source_id).with_for_update()
             )
@@ -67,6 +95,40 @@ class FeishuKnowledgeRepository:
             source.enabled = enabled
             await self.session.flush()
             return source
+
+    @staticmethod
+    def _build_postgres_source_upsert(
+        *,
+        source_id: str,
+        name: str,
+        wiki_root_token: str,
+        wiki_root_url: str | None,
+        target_kb_id: str,
+        credential_env_name: str,
+        enabled: bool,
+        created_by: str | None,
+    ):
+        statement = postgres_insert(FeishuSource).values(
+            source_id=source_id,
+            name=name,
+            wiki_root_token=wiki_root_token,
+            wiki_root_url=wiki_root_url,
+            target_kb_id=target_kb_id,
+            credential_env_name=credential_env_name,
+            enabled=enabled,
+            created_by=created_by,
+        )
+        return statement.on_conflict_do_update(
+            index_elements=[FeishuSource.source_id],
+            set_={
+                "name": statement.excluded.name,
+                "wiki_root_token": statement.excluded.wiki_root_token,
+                "wiki_root_url": statement.excluded.wiki_root_url,
+                "target_kb_id": statement.excluded.target_kb_id,
+                "credential_env_name": statement.excluded.credential_env_name,
+                "enabled": statement.excluded.enabled,
+            },
+        )
 
     async def start_sync_run(
         self,
@@ -257,6 +319,25 @@ class FeishuKnowledgeRepository:
     async def mark_seen_items(self, *, source_id: str, item_keys: set[str], seen_at: datetime) -> int:
         async with self._write_transaction():
             return await self._mark_seen_items(source_id=source_id, item_keys=item_keys, seen_at=seen_at)
+
+    async def list_unseen_valid_page_roots(
+        self,
+        *,
+        source_id: str,
+        seen_item_keys: set[str],
+    ) -> list[FeishuSourceItem]:
+        conditions = [
+            FeishuSourceItem.source_id == source_id,
+            FeishuSourceItem.source_validity == "valid",
+            FeishuSourceItem.item_type == "page",
+        ]
+        if seen_item_keys:
+            conditions.append(FeishuSourceItem.item_key.not_in(seen_item_keys))
+        async with self._read_transaction():
+            result = await self.session.execute(select(FeishuSourceItem).where(*conditions))
+            unseen_pages = list(result.scalars())
+        unseen_keys = {item.item_key for item in unseen_pages}
+        return [item for item in unseen_pages if item.parent_item_key not in unseen_keys]
 
     async def mark_source_invalid(self, *, source_id: str, seen_item_keys: set[str]) -> int:
         async with self._write_transaction():
