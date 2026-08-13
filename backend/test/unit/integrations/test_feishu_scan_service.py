@@ -14,6 +14,7 @@ from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeReposit
 from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
+    FeishuProcessingEvent,
     FeishuSourceItem,
     FeishuSyncRun,
 )
@@ -219,6 +220,7 @@ async def test_scan_archives_page_and_attachment_bytes_with_source_metadata(repo
 
     versions = list((await session.execute(select(FeishuMaterialVersion).order_by(FeishuMaterialVersion.id))).scalars())
     assert result.status == "succeeded"
+    assert {version.sync_run_id for version in versions} == {result.run_id}
     assert [entry["content"] for entry in archived] == [b"# page", b"%PDF"]
     assert [entry["content_type"] for entry in archived] == ["text/markdown", "application/pdf"]
     assert all(version.source_object_path for version in versions)
@@ -423,6 +425,13 @@ async def test_partial_or_permission_error_never_invalidates_unseen_items(reposi
     result = await FeishuScanService(repository=repository, client=fake).scan(source_id="source-1", mode="full")
     await session.refresh(stale)
     run = await session.scalar(select(FeishuSyncRun).order_by(FeishuSyncRun.id.desc()).limit(1))
+    failure_events = list(
+        (
+            await session.execute(
+                select(FeishuProcessingEvent).where(FeishuProcessingEvent.event_type == "scan_failed")
+            )
+        ).scalars()
+    )
 
     assert result.status == "failed"
     assert result.failed_count == 1
@@ -430,6 +439,10 @@ async def test_partial_or_permission_error_never_invalidates_unseen_items(reposi
     assert stale.source_validity == "valid"
     assert run.status == "failed"
     assert run.invalidated_count == 0
+    assert len(failure_events) == 1
+    assert (failure_events[0].from_status, failure_events[0].to_status) == ("running", "failed")
+    assert failure_events[0].message == run.error_summary == result.error_summary
+    assert failure_events[0].payload_json == {"run_id": run.run_id}
 
 
 async def test_complete_scan_invalidates_unseen_item_without_changing_active_version(repository, session):

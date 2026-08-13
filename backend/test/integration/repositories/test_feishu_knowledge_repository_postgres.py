@@ -63,9 +63,11 @@ async def postgres_mutex_context():
     schema_name = f"task4_mutex_{uuid4().hex}"
     schema_engine = engine.execution_options(schema_translate_map={None: schema_name})
     factory = async_sessionmaker(schema_engine, expire_on_commit=False)
+    schema_created = False
     try:
         async with engine.begin() as connection:
             await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+            schema_created = True
             await connection.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
             await connection.execute(
                 text(
@@ -115,7 +117,9 @@ async def postgres_mutex_context():
                     """
                     INSERT INTO feishu_sources (
                         source_id, name, wiki_root_token, target_kb_id, credential_env_name
-                    ) VALUES ('source-1', 'Source', 'root', 'kb-1', 'FEISHU_ACCESS_TOKEN')
+                    ) VALUES
+                        ('source-1', 'Source', 'root', 'kb-1', 'FEISHU_ACCESS_TOKEN'),
+                        ('source-2', 'Other Source', 'other-root', 'kb-2', 'FEISHU_ACCESS_TOKEN')
                     """
                 )
             )
@@ -125,14 +129,16 @@ async def postgres_mutex_context():
                     INSERT INTO feishu_sync_runs (run_id, source_id, run_type, status)
                     VALUES
                         ('run-first', 'source-1', 'full', 'queued'),
-                        ('run-second', 'source-1', 'full', 'queued')
+                        ('run-second', 'source-1', 'full', 'queued'),
+                        ('run-other', 'source-2', 'full', 'queued')
                     """
                 )
             )
         yield factory, schema_name
     finally:
-        async with engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
+        if schema_created:
+            async with engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
         await engine.dispose()
 
 
@@ -267,5 +273,52 @@ async def test_postgres_claim_queued_run_serializes_same_source(postgres_mutex_c
             await asyncio.gather(
                 first_task,
                 *([second_task] if second_task is not None else []),
+                return_exceptions=True,
+            )
+
+
+async def test_postgres_claim_queued_run_does_not_block_different_source(postgres_mutex_context):
+    factory, _ = postgres_mutex_context
+    first_claimed = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async with factory() as first_session, factory() as other_session:
+
+        async def claim_first():
+            async with first_session.begin():
+                run = await FeishuKnowledgeRepository(first_session).claim_queued_sync_run(
+                    run_id="run-first",
+                    source_id="source-1",
+                    run_type="full",
+                    operator_id="admin-1",
+                )
+                first_claimed.set()
+                await release_first.wait()
+                return run.run_id
+
+        first_task = asyncio.create_task(claim_first())
+        other_task = None
+        try:
+            await asyncio.wait_for(first_claimed.wait(), timeout=2)
+            other_task = asyncio.create_task(
+                FeishuKnowledgeRepository(other_session).claim_queued_sync_run(
+                    run_id="run-other",
+                    source_id="source-2",
+                    run_type="full",
+                    operator_id="admin-2",
+                )
+            )
+
+            other = await asyncio.wait_for(other_task, timeout=2)
+            assert other.run_id == "run-other"
+            assert first_task.done() is False
+
+            release_first.set()
+            assert await asyncio.wait_for(first_task, timeout=2) == "run-first"
+        finally:
+            release_first.set()
+            await asyncio.gather(
+                first_task,
+                *([other_task] if other_task is not None else []),
                 return_exceptions=True,
             )

@@ -345,7 +345,7 @@ async def test_startup_reconciliation_recovers_interrupted_states_once(repositor
         ("processing", "processing", "parse_failed"),
         ("publish-queued", "publish_queued", "publish_failed"),
         ("publishing", "publishing", "publish_failed"),
-        ("removal", "removal_pending", "published"),
+        ("removal", "removal_pending", "removal_failed"),
     ]
     versions = []
     for index, (name, status, _) in enumerate(transitions):
@@ -399,7 +399,7 @@ async def test_startup_reconciliation_recovers_interrupted_states_once(repositor
         ("processing", "parse_failed"),
         ("publish_queued", "publish_failed"),
         ("publishing", "publish_failed"),
-        ("removal_pending", "published"),
+        ("removal_pending", "removal_failed"),
     }
 
 

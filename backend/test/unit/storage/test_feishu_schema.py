@@ -52,6 +52,11 @@ async def test_ensure_knowledge_schema_creates_feishu_tables_and_indexes_idempot
         assert f"CREATE TABLE IF NOT EXISTS {table}" in statements
     assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_source_items_item_key" in statements
     assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_material_versions_identity" in statements
+    assert "sync_run_id VARCHAR(64)" in statements
+    assert "REFERENCES feishu_sync_runs(run_id) ON DELETE SET NULL" in statements
+    assert "ADD COLUMN IF NOT EXISTS sync_run_id VARCHAR(64)" in statements
+    assert "fk_feishu_material_versions_sync_run_id" in statements
+    assert "CREATE INDEX IF NOT EXISTS ix_feishu_material_versions_sync_run_id" in statements
     feishu_statements = [statement for statement in connection.statements if "feishu_" in statement]
     assert all("REFERENCES knowledge_files" not in statement for statement in feishu_statements)
     assert all("DROP TABLE" not in statement.upper() for statement in feishu_statements)

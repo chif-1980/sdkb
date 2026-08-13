@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Literal, Protocol
@@ -9,7 +10,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_admin_user, get_db
@@ -474,12 +475,19 @@ class FeishuReviewService:
 
     async def confirm_removal(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
         version, item, source = await self._claim_removal(version_id, operator_id=operator_id)
+        external_file_already_missing = False
         try:
             await self.removal_adapter.remove(kb_id=source.target_kb_id, file_id=version.yuxi_file_id)
+        except FileNotFoundError:
+            external_file_already_missing = True
         except Exception as exc:
             await self._restore_removal(version_id, message=str(exc))
             raise
-        return await self._finish_removal(version_id, operator_id=operator_id)
+        return await self._finish_removal(
+            version_id,
+            operator_id=operator_id,
+            external_file_already_missing=external_file_already_missing,
+        )
 
     async def _claim_removal(
         self, version_id: str, *, operator_id: str
@@ -490,38 +498,52 @@ class FeishuReviewService:
                 raise ValueError("Material source must be invalid before removal")
             if (
                 item.active_version_id != version.version_id
-                or version.processing_status != "published"
+                or version.processing_status
+                not in {
+                    "published",
+                    "removal_failed",
+                }
                 or not version.yuxi_file_id
             ):
                 raise ValueError("Material is not the active published version")
+            from_status = version.processing_status
             version.processing_status = "removal_pending"
             self._append_event(
                 source_id=item.source_id,
                 item_id=item.item_id,
                 version_id=version.version_id,
                 event_type="removal_started",
-                from_status="published",
+                from_status=from_status,
                 to_status="removal_pending",
                 operator_id=operator_id,
             )
             await self.session.flush()
             return version, item, source
 
-    async def _finish_removal(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
+    async def _finish_removal(
+        self,
+        version_id: str,
+        *,
+        operator_id: str,
+        external_file_already_missing: bool = False,
+    ) -> FeishuMaterialVersion:
         async with self._transaction():
             version, item, _ = await self._get_material(version_id, lock=True)
             if version.processing_status != "removal_pending" or item.active_version_id != version.version_id:
                 raise ValueError("Material removal is no longer pending")
             item.active_version_id = None
             version.processing_status = "removed"
+            version.yuxi_file_id = None
+            version.error_message = None
             self._append_event(
                 source_id=item.source_id,
                 item_id=item.item_id,
                 version_id=version.version_id,
                 event_type="removal_confirmed",
-                from_status="published",
+                from_status="removal_pending",
                 to_status="removed",
                 operator_id=operator_id,
+                payload_json={"external_file_already_missing": external_file_already_missing},
             )
             await self.session.flush()
             return version
@@ -531,14 +553,15 @@ class FeishuReviewService:
             version, item, _ = await self._get_material(version_id, lock=True)
             if version.processing_status != "removal_pending":
                 return
-            version.processing_status = "published"
+            version.processing_status = "removal_failed"
+            version.error_message = message
             self._append_event(
                 source_id=item.source_id,
                 item_id=item.item_id,
                 version_id=version.version_id,
                 event_type="removal_failed",
                 from_status="removal_pending",
-                to_status="published",
+                to_status="removal_failed",
                 message=message,
             )
             await self.session.flush()
@@ -709,6 +732,8 @@ def _material_dict(version: FeishuMaterialVersion, item: FeishuSourceItem, sourc
         "target_kb_id": source.target_kb_id,
         "revision": version.revision,
         "content_hash": version.content_hash,
+        "sync_run_id": version.sync_run_id,
+        "source_updated_at": _iso(item.source_updated_at),
         "source_object_path": version.source_object_path,
         "parsed_object_path": version.parsed_object_path,
         "processing_status": version.processing_status,
@@ -920,6 +945,10 @@ async def list_materials(
     review_status: Annotated[str | None, Query()] = None,
     source_validity: Annotated[str | None, Query()] = None,
     item_type: Annotated[str | None, Query()] = None,
+    directory: Annotated[str | None, Query()] = None,
+    updated_from: Annotated[datetime | None, Query()] = None,
+    updated_to: Annotated[datetime | None, Query()] = None,
+    run_id: Annotated[str | None, Query()] = None,
     db: AsyncSession = Depends(get_db),
 ):
     if await FeishuKnowledgeRepository(db).get_source(source_id) is None:
@@ -939,6 +968,21 @@ async def list_materials(
         statement = statement.where(FeishuSourceItem.source_validity == source_validity)
     if item_type:
         statement = statement.where(FeishuSourceItem.item_type == item_type)
+    if directory:
+        statement = statement.where(
+            or_(
+                FeishuSourceItem.path_text == directory,
+                FeishuSourceItem.path_text.startswith(f"{directory} /", autoescape=True),
+            )
+        )
+    if updated_from and updated_to and updated_from > updated_to:
+        raise HTTPException(status_code=422, detail="updated_from must not be later than updated_to")
+    if updated_from:
+        statement = statement.where(FeishuSourceItem.source_updated_at >= updated_from)
+    if updated_to:
+        statement = statement.where(FeishuSourceItem.source_updated_at <= updated_to)
+    if run_id:
+        statement = statement.where(FeishuMaterialVersion.sync_run_id == run_id)
     rows = (await db.execute(statement)).all()
     return {"items": [_material_dict(version, item, source) for version, item, source in rows]}
 

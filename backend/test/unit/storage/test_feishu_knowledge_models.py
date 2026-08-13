@@ -22,7 +22,13 @@ def test_feishu_models_expose_expected_tables_and_version_identity():
         "feishu_processing_events",
     }
     columns = FeishuMaterialVersion.__table__.columns
-    assert {"item_id", "revision", "content_hash", "review_status", "published_at"} <= set(columns.keys())
+    assert {"item_id", "sync_run_id", "revision", "content_hash", "review_status", "published_at"} <= set(
+        columns.keys()
+    )
+    assert columns["sync_run_id"].nullable is True
+    assert {foreign_key.target_fullname for foreign_key in columns["sync_run_id"].foreign_keys} == {
+        "feishu_sync_runs.run_id"
+    }
     constraints = FeishuMaterialVersion.__table__.constraints
     assert any(
         {"item_id", "revision", "content_hash"} <= {column.name for column in c.columns}
@@ -33,11 +39,7 @@ def test_feishu_models_expose_expected_tables_and_version_identity():
 
 def test_feishu_source_item_item_key_is_unique_and_has_active_version_pointer():
     constraints = FeishuSourceItem.__table__.constraints
-    assert any(
-        {"item_key"} == {column.name for column in c.columns}
-        for c in constraints
-        if hasattr(c, "columns")
-    )
+    assert any({"item_key"} == {column.name for column in c.columns} for c in constraints if hasattr(c, "columns"))
     assert "active_version_id" in FeishuSourceItem.__table__.columns
 
 

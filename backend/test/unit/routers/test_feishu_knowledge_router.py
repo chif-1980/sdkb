@@ -1,6 +1,7 @@
 """Unit contracts for the Feishu knowledge admin API (Task 4)."""
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +14,7 @@ from server.routers import feishu_knowledge_router as router_module
 from server.routers.feishu_knowledge_router import FeishuReviewService, feishu_knowledge
 from server.utils.auth_middleware import get_admin_user, get_current_user, get_db
 from yuxi.knowledge.utils.kb_utils import prepare_item_metadata
-from yuxi.repositories.feishu_knowledge_repository import ConcurrentSyncRunError
+from yuxi.repositories.feishu_knowledge_repository import ConcurrentSyncRunError, FeishuKnowledgeRepository
 from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
@@ -1090,6 +1091,8 @@ async def test_material_list_supports_item_type_filter_and_serializes_api_respon
                 "target_kb_id": "kb-1",
                 "revision": "1",
                 "content_hash": "attachment-hash",
+                "sync_run_id": None,
+                "source_updated_at": None,
                 "source_object_path": None,
                 "parsed_object_path": None,
                 "processing_status": "parsed",
@@ -1111,6 +1114,91 @@ async def test_material_list_supports_item_type_filter_and_serializes_api_respon
             }
         ]
     }
+
+
+async def test_material_list_filters_directory_source_update_range_and_run(review_fixture):
+    run = FeishuSyncRun(run_id="run-filter", source_id="source-1", run_type="incremental", status="succeeded")
+    items = [
+        FeishuSourceItem(
+            item_id="item-in-range",
+            source_id="source-1",
+            item_key="attachment:in-range",
+            item_type="attachment",
+            title="In range.pdf",
+            path_text="Root / Team / In range.pdf",
+            source_updated_at=datetime(2026, 8, 13, 4, tzinfo=UTC),
+        ),
+        FeishuSourceItem(
+            item_id="item-other-directory",
+            source_id="source-1",
+            item_key="attachment:other-directory",
+            item_type="attachment",
+            title="Other.pdf",
+            path_text="Root / Teamwork / Other.pdf",
+            source_updated_at=datetime(2026, 8, 13, 4, tzinfo=UTC),
+        ),
+        FeishuSourceItem(
+            item_id="item-other-run",
+            source_id="source-1",
+            item_key="attachment:other-run",
+            item_type="attachment",
+            title="Old.pdf",
+            path_text="Root / Team / Old.pdf",
+            source_updated_at=datetime(2026, 8, 13, 4, tzinfo=UTC),
+        ),
+    ]
+    versions = [
+        FeishuMaterialVersion(
+            version_id="version-in-range",
+            item_id="item-in-range",
+            sync_run_id="run-filter",
+            revision="1",
+            content_hash="hash-in-range",
+        ),
+        FeishuMaterialVersion(
+            version_id="version-other-directory",
+            item_id="item-other-directory",
+            sync_run_id="run-filter",
+            revision="1",
+            content_hash="hash-other-directory",
+        ),
+        FeishuMaterialVersion(
+            version_id="version-other-run",
+            item_id="item-other-run",
+            sync_run_id=None,
+            revision="1",
+            content_hash="hash-other-run",
+        ),
+    ]
+    review_fixture.add_all([run, *items, *versions])
+    await review_fixture.commit()
+
+    async with await _database_client(
+        review_fixture,
+        user=SimpleNamespace(uid="admin", role="admin"),
+    ) as client:
+        response = await client.get(
+            "/api/feishu-knowledge/sources/source-1/materials",
+            params={
+                "directory": "Root / Team",
+                "updated_from": "2026-08-13T03:00:00Z",
+                "updated_to": "2026-08-13T05:00:00Z",
+                "run_id": "run-filter",
+            },
+        )
+        invalid_range = await client.get(
+            "/api/feishu-knowledge/sources/source-1/materials",
+            params={
+                "updated_from": "2026-08-14T00:00:00Z",
+                "updated_to": "2026-08-13T00:00:00Z",
+            },
+        )
+
+    assert response.status_code == 200
+    assert [item["version_id"] for item in response.json()["items"]] == ["version-in-range"]
+    assert response.json()["items"][0]["sync_run_id"] == "run-filter"
+    assert response.json()["items"][0]["source_updated_at"] == "2026-08-13T04:00:00+00:00"
+    assert invalid_range.status_code == 422
 
 
 async def test_material_queries_return_404_for_missing_parent_or_material(review_fixture):
@@ -1581,7 +1669,61 @@ async def test_removal_adapter_failure_keeps_active_version(review_fixture):
     item = await review_fixture.get(FeishuSourceItem, 1)
     assert item.active_version_id == "version-old"
     old = await review_fixture.get(FeishuMaterialVersion, 1)
-    assert old.processing_status == "published"
+    assert old.processing_status == "removal_failed"
+    assert old.yuxi_file_id == "file-old"
+    events = list(
+        (
+            await review_fixture.execute(
+                select(FeishuProcessingEvent).where(FeishuProcessingEvent.version_id == "version-old")
+            )
+        ).scalars()
+    )
+    assert [(event.event_type, event.from_status, event.to_status) for event in events] == [
+        ("removal_started", "published", "removal_pending"),
+        ("removal_failed", "removal_pending", "removal_failed"),
+    ]
+
+
+async def test_restart_reconciles_removal_for_idempotent_admin_retry(review_fixture):
+    calls = []
+
+    class AlreadyRemovedAdapter:
+        async def remove(self, *, kb_id: str, file_id: str) -> None:
+            calls.append((kb_id, file_id))
+            raise FileNotFoundError(file_id)
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    old = await review_fixture.get(FeishuMaterialVersion, 1)
+    item.source_validity = "invalid"
+    old.processing_status = "removal_pending"
+    await review_fixture.commit()
+
+    reconciled = await FeishuKnowledgeRepository(review_fixture).reconcile_interrupted_work()
+    removed = await FeishuReviewService(
+        review_fixture,
+        removal_adapter=AlreadyRemovedAdapter(),
+    ).confirm_removal("version-old", operator_id="admin")
+
+    assert reconciled == {"sync_runs": 0, "material_versions": 1}
+    assert calls == [("kb-1", "file-old")]
+    assert removed.processing_status == "removed"
+    assert removed.yuxi_file_id is None
+    assert item.active_version_id is None
+    events = list(
+        (
+            await review_fixture.execute(
+                select(FeishuProcessingEvent)
+                .where(FeishuProcessingEvent.version_id == "version-old")
+                .order_by(FeishuProcessingEvent.id)
+            )
+        ).scalars()
+    )
+    assert [(event.event_type, event.from_status, event.to_status) for event in events] == [
+        ("startup_reconciled", "removal_pending", "removal_failed"),
+        ("removal_started", "removal_failed", "removal_pending"),
+        ("removal_confirmed", "removal_pending", "removed"),
+    ]
+    assert events[-1].payload_json == {"external_file_already_missing": True}
 
 
 async def test_confirm_removal_calls_external_adapter_outside_transaction(review_fixture):

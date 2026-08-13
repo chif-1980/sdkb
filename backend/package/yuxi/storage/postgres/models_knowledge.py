@@ -379,6 +379,9 @@ class FeishuMaterialVersion(Base):
     item_id = Column(
         String(64), ForeignKey("feishu_source_items.item_id", ondelete="CASCADE"), nullable=False, index=True
     )
+    sync_run_id = Column(
+        String(64), ForeignKey("feishu_sync_runs.run_id", ondelete="SET NULL"), nullable=True, index=True
+    )
     revision = Column(String(128), nullable=False)
     content_hash = Column(String(128), nullable=False)
     source_object_path = Column(String(1024))

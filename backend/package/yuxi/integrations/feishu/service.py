@@ -115,6 +115,7 @@ class FeishuScanService:
                 seen_item_keys=seen_item_keys,
                 seen_at=seen_at,
                 visited=set(),
+                run_id=run_id,
             )
             await self._verify_unseen_page_roots(source_id=source_id, seen_item_keys=seen_item_keys)
             invalidated_count = await self.repository.complete_successful_scan(
@@ -142,7 +143,7 @@ class FeishuScanService:
                 invalidated_count=0,
                 error_summary=error_summary,
             )
-            await self._finish_run(result)
+            await self._finish_run(result, source_id=source_id)
             return result
 
         result = FeishuScanResult(
@@ -184,6 +185,7 @@ class FeishuScanService:
         seen_item_keys: set[str],
         seen_at: datetime,
         visited: set[str],
+        run_id: str,
     ) -> None:
         if node.node_token in visited:
             return
@@ -209,6 +211,7 @@ class FeishuScanService:
             seen_item_keys=seen_item_keys,
             seen_at=seen_at,
             content=page_content.content,
+            run_id=run_id,
         )
         for attachment in page_content.attachments:
             await self._record_attachment(
@@ -220,6 +223,7 @@ class FeishuScanService:
                 counts=counts,
                 seen_item_keys=seen_item_keys,
                 seen_at=seen_at,
+                run_id=run_id,
             )
         children = await self.client.list_children(node.node_token)
         for child in children:
@@ -232,6 +236,7 @@ class FeishuScanService:
                 seen_item_keys=seen_item_keys,
                 seen_at=seen_at,
                 visited=visited,
+                run_id=run_id,
             )
 
     async def _record_attachment(
@@ -245,6 +250,7 @@ class FeishuScanService:
         counts: _ScanCounts,
         seen_item_keys: set[str],
         seen_at: datetime,
+        run_id: str,
     ) -> None:
         item_type, supported = self._classify_attachment(attachment.name, attachment.file_type)
         await self._record_material(
@@ -263,6 +269,7 @@ class FeishuScanService:
             seen_item_keys=seen_item_keys,
             seen_at=seen_at,
             download_type=attachment.download_type,
+            run_id=run_id,
         )
 
     async def _record_material(
@@ -284,6 +291,7 @@ class FeishuScanService:
         seen_at: datetime,
         content: bytes | None = None,
         download_type: str = "file",
+        run_id: str,
     ) -> None:
         updated_at = coerce_any_to_utc_datetime(source_updated_at)
         normalized_updated_at = updated_at.isoformat() if updated_at is not None else None
@@ -312,6 +320,7 @@ class FeishuScanService:
                 content_hash=content_hash,
                 processing_status="unsupported",
                 processing_params=self._processing_params(normalized_updated_at),
+                sync_run_id=run_id,
             )
             return
 
@@ -341,6 +350,7 @@ class FeishuScanService:
             content_hash=content_hash,
             processing_status="discovered",
             processing_params=self._processing_params(normalized_updated_at),
+            sync_run_id=run_id,
         )
         if self.archive_adapter is not None and not version.source_object_path:
             content_type = content_type or mimetypes.guess_type(title)[0]
@@ -373,7 +383,7 @@ class FeishuScanService:
         else:
             counts.changed += 1
 
-    async def _finish_run(self, result: FeishuScanResult) -> None:
+    async def _finish_run(self, result: FeishuScanResult, *, source_id: str) -> None:
         updated = await self.repository.finish_sync_run(
             run_id=result.run_id,
             status=result.status,
@@ -388,6 +398,15 @@ class FeishuScanService:
         )
         if not updated:
             raise RuntimeError(f"Feishu sync run is no longer running: {result.run_id}")
+        if result.status == "failed":
+            await self.repository.append_event(
+                source_id=source_id,
+                event_type="scan_failed",
+                from_status="running",
+                to_status="failed",
+                message=result.error_summary,
+                payload_json={"run_id": result.run_id},
+            )
 
     @staticmethod
     def _metadata_matches(

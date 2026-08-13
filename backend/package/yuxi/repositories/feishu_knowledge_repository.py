@@ -370,6 +370,7 @@ class FeishuKnowledgeRepository:
         content_hash: str,
         processing_status: str,
         processing_params: dict | None,
+        sync_run_id: str | None = None,
     ) -> tuple[FeishuMaterialVersion, bool]:
         async with self._write_transaction():
             item_result = await self.session.execute(
@@ -390,6 +391,7 @@ class FeishuKnowledgeRepository:
             version = FeishuMaterialVersion(
                 version_id=uuid4().hex,
                 item_id=item_id,
+                sync_run_id=sync_run_id,
                 revision=revision,
                 content_hash=content_hash,
                 processing_status=processing_status,
@@ -453,7 +455,7 @@ class FeishuKnowledgeRepository:
             "processing": "parse_failed",
             "publish_queued": "publish_failed",
             "publishing": "publish_failed",
-            "removal_pending": "published",
+            "removal_pending": "removal_failed",
         }
         async with self._write_transaction():
             run_result = await self.session.execute(

@@ -372,6 +372,9 @@ class PostgresManager(metaclass=SingletonMeta):
                 id SERIAL PRIMARY KEY,
                 version_id VARCHAR(64) NOT NULL UNIQUE,
                 item_id VARCHAR(64) NOT NULL REFERENCES feishu_source_items(item_id) ON DELETE CASCADE,
+                sync_run_id VARCHAR(64)
+                    CONSTRAINT fk_feishu_material_versions_sync_run_id
+                    REFERENCES feishu_sync_runs(run_id) ON DELETE SET NULL,
                 revision VARCHAR(128) NOT NULL,
                 content_hash VARCHAR(128) NOT NULL,
                 source_object_path VARCHAR(1024),
@@ -410,6 +413,22 @@ class PostgresManager(metaclass=SingletonMeta):
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """,
+            "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS sync_run_id VARCHAR(64)",
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'fk_feishu_material_versions_sync_run_id'
+                      AND conrelid = 'feishu_material_versions'::regclass
+                ) THEN
+                    ALTER TABLE feishu_material_versions
+                    ADD CONSTRAINT fk_feishu_material_versions_sync_run_id
+                    FOREIGN KEY (sync_run_id) REFERENCES feishu_sync_runs(run_id) ON DELETE SET NULL;
+                END IF;
+            END $$;
+            """,
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_source_items_item_key ON feishu_source_items(item_key)",
             (
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_material_versions_identity "
@@ -424,6 +443,10 @@ class PostgresManager(metaclass=SingletonMeta):
             (
                 "CREATE INDEX IF NOT EXISTS ix_feishu_material_versions_item_status "
                 "ON feishu_material_versions(item_id, processing_status)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_material_versions_sync_run_id "
+                "ON feishu_material_versions(sync_run_id)"
             ),
             (
                 "CREATE INDEX IF NOT EXISTS ix_feishu_processing_events_item_created "
