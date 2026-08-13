@@ -355,7 +355,7 @@ class FeishuSourceItem(Base):
     source_url = Column(String(2048))
     last_seen_at = Column(DateTime(timezone=True))
     source_updated_at = Column(DateTime(timezone=True))
-    source_validity = Column(String(32), nullable=False, default="valid", index=True)
+    source_validity = Column(String(32), nullable=False, default="valid")
     active_version_id = Column(String(64), index=True)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)

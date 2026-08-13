@@ -41,6 +41,12 @@ def test_feishu_source_item_item_key_is_unique_and_has_active_version_pointer():
     assert "active_version_id" in FeishuSourceItem.__table__.columns
 
 
+def test_feishu_source_item_indexes_have_unique_names():
+    index_names = [index.name for index in FeishuSourceItem.__table__.indexes]
+
+    assert len(index_names) == len(set(index_names))
+
+
 def test_feishu_events_are_append_only_records_and_media_statuses_are_supported():
     event_columns = FeishuProcessingEvent.__table__.columns
     assert {"event_type", "from_status", "to_status", "payload_json", "created_at"} <= set(event_columns.keys())
