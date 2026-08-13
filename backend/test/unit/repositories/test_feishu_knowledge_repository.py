@@ -82,6 +82,7 @@ async def test_postgres_source_upsert_is_atomic(repository):
     assert "ON CONFLICT (source_id) DO UPDATE" in sql
     for column in ("name", "wiki_root_token", "wiki_root_url", "target_kb_id", "credential_env_name", "enabled"):
         assert f"{column} = excluded.{column}" in sql
+    assert "updated_at =" in sql
 
 
 async def test_start_sync_run_rejects_a_second_running_scan(repository):

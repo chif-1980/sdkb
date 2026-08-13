@@ -77,7 +77,8 @@ class FeishuKnowledgeRepository:
                         credential_env_name=credential_env_name,
                         enabled=enabled,
                         created_by=created_by,
-                    ).returning(FeishuSource)
+                    ).returning(FeishuSource),
+                    execution_options={"populate_existing": True},
                 )
                 return result.scalar_one()
             result = await self.session.execute(
@@ -127,6 +128,7 @@ class FeishuKnowledgeRepository:
                 "target_kb_id": statement.excluded.target_kb_id,
                 "credential_env_name": statement.excluded.credential_env_name,
                 "enabled": statement.excluded.enabled,
+                "updated_at": utc_now(),
             },
         )
 
