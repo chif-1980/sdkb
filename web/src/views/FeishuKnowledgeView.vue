@@ -160,6 +160,7 @@
       :open="detailOpen"
       :material="detailMaterial"
       :events="detailEvents"
+      :content="detailContent"
       :loading="loadingDetail"
       @close="closeDetail"
     />
@@ -172,6 +173,7 @@ import { Input, message, Modal } from 'ant-design-vue'
 import { BookOpen, Link2, RefreshCw, ScanSearch } from 'lucide-vue-next'
 
 import { feishuKnowledgeApi, MAX_BATCH_SIZE } from '@/apis/feishu_knowledge_api'
+import { documentApi } from '@/apis/knowledge_api'
 import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetailDrawer.vue'
 import FeishuMaterialTable from '@/components/feishu/FeishuMaterialTable.vue'
 import FeishuSyncRunsTable from '@/components/feishu/FeishuSyncRunsTable.vue'
@@ -193,10 +195,16 @@ const pageError = ref('')
 const detailOpen = ref(false)
 const detailMaterial = ref(null)
 const detailEvents = ref([])
+const detailContent = ref(emptyDetailContent())
 const loadingDetail = ref(false)
 const updatedRange = ref([])
 const materialTableRef = ref(null)
 let pollTimer = null
+let detailRequestSeq = 0
+
+function emptyDetailContent() {
+  return { content: '', lines: [], loading: false, error: '' }
+}
 
 const filters = reactive({
   processing_status: undefined,
@@ -407,26 +415,60 @@ function resetFilters() {
 }
 
 async function openMaterialDetail(material) {
+  const requestId = ++detailRequestSeq
   detailOpen.value = true
   detailMaterial.value = material
   detailEvents.value = []
+  detailContent.value = emptyDetailContent()
   loadingDetail.value = true
+  let detail
   try {
-    const [detail, events] = await Promise.all([
+    const [materialDetail, events] = await Promise.all([
       feishuKnowledgeApi.getMaterial(material.version_id),
       feishuKnowledgeApi.listMaterialEvents(material.version_id)
     ])
+    if (requestId !== detailRequestSeq) return
+    detail = materialDetail
     detailMaterial.value = detail
     detailEvents.value = events.items || []
   } catch (error) {
+    if (requestId !== detailRequestSeq) return
     message.error(feishuKnowledgeApi.getErrorMessage(error, '加载素材详情失败'))
   } finally {
-    loadingDetail.value = false
+    if (requestId === detailRequestSeq) loadingDetail.value = false
+  }
+
+  if (!detail?.target_kb_id || !detail?.yuxi_file_id || requestId !== detailRequestSeq) return
+
+  detailContent.value = { ...emptyDetailContent(), loading: true }
+  try {
+    const response = await documentApi.getDocumentContent(detail.target_kb_id, detail.yuxi_file_id)
+    if (requestId !== detailRequestSeq) return
+    if (response?.status === 'failed') {
+      throw new Error(response.message || '加载解析内容失败')
+    }
+    detailContent.value = {
+      content: response?.content || '',
+      lines: response?.lines || [],
+      loading: false,
+      error: ''
+    }
+  } catch (error) {
+    if (requestId !== detailRequestSeq) return
+    detailContent.value = {
+      ...emptyDetailContent(),
+      error: feishuKnowledgeApi.getErrorMessage(error, '加载解析内容失败')
+    }
   }
 }
 
 function closeDetail() {
+  detailRequestSeq += 1
   detailOpen.value = false
+  detailMaterial.value = null
+  detailEvents.value = []
+  detailContent.value = emptyDetailContent()
+  loadingDetail.value = false
 }
 
 function askRejectReason(title, onConfirm) {

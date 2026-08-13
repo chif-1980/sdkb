@@ -37,33 +37,32 @@
 
       <a-tabs class="detail-tabs" default-active-key="markdown">
         <a-tab-pane key="markdown" tab="Markdown">
-          <div class="data-panel">
-            <div class="field-label">解析对象路径</div>
-            <code>{{ material.parsed_object_path || '尚未生成解析对象' }}</code>
-            <a-alert
-              class="availability-note"
-              type="info"
-              show-icon
-              message="当前接口暂未提供 Markdown 正文读取能力"
-              description="此处仅展示解析产物的位置，不拼接或推测正文内容。"
-            />
+          <div class="data-panel content-panel">
+            <div v-if="content.loading" class="content-loading">正在加载 Markdown 内容...</div>
+            <a-alert v-else-if="content.error" type="error" show-icon :message="content.error" />
+            <MarkdownPreview v-else-if="markdownContent" :content="markdownContent" />
+            <a-empty v-else :description="emptyContentDescription" />
           </div>
         </a-tab-pane>
         <a-tab-pane key="chunks" tab="Chunks">
           <div class="data-panel">
             <div class="metric-line">
               <span>分块数量</span>
-              <strong>{{ material.chunk_count ?? 0 }}</strong>
+              <strong>{{ chunks.length }}</strong>
             </div>
-            <div class="field-label">加工参数</div>
-            <pre>{{ processingParams }}</pre>
-            <a-alert
-              class="availability-note"
-              type="info"
-              show-icon
-              message="当前接口暂未提供逐块内容读取能力"
-              description="分块正文将在后端提供读取接口后展示。"
-            />
+            <div v-if="content.loading" class="content-loading">正在加载分块内容...</div>
+            <a-alert v-else-if="content.error" type="error" show-icon :message="content.error" />
+            <div v-else-if="chunks.length" class="chunk-list">
+              <article
+                v-for="(chunk, index) in chunks"
+                :key="chunk.id || `${chunk.chunk_order_index}-${index}`"
+                class="chunk-item"
+              >
+                <div class="chunk-heading">片段 {{ index + 1 }}</div>
+                <pre>{{ chunk.content }}</pre>
+              </article>
+            </div>
+            <a-empty v-else :description="emptyChunksDescription" />
           </div>
         </a-tab-pane>
         <a-tab-pane key="source" tab="来源">
@@ -109,20 +108,35 @@ import { computed } from 'vue'
 import { useWindowSize } from '@vueuse/core'
 import { ExternalLink } from 'lucide-vue-next'
 
+import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
+import { mergeChunks } from '@/utils/chunkUtils'
+
 const props = defineProps({
   open: { type: Boolean, default: false },
   material: { type: Object, default: null },
   events: { type: Array, default: () => [] },
+  content: {
+    type: Object,
+    default: () => ({ content: '', lines: [], loading: false, error: '' })
+  },
   loading: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['close'])
 const { width } = useWindowSize()
 const drawerWidth = computed(() => (width.value < 720 ? '100%' : 640))
-const processingParams = computed(() =>
-  props.material?.processing_params
-    ? JSON.stringify(props.material.processing_params, null, 2)
-    : '未记录加工参数'
+const mergeResult = computed(() => mergeChunks(props.content.lines || []))
+const markdownContent = computed(() => props.content.content || mergeResult.value.content || '')
+const chunks = computed(() =>
+  [...(props.content.lines || [])].sort(
+    (left, right) => (left.chunk_order_index ?? 0) - (right.chunk_order_index ?? 0)
+  )
+)
+const emptyContentDescription = computed(() =>
+  props.material?.yuxi_file_id ? '暂无 Markdown 内容' : '尚未生成可预览内容'
+)
+const emptyChunksDescription = computed(() =>
+  props.material?.yuxi_file_id ? '暂无分块内容' : '尚未生成可预览内容'
 )
 
 const eventLabels = {
@@ -193,6 +207,16 @@ function formatTime(value) {
   padding: 4px 0;
 }
 
+.content-panel {
+  min-width: 0;
+}
+
+.content-loading {
+  padding: 48px 0;
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+
 .field-label,
 .source-fields span {
   display: block;
@@ -216,10 +240,6 @@ pre {
   overflow-wrap: anywhere;
 }
 
-.availability-note {
-  margin-top: 16px;
-}
-
 .metric-line {
   display: flex;
   justify-content: space-between;
@@ -233,6 +253,30 @@ pre {
 .metric-line strong {
   color: var(--main-700);
   font-size: 18px;
+}
+
+.chunk-list {
+  display: grid;
+  gap: 12px;
+}
+
+.chunk-item {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--gray-200);
+  border-radius: 6px;
+  background: var(--gray-0);
+}
+
+.chunk-heading {
+  margin-bottom: 8px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.chunk-item pre {
+  margin: 0;
 }
 
 .source-fields {

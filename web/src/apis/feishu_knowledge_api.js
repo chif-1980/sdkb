@@ -8,6 +8,17 @@ const ERROR_MESSAGES = {
   'Feishu source not found': '未找到飞书数据源',
   'Feishu sync run not found': '未找到扫描批次',
   'Feishu material not found': '未找到该素材',
+  'Only pending parsed material can be approved': '仅待审核且已解析的素材可以审核通过',
+  'Reject reason is required': '驳回时必须填写原因',
+  'Only pending material can be rejected': '仅待审核的素材可以驳回',
+  'Only failed material can be retried': '仅处理失败的素材可以重试',
+  'Material is not queued for publishing': '素材当前不在等待发布状态',
+  'Material is not queued for processing': '素材当前不在等待加工状态',
+  'Material is not processing': '素材当前不在加工中',
+  'Material is not publishing': '素材当前不在发布中',
+  'Material is not the active published version': '素材不是当前生效的已发布版本',
+  'Material removal is no longer pending': '素材下架任务已不再等待处理',
+  'Material source must be invalid before removal': '仅来源失效的素材可以确认下架',
   'reason is required for reject': '驳回时必须填写原因',
   'updated_from must not be later than updated_to': '更新时间起点不能晚于终点'
 }
@@ -80,7 +91,8 @@ export const feishuKnowledgeApi = {
   getErrorMessage: (error, fallback = '操作失败') => {
     const detail = getErrorDetail(error)
     if (!detail) return fallback
-    return ERROR_MESSAGES[detail] || `${fallback}：${detail}`
+    if (ERROR_MESSAGES[detail]) return ERROR_MESSAGES[detail]
+    return /[\u3400-\u9fff]/.test(detail) ? `${fallback}：${detail}` : fallback
   }
 }
 

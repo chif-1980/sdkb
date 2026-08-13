@@ -6,12 +6,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apiAdminGet, apiAdminPost } from '@/apis/base'
 import { feishuKnowledgeApi } from '@/apis/feishu_knowledge_api'
+import { documentApi } from '@/apis/knowledge_api'
+import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetailDrawer.vue'
 import FeishuMaterialTable from '@/components/feishu/FeishuMaterialTable.vue'
 import FeishuKnowledgeView from './FeishuKnowledgeView.vue'
 
 vi.mock('@/apis/base', () => ({
   apiAdminGet: vi.fn(),
   apiAdminPost: vi.fn()
+}))
+
+vi.mock('@/apis/knowledge_api', () => ({
+  documentApi: {
+    getDocumentContent: vi.fn()
+  }
 }))
 
 vi.mock('ant-design-vue', async (importOriginal) => {
@@ -55,6 +63,11 @@ function mountView() {
         },
         'a-tag': { template: '<span><slot /></span>' },
         'a-alert': { template: '<div><slot name="message" /><slot name="description" /></div>' },
+        'a-select': { template: '<div />' },
+        'a-input': { template: '<input />' },
+        'a-range-picker': { template: '<div />' },
+        'a-empty': { template: '<div />' },
+        'a-spin': { template: '<div><slot /></div>' },
         FeishuSyncRunsTable: true,
         FeishuMaterialTable: true,
         FeishuMaterialDetailDrawer: true
@@ -82,6 +95,53 @@ function mountMaterialTable(props = {}) {
         'a-button': {
           emits: ['click'],
           template: '<button @click="$emit(\'click\')"><slot /></button>'
+        }
+      }
+    }
+  })
+}
+
+function mountDetailDrawer(props = {}) {
+  return mount(FeishuMaterialDetailDrawer, {
+    props: {
+      open: true,
+      material: {
+        version_id: 'version-page',
+        title: '产品手册',
+        target_kb_id: 'kb-1',
+        yuxi_file_id: 'file-1'
+      },
+      content: {
+        content: '# 产品手册\n\n正文内容',
+        lines: [
+          { id: 'chunk-1', chunk_order_index: 0, content: '第一段知识' },
+          { id: 'chunk-2', chunk_order_index: 1, content: '第二段知识' }
+        ]
+      },
+      ...props
+    },
+    global: {
+      stubs: {
+        'a-drawer': { template: '<div><slot /></div>' },
+        'a-descriptions': { template: '<div><slot /></div>' },
+        'a-descriptions-item': { template: '<div><slot /></div>' },
+        'a-tabs': { template: '<div><slot /></div>' },
+        'a-tab-pane': { template: '<section><slot /></section>' },
+        'a-timeline': { template: '<div><slot /></div>' },
+        'a-timeline-item': { template: '<div><slot /></div>' },
+        'a-empty': {
+          props: ['description'],
+          template: '<div>{{ description }}</div>'
+        },
+        'a-spin': { template: '<div><slot /></div>' },
+        'a-skeleton': { template: '<div />' },
+        'a-alert': {
+          props: ['message'],
+          template: '<div>{{ message }}</div>'
+        },
+        MarkdownPreview: {
+          props: ['content'],
+          template: '<article data-testid="markdown-preview">{{ content }}</article>'
         }
       }
     }
@@ -147,7 +207,7 @@ describe('feishuKnowledgeApi', () => {
     expect(apiAdminPost).not.toHaveBeenCalled()
   })
 
-  it('把后端 detail 转换为中文操作提示', () => {
+  it('把已知操作冲突和未知错误转换为中文提示', () => {
     expect(
       feishuKnowledgeApi.getErrorMessage(
         { response: { data: { detail: 'A scan is already running for this source' } } },
@@ -155,8 +215,29 @@ describe('feishuKnowledgeApi', () => {
       )
     ).toBe('该数据源已有扫描任务正在执行')
     expect(
+      feishuKnowledgeApi.getErrorMessage(
+        { response: { data: { detail: 'Only pending parsed material can be approved' } } },
+        '审核失败'
+      )
+    ).toBe('仅待审核且已解析的素材可以审核通过')
+    expect(
+      feishuKnowledgeApi.getErrorMessage(
+        { response: { data: { detail: 'Only failed material can be retried' } } },
+        '重试失败'
+      )
+    ).toBe('仅处理失败的素材可以重试')
+    expect(
+      feishuKnowledgeApi.getErrorMessage(
+        { response: { data: { detail: 'Material source must be invalid before removal' } } },
+        '下架失败'
+      )
+    ).toBe('仅来源失效的素材可以确认下架')
+    expect(
       feishuKnowledgeApi.getErrorMessage({ response: { data: { detail: 'unknown detail' } } }, '操作失败')
-    ).toBe('操作失败：unknown detail')
+    ).toBe('操作失败')
+    expect(
+      feishuKnowledgeApi.getErrorMessage({ response: { data: { detail: '内容已被其他人更新' } } }, '操作失败')
+    ).toBe('操作失败：内容已被其他人更新')
   })
 })
 
@@ -189,6 +270,41 @@ describe('FeishuMaterialTable', () => {
     expect(wrapper.emitted('batch-action')).toEqual([
       [{ action: 'approve', versionIds: ['version-page'] }]
     ])
+  })
+})
+
+describe('FeishuMaterialDetailDrawer', () => {
+  it('渲染 Markdown 正文和逐条 Chunks', () => {
+    const wrapper = mountDetailDrawer()
+
+    expect(wrapper.get('[data-testid="markdown-preview"]').text()).toContain('正文内容')
+    expect(wrapper.text()).toContain('第一段知识')
+    expect(wrapper.text()).toContain('第二段知识')
+  })
+
+  it('逐条保留两个完全重复的 Chunks', () => {
+    const duplicateContent = '重复片段内容用于验证逐条展示不合并'
+    const wrapper = mountDetailDrawer({
+      content: {
+        content: '',
+        lines: [
+          { id: 'chunk-1', chunk_order_index: 0, content: duplicateContent },
+          { id: 'chunk-2', chunk_order_index: 1, content: duplicateContent }
+        ]
+      }
+    })
+
+    expect(wrapper.findAll('.chunk-item')).toHaveLength(2)
+    expect(wrapper.get('.metric-line strong').text()).toBe('2')
+  })
+
+  it('没有知识库文件 ID 时显示真实空态', () => {
+    const wrapper = mountDetailDrawer({
+      material: { version_id: 'version-new', title: '待加工素材' },
+      content: { content: '', lines: [] }
+    })
+
+    expect(wrapper.text()).toContain('尚未生成可预览内容')
   })
 })
 
@@ -268,6 +384,145 @@ describe('FeishuKnowledgeView', () => {
     expect(apiAdminPost).toHaveBeenCalledWith(
       '/api/feishu-knowledge/materials/version-1/approve',
       {}
+    )
+  })
+
+  it('打开详情后使用知识库和文件 ID 加载正文及 Chunks', async () => {
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/sources/source-1/materials')) return Promise.resolve({ items: [] })
+      if (url.endsWith('/materials/version-1')) {
+        return Promise.resolve({
+          version_id: 'version-1',
+          title: '产品手册',
+          target_kb_id: 'kb-1',
+          yuxi_file_id: 'file-1'
+        })
+      }
+      if (url.endsWith('/materials/version-1/events')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    documentApi.getDocumentContent.mockResolvedValue({
+      status: 'success',
+      content: '# 产品手册',
+      lines: [{ id: 'chunk-1', chunk_order_index: 0, content: '产品正文' }]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('open-detail', {
+      version_id: 'version-1'
+    })
+    await flushPromises()
+
+    expect(documentApi.getDocumentContent).toHaveBeenCalledWith('kb-1', 'file-1')
+    expect(wrapper.findComponent({ name: 'FeishuMaterialDetailDrawer' }).props('content')).toEqual(
+      expect.objectContaining({ content: '# 产品手册' })
+    )
+  })
+
+  it('素材没有知识库文件 ID 时不请求正文', async () => {
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/sources/source-1/materials')) return Promise.resolve({ items: [] })
+      if (url.endsWith('/materials/version-new')) {
+        return Promise.resolve({ version_id: 'version-new', title: '待加工素材', target_kb_id: 'kb-1' })
+      }
+      if (url.endsWith('/materials/version-new/events')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('open-detail', {
+      version_id: 'version-new'
+    })
+    await flushPromises()
+
+    expect(documentApi.getDocumentContent).not.toHaveBeenCalled()
+  })
+
+  it('正文接口返回失败状态时保留详情并显示中文错误', async () => {
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/sources/source-1/materials')) return Promise.resolve({ items: [] })
+      if (url.endsWith('/materials/version-1')) {
+        return Promise.resolve({
+          version_id: 'version-1',
+          title: '产品手册',
+          target_kb_id: 'kb-1',
+          yuxi_file_id: 'file-1'
+        })
+      }
+      if (url.endsWith('/materials/version-1/events')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    documentApi.getDocumentContent.mockResolvedValue({
+      status: 'failed',
+      message: '解析内容读取失败'
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('open-detail', {
+      version_id: 'version-1'
+    })
+    await flushPromises()
+
+    const drawer = wrapper.findComponent({ name: 'FeishuMaterialDetailDrawer' })
+    expect(drawer.props('material')).toEqual(expect.objectContaining({ title: '产品手册' }))
+    expect(drawer.props('content')).toEqual(
+      expect.objectContaining({ error: '加载解析内容失败：解析内容读取失败' })
+    )
+  })
+
+  it('关闭详情后清空状态并忽略仍在途的正文响应', async () => {
+    let resolveContent
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/sources/source-1/materials')) return Promise.resolve({ items: [] })
+      if (url.endsWith('/materials/version-1')) {
+        return Promise.resolve({
+          version_id: 'version-1',
+          title: '产品手册',
+          target_kb_id: 'kb-1',
+          yuxi_file_id: 'file-1'
+        })
+      }
+      if (url.endsWith('/materials/version-1/events')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    documentApi.getDocumentContent.mockImplementation(
+      () => new Promise((resolve) => (resolveContent = resolve))
+    )
+    const wrapper = mountView()
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('open-detail', {
+      version_id: 'version-1'
+    })
+    await flushPromises()
+    wrapper.findComponent({ name: 'FeishuMaterialDetailDrawer' }).vm.$emit('close')
+    await flushPromises()
+
+    let drawer = wrapper.findComponent({ name: 'FeishuMaterialDetailDrawer' })
+    expect(drawer.props()).toEqual(
+      expect.objectContaining({ open: false, material: null, events: [], loading: false })
+    )
+    expect(drawer.props('content')).toEqual(
+      expect.objectContaining({ content: '', lines: [], loading: false, error: '' })
+    )
+
+    resolveContent({ status: 'success', content: '不应写回', lines: [] })
+    await flushPromises()
+
+    drawer = wrapper.findComponent({ name: 'FeishuMaterialDetailDrawer' })
+    expect(drawer.props('content')).toEqual(
+      expect.objectContaining({ content: '', lines: [], loading: false, error: '' })
     )
   })
 
