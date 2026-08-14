@@ -693,6 +693,8 @@ async def test_get_wiki_document_reads_docx_content_and_nested_block_attachments
                 request.url.params.get("document_revision_id"),
             )
         )
+        if "/blocks" in request.url.path and request.url.params.get("document_revision_id") is not None:
+            return httpx.Response(403, json={"code": 1770032, "msg": "forBidden"})
         if request.url.path == "/open-apis/docx/v1/documents/doc-token":
             return httpx.Response(
                 200,
@@ -780,10 +782,10 @@ async def test_get_wiki_document_reads_docx_content_and_nested_block_attachments
     assert requests == [
         ("/open-apis/docx/v1/documents/doc-token", None, None),
         ("/open-apis/docx/v1/documents/doc-token/raw_content", None, None),
-        ("/open-apis/docx/v1/documents/doc-token/blocks", None, "42"),
-        ("/open-apis/docx/v1/documents/doc-token/blocks", "blocks-next", "42"),
-        ("/open-apis/docx/v1/documents/doc-token/blocks/root-1/children", None, "42"),
-        ("/open-apis/docx/v1/documents/doc-token/blocks/container-1/children", None, "42"),
+        ("/open-apis/docx/v1/documents/doc-token/blocks", None, None),
+        ("/open-apis/docx/v1/documents/doc-token/blocks", "blocks-next", None),
+        ("/open-apis/docx/v1/documents/doc-token/blocks/root-1/children", None, None),
+        ("/open-apis/docx/v1/documents/doc-token/blocks/container-1/children", None, None),
     ]
     await client.aclose()
 

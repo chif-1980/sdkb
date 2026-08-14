@@ -165,7 +165,7 @@ class FeishuClient:
         if not isinstance(content, str):
             raise FeishuApiError("Feishu document response did not include string content")
 
-        blocks = await self._list_document_blocks(document_id, revision)
+        blocks = await self._list_document_blocks(document_id)
         attachments: list[FeishuAttachment] = []
         seen_tokens: set[str] = set()
         visited_blocks: set[str] = set()
@@ -174,7 +174,6 @@ class FeishuClient:
         for block in blocks:
             await self._collect_block_attachments(
                 document_id=document_id,
-                revision=revision,
                 block=block,
                 attachments=attachments,
                 seen_tokens=seen_tokens,
@@ -182,21 +181,17 @@ class FeishuClient:
             )
         return FeishuPageContent(content=content.encode("utf-8"), attachments=tuple(attachments), revision=revision)
 
-    async def _list_document_blocks(self, document_id: str, revision: str | None) -> list[Mapping[str, Any]]:
-        return await self._list_blocks(f"/open-apis/docx/v1/documents/{document_id}/blocks", revision=revision)
+    async def _list_document_blocks(self, document_id: str) -> list[Mapping[str, Any]]:
+        return await self._list_blocks(f"/open-apis/docx/v1/documents/{document_id}/blocks")
 
     async def _list_block_children(
         self,
         document_id: str,
         block_id: str,
-        revision: str,
     ) -> list[Mapping[str, Any]]:
-        return await self._list_blocks(
-            f"/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children",
-            revision=revision,
-        )
+        return await self._list_blocks(f"/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children")
 
-    async def _list_blocks(self, path: str, *, revision: str | None = None) -> list[Mapping[str, Any]]:
+    async def _list_blocks(self, path: str) -> list[Mapping[str, Any]]:
         blocks: list[Mapping[str, Any]] = []
         page_token: str | None = None
         seen_page_tokens: set[str] = set()
@@ -204,8 +199,6 @@ class FeishuClient:
             params: dict[str, str] = {"page_size": "100"}
             if page_token:
                 params["page_token"] = page_token
-            if revision:
-                params["document_revision_id"] = revision
             payload = await self._get(path, params=params)
             data = self._as_mapping(payload.get("data"), "data")
             items = data.get("items") or []
@@ -220,7 +213,6 @@ class FeishuClient:
         self,
         *,
         document_id: str,
-        revision: str,
         block: Mapping[str, Any],
         attachments: list[FeishuAttachment],
         seen_tokens: set[str],
@@ -234,11 +226,10 @@ class FeishuClient:
         children = block.get("children")
         if not isinstance(block_id, str) or not block_id or not isinstance(children, list) or not children:
             return
-        for child in await self._list_block_children(document_id, block_id, revision):
+        for child in await self._list_block_children(document_id, block_id):
             self._append_block_attachments(child, attachments, seen_tokens)
             await self._collect_block_attachments(
                 document_id=document_id,
-                revision=revision,
                 block=child,
                 attachments=attachments,
                 seen_tokens=seen_tokens,
