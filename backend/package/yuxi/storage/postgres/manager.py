@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES
@@ -86,7 +87,14 @@ class PostgresManager(metaclass=SingletonMeta):
             )
 
             self._initialized = True
-            logger.info(f"PostgreSQL manager initialized for knowledge base: {db_url.split('@')[0]}://***")
+            parsed_url = make_url(db_url)
+            host = parsed_url.host or "unknown-host"
+            port = f":{parsed_url.port}" if parsed_url.port else ""
+            database = f"/{parsed_url.database}" if parsed_url.database else ""
+            logger.info(
+                "PostgreSQL manager initialized for knowledge base: "
+                f"{parsed_url.drivername}://{host}{port}{database}"
+            )
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL manager: {e}")
             # 不抛出异常，允许应用启动，但在使用时会报错

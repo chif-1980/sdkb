@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import yuxi.storage.postgres.manager as postgres_manager_module
 from yuxi.storage.postgres.manager import PostgresManager
 
 
@@ -30,6 +31,40 @@ class _RecordingEngine:
 
     def begin(self):
         return _RecordingBegin(self.connection)
+
+
+def test_initialize_does_not_log_database_credentials_or_query_parameters(monkeypatch):
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    original_session = manager.AsyncSession
+    original_pool = manager.langgraph_pool
+    messages: list[str] = []
+
+    monkeypatch.setenv(
+        manager.KB_DATABASE_URL_ENV,
+        "postgresql+asyncpg://private_user:private_password@127.0.0.1:5432/private_db"
+        "?sslmode=require&api_key=query-secret",
+    )
+    monkeypatch.setattr(postgres_manager_module, "create_async_engine", lambda *args, **kwargs: object())
+    monkeypatch.setattr(postgres_manager_module, "async_sessionmaker", lambda *args, **kwargs: object())
+    monkeypatch.setattr(postgres_manager_module, "AsyncConnectionPool", lambda *args, **kwargs: object())
+    monkeypatch.setattr(postgres_manager_module.logger, "info", messages.append)
+
+    manager._initialized = False
+    try:
+        manager.initialize()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+        manager.AsyncSession = original_session
+        manager.langgraph_pool = original_pool
+
+    output = "\n".join(messages)
+    assert "127.0.0.1:5432/private_db" in output
+    assert "private_user" not in output
+    assert "private_password" not in output
+    assert "query-secret" not in output
 
 
 @pytest.mark.asyncio
