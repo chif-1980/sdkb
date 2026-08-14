@@ -37,9 +37,12 @@ JWT_SECRET_KEY=
 YUXI_INSTANCE_ID=
 SANDBOX_PROVISIONER_TOKEN=
 SILICONFLOW_API_KEY=
+FEISHU_ACCESS_TOKEN=
 ```
 
 生产 Compose 会在前七项配置缺失或为空时拒绝启动，并提示具体变量名。`JWT_SECRET_KEY` 和 `SANDBOX_PROVISIONER_TOKEN` 均应至少使用 32 字节随机值并持久保存，可分别使用 `openssl rand -hex 32` 生成；两者不能复用。`YUXI_INSTANCE_ID` 应是每套部署稳定且唯一的实例标识。模型 API 密钥按实际使用的供应商配置。
+
+API 和 worker 必须使用同一个 `FEISHU_ACCESS_TOKEN`。开发环境通过本地 `.env` 注入，生产环境通过本地 `.env.prod` 注入；这些文件及其中的令牌值不得提交到版本库，也不得输出到日志。企业知识库正文或附件内容不得复制到测试、文档或提交记录中。
 
 ### 2. 启动服务
 
@@ -110,3 +113,23 @@ docker logs -f api-prod
 # Nginx 访问日志
 docker logs -f web-prod
 ```
+
+## 飞书知识流水线验收与更新
+
+飞书知识流水线必须按以下顺序受控验收：
+
+1. 检查飞书连接。
+2. 验证目标知识空间和根节点的限定范围权限。
+3. 执行完整扫描。
+4. 核对根节点标题、子节点数量，以及 PDF、TXT、PNG、音频、视频附件类型。
+5. 以上结果均符合预期后，才可批准并发布。
+
+验收期间不得打印 `FEISHU_ACCESS_TOKEN`，也不得把企业正文或附件内容写入日志、测试、文档或提交记录。
+
+更新飞书流水线相关代码时，只重建 API 和 worker，保留数据库与对象存储：
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build --no-deps api worker
+```
+
+禁止执行 `docker compose down -v`，也禁止删除或重置命名卷。API 和 worker 重启后，应重新核对 PostgreSQL 中的来源、版本和审核状态，Redis 中的任务状态，MinIO 中的原始及处理后对象，以及 Milvus 检索结果和飞书引用。
