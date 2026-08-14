@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, computed, provide, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
+import { useMediaQuery } from '@vueuse/core'
 import { GithubOutlined } from '@ant-design/icons-vue'
 import {
   BarChart3,
@@ -55,6 +56,8 @@ const showSettingsModal = ref(false)
 const settingsInitialTab = ref('')
 
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
+const isMobileViewport = useMediaQuery('(max-width: 760px)')
+const effectiveSidebarCollapsed = computed(() => sidebarCollapsed.value || isMobileViewport.value)
 const conversationSearchOpen = ref(false)
 
 // Provide settings modal methods to child components
@@ -197,6 +200,12 @@ const toggleSidebar = () => {
   setSidebarCollapsed(!sidebarCollapsed.value)
 }
 
+const expandSidebar = () => {
+  if (!isMobileViewport.value) {
+    setSidebarCollapsed(false)
+  }
+}
+
 const openConversationSearch = () => {
   conversationSearchOpen.value = true
 }
@@ -284,10 +293,10 @@ provide('settingsModal', {
 </script>
 
 <template>
-  <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+  <div class="app-layout" :class="{ 'sidebar-collapsed': effectiveSidebarCollapsed }">
     <div class="header">
       <div class="sidebar-brand" @click.stop>
-        <router-link v-if="!sidebarCollapsed" to="/" class="brand-link">
+        <router-link v-if="!effectiveSidebarCollapsed" to="/" class="brand-link">
           <img :src="infoStore.organization.avatar" class="brand-avatar" />
           <span class="brand-name">{{ organizationName }}</span>
         </router-link>
@@ -295,14 +304,15 @@ provide('settingsModal', {
           v-else
           type="button"
           class="brand-link brand-expand-button"
-          aria-label="展开侧边栏"
-          @click="setSidebarCollapsed(false)"
+          :aria-label="isMobileViewport ? '移动端侧边栏已折叠' : '展开侧边栏'"
+          :disabled="isMobileViewport"
+          @click="expandSidebar"
         >
           <img :src="infoStore.organization.avatar" class="brand-avatar brand-avatar-image" />
           <PanelLeftOpen class="brand-expand-icon" size="20" />
         </button>
         <button
-          v-if="!sidebarCollapsed"
+          v-if="!effectiveSidebarCollapsed"
           type="button"
           class="sidebar-toggle"
           aria-label="折叠侧边栏"
@@ -320,7 +330,7 @@ provide('settingsModal', {
           :active-class="primaryNavItem.action ? '' : 'active'"
           @click.stop
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="effectiveSidebarCollapsed ? undefined : false">
             <template #title>{{ primaryNavItem.name }}</template>
             <component
               class="icon"
@@ -339,7 +349,7 @@ provide('settingsModal', {
           :class="{ active: conversationSearchOpen }"
           @click.stop="openConversationSearch"
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="effectiveSidebarCollapsed ? undefined : false">
             <template #title>搜索对话</template>
             <Search class="icon" size="18" />
           </a-tooltip>
@@ -356,7 +366,7 @@ provide('settingsModal', {
           :active-class="item.action ? '' : 'active'"
           @click.stop
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="effectiveSidebarCollapsed ? undefined : false">
             <template #title>{{ item.name }}</template>
             <component
               class="icon"
@@ -369,7 +379,7 @@ provide('settingsModal', {
       </div>
       <div class="fill">
         <ConversationNavSection
-          v-if="!sidebarCollapsed"
+          v-if="!effectiveSidebarCollapsed"
           class="sidebar-conversations"
           :current-chat-id="activeConversationThreadId"
           :chats-list="threads"
@@ -384,7 +394,7 @@ provide('settingsModal', {
       </div>
       <div class="foo">
         <div class="github nav-item" @click.stop>
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="effectiveSidebarCollapsed ? undefined : false">
             <template #title>欢迎 Star</template>
             <a href="https://github.com/xerrors/Yuxi" target="_blank" class="github-link">
               <GithubOutlined class="icon" />
@@ -397,7 +407,7 @@ provide('settingsModal', {
         </div>
         <!-- 用户信息组件 -->
         <div class="nav-item user-info" @click.stop>
-          <UserInfoComponent :show-role="!sidebarCollapsed">
+          <UserInfoComponent :show-role="!effectiveSidebarCollapsed">
             <template v-if="userStore.isAdmin" #actions>
               <a-tooltip placement="top" title="任务中心">
                 <button
@@ -489,7 +499,7 @@ provide('settingsModal', {
   flex-direction: row;
   width: 100%;
   height: 100vh;
-  min-width: var(--min-width);
+  min-width: 0;
 }
 
 div.header,
@@ -500,6 +510,7 @@ div.header,
 
 #app-router-view {
   flex: 1 1 auto;
+  min-width: 0;
   overflow-y: auto;
 }
 
@@ -860,8 +871,8 @@ div.header,
         color: var(--main-color);
       }
 
-      &:hover,
-      &:focus-visible {
+      &:not(:disabled):hover,
+      &:not(:disabled):focus-visible {
         background: var(--main-20);
         outline: none;
 
@@ -872,6 +883,10 @@ div.header,
         .brand-expand-icon {
           display: block;
         }
+      }
+
+      &:disabled {
+        cursor: default;
       }
     }
 
