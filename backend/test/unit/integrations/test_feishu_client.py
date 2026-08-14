@@ -423,6 +423,32 @@ async def test_business_403_does_not_refresh_tenant_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_business_http_400_permission_code_is_normalized_without_response_secrets() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            headers={"x-request-id": "permission-request"},
+            json={
+                "code": 99991672,
+                "msg": "Access denied; grant docx:document:readonly",
+                "tenant_access_token": "response-secret",
+            },
+        )
+
+    client = _client(handler)
+
+    with pytest.raises(FeishuPermissionError, match="docx:document:readonly") as raised:
+        await client.get_node("page-token")
+
+    assert raised.value.status_code == 400
+    assert raised.value.request_id == "permission-request"
+    assert raised.value.error is not None
+    assert raised.value.error.code == 99991672
+    assert "response-secret" not in str(raised.value)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status_code", [429, 503])
 async def test_business_retryable_status_exhaustion_is_api_error(status_code: int) -> None:
     attempts = 0

@@ -22,6 +22,7 @@ FEISHU_OPEN_API_BASE_URL = "https://open.feishu.cn"
 FEISHU_TENANT_TOKEN_PATH = "/open-apis/auth/v3/tenant_access_token/internal"
 DEFAULT_APP_ID_ENV_NAME = "FEISHU_APP_ID"
 DEFAULT_APP_SECRET_ENV_NAME = "FEISHU_APP_SECRET"
+FEISHU_PERMISSION_ERROR_CODES = {99991672}
 
 
 class FeishuClientError(RuntimeError):
@@ -354,7 +355,10 @@ class FeishuClient:
         if response.status_code == 404:
             raise FeishuNotFoundError("Feishu resource not found", error=self._error_from_response(response))
         if response.is_error:
-            raise FeishuApiError("Feishu request failed", error=self._error_from_response(response))
+            error = self._error_from_response(response)
+            if error.code in FEISHU_PERMISSION_ERROR_CODES:
+                raise FeishuPermissionError(error.message or "Feishu permission denied", error=error)
+            raise FeishuApiError("Feishu request failed", error=error)
         self._log_response(response)
         return response
 
@@ -539,7 +543,22 @@ class FeishuClient:
 
     @classmethod
     def _error_from_response(cls, response: httpx.Response) -> FeishuError:
-        return FeishuError(status_code=response.status_code, request_id=cls._request_id(response))
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        code = payload.get("code") if isinstance(payload, dict) else None
+        message = None
+        if isinstance(payload, dict):
+            raw_message = payload.get("msg") or payload.get("message")
+            if isinstance(raw_message, str) and raw_message:
+                message = raw_message
+        return FeishuError(
+            status_code=response.status_code,
+            request_id=cls._request_id(response),
+            code=code if isinstance(code, int) else None,
+            message=message,
+        )
 
     @staticmethod
     def _backoff_delay(attempt: int) -> float:
