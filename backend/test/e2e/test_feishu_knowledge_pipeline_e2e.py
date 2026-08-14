@@ -18,7 +18,7 @@ from yuxi.integrations.feishu import FeishuClient
 from yuxi.integrations.feishu.service import FeishuScanService
 from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository
 from yuxi.storage.postgres.models_business import Base
-from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion, FeishuSourceItem
+from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion, FeishuProcessingEvent, FeishuSourceItem
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e]
 
@@ -288,6 +288,39 @@ class OfflinePipeline:
             )
             return result.one()
 
+    async def rejection_evidence(self, title: str) -> dict:
+        async with self.session_factory() as session:
+            version = (
+                await session.execute(
+                    select(FeishuMaterialVersion)
+                    .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+                    .where(FeishuSourceItem.title == title)
+                )
+            ).scalar_one()
+            event = (
+                await session.execute(
+                    select(FeishuProcessingEvent).where(
+                        FeishuProcessingEvent.version_id == version.version_id,
+                        FeishuProcessingEvent.event_type == "rejected",
+                    )
+                )
+            ).scalar_one_or_none()
+            return {
+                "version_id": version.version_id,
+                "review_status": version.review_status,
+                "review_comment": version.review_comment,
+                "event": None
+                if event is None
+                else {
+                    "version_id": event.version_id,
+                    "event_type": event.event_type,
+                    "from_status": event.from_status,
+                    "to_status": event.to_status,
+                    "operator_id": event.operator_id,
+                    "message": event.message,
+                },
+            }
+
     async def initial_publish(self) -> dict:
         scan = await self.scan("full")
         await self.process_discovered()
@@ -298,6 +331,7 @@ class OfflinePipeline:
             (version, item) for version, item in current if item.title == "Notes.txt"
         )
         await self.reject(rejected_version.version_id, reason="Not approved for publication")
+        rejection = await self.rejection_evidence(rejected_item.title)
         for version, _item in current:
             if version.version_id != rejected_version.version_id:
                 await self.approve_and_publish(version.version_id)
@@ -316,6 +350,7 @@ class OfflinePipeline:
             "archived_count": len(self.minio.objects),
             "awaiting_review_count": awaiting_review_count,
             "rejected_title": rejected_item.title,
+            "rejection": rejection,
             "published_count": sum(version.processing_status == "published" for version, _item in final_materials),
             "retrieval": {key: retrieval[key] for key in ("content", "source_url", "wiki_path", "title", "item_type")},
         }
@@ -378,6 +413,17 @@ async def test_full_scan_review_publish_and_retrieve_source(offline_pipeline):
     assert result["archived_count"] == 6
     assert result["awaiting_review_count"] == 6
     assert result["rejected_title"] == "Notes.txt"
+    rejection = result["rejection"]
+    assert rejection["review_status"] == "rejected"
+    assert rejection["review_comment"] == "Not approved for publication"
+    assert rejection["event"] == {
+        "version_id": rejection["version_id"],
+        "event_type": "rejected",
+        "from_status": "pending",
+        "to_status": "rejected",
+        "operator_id": "admin-offline",
+        "message": "Not approved for publication",
+    }
     assert result["published_count"] == 5
     assert result["retrieval"] == {
         "content": "Quickdone launch handbook v1",
