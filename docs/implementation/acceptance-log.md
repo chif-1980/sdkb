@@ -31,6 +31,9 @@
 - 离线端到端测试：4 个用例覆盖三层知识树完整扫描、PDF/TXT/PNG 的发现、归档及 parse/index 编排、音频/视频发现并标记暂不支持、审核、发布和飞书引用；增量 v2 替换及发布前 v1 持续生效；权限与局部遍历失败、429 重试、不支持媒体和日志令牌脱敏；内存 Milvus 适配器强制失败时保留 v1，并将 v2 标记为 `publish_failed`。该测试未运行真实 PDF/OCR 解析器，也未连接真实 MinIO/Milvus
 - 执行命令：`uv run --project backend --no-sync --no-dev pytest -q backend/test/e2e/test_feishu_knowledge_pipeline_e2e.py`
 - 执行结果：`4 passed`；另有 2 条既有弃用警告
-- 待完成：当前未配置 `FEISHU_ACCESS_TOKEN`，尚未执行真实飞书连接、限定范围权限验证和完整扫描
+- 离线认证单元测试：61 个用例覆盖 tenant token 换取与内存缓存、到期刷新、401 后刷新并重放一次、并发首次请求只换取一次 token，以及日志和异常信息脱敏
+- 执行命令：`uv run --project backend --no-sync --no-dev pytest -q backend/test/unit/integrations/test_feishu_client.py`
+- 执行结果：`61 passed`；另有 1 条既有弃用警告
+- 待完成：当前未配置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，尚未执行企业自建应用认证、真实飞书连接、限定范围权限验证和完整扫描
 - 待完成：尚未执行仅重建 API/worker，以及 PostgreSQL、Redis、MinIO、Milvus 的持久化验证
 - 当前结论：阶段二仍为 `RUNNING`，不得标记为 `PASS`
