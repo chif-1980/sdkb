@@ -203,8 +203,8 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
             return SimpleNamespace(run_id="run-1")
 
     class FakeFeishuClient:
-        def __init__(self, *, credential_env_name):
-            calls.append(("client", credential_env_name))
+        def __init__(self):
+            calls.append(("client",))
 
         async def get_node(self, token):
             calls.append(("get_node", token))
@@ -267,7 +267,7 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
         approved = await client.post("/api/feishu-knowledge/materials/version-1/approve")
 
     assert created.status_code == 201
-    assert created.json()["credential_env_name"] == "FEISHU_ACCESS_TOKEN"
+    assert "credential_env_name" not in created.json()
     assert checked.status_code == 200
     assert checked.json() == {"status": "ok", "source_id": "source-1", "root_title": "Root"}
     assert scanned.status_code == 202
@@ -279,7 +279,6 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
         "wiki_root_token": "root",
         "wiki_root_url": None,
         "target_kb_id": "kb-1",
-        "credential_env_name": "FEISHU_ACCESS_TOKEN",
         "enabled": True,
         "created_at": None,
         "updated_at": None,
@@ -294,6 +293,9 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
     assert rejected.json() == {"version_id": "version-1", "status": "rejected"}
     assert approved.status_code == 202
     assert approved.json() == {"version_id": "version-1", "status": "publish_queued", "task_id": "task-publish"}
+    create_kwargs = next(kwargs for action, kwargs in calls if action == "create")
+    assert create_kwargs["credential_env_name"] == "GLOBAL_FEISHU_APP"
+    assert ("client",) in calls
     assert ("get_node", "root") in calls
     assert ("reject", "version-1", "admin-1", "obsolete") in calls
     assert ("approve", "version-1", "admin-1") in calls
@@ -309,6 +311,9 @@ async def test_lifespan_reconciles_feishu_state_after_tasker_start_without_exter
     assert "enqueue" not in source
 
 
-@pytest.mark.skipif(not os.getenv("FEISHU_ACCESS_TOKEN"), reason="Real Feishu credentials are not configured")
+@pytest.mark.skipif(
+    not (os.getenv("FEISHU_APP_ID") and os.getenv("FEISHU_APP_SECRET")),
+    reason="Real Feishu application credentials are not configured",
+)
 async def test_real_feishu_network_scan_is_deferred_to_task_6_e2e():
     pytest.skip("Task 6 owns the opt-in real Feishu network scan")

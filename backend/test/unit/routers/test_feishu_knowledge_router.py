@@ -176,7 +176,7 @@ async def _prepare_succeeded_scan(monkeypatch, database_path, processing_task):
     captured = {}
 
     class FakeClient:
-        def __init__(self, **kwargs):
+        def __init__(self):
             pass
 
         async def aclose(self):
@@ -633,7 +633,7 @@ async def test_successful_scan_queues_archived_material_processing(monkeypatch):
             return ["version-1"]
 
     class FakeClient:
-        def __init__(self, **kwargs):
+        def __init__(self):
             pass
 
         async def aclose(self):
@@ -707,7 +707,7 @@ async def test_failed_scan_commits_domain_state_before_task_failure(monkeypatch,
     async def unexpected_processing(version_id, *, operator_id):
         processing_calls.append((version_id, operator_id))
 
-    monkeypatch.setattr(router_module, "FeishuClient", lambda **kwargs: _FailingAfterArchiveFeishuClient())
+    monkeypatch.setattr(router_module, "FeishuClient", _FailingAfterArchiveFeishuClient)
     monkeypatch.setattr(router_module, "MinioFeishuArchiveAdapter", lambda: _StableArchiveAdapter())
     monkeypatch.setattr(
         router_module.pg_manager,
@@ -779,7 +779,7 @@ async def test_scan_cancellation_after_success_commit_queues_discovered_versions
     captured = {"processing": []}
 
     class FakeClient:
-        def __init__(self, **kwargs):
+        def __init__(self):
             pass
 
         async def aclose(self):
@@ -923,7 +923,7 @@ async def test_scan_cancellation_processing_enqueue_failure_is_recorded_and_othe
     cancellation = asyncio.CancelledError("scan cancelled after success commit")
 
     class FakeClient:
-        def __init__(self, **kwargs):
+        def __init__(self):
             pass
 
         async def aclose(self):
@@ -1165,7 +1165,7 @@ async def test_scan_cancellation_before_external_work_fails_run_once_and_propaga
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
 
     class UnexpectedClient:
-        def __init__(self, **kwargs):
+        def __init__(self):
             raise AssertionError("Feishu client must not be created after cancellation")
 
     class CancelledContext:
@@ -1303,7 +1303,7 @@ async def test_scan_domain_commit_failure_uses_fresh_session_to_fail_run(monkeyp
         captured["coroutine"] = kwargs["coroutine"]
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
 
-    monkeypatch.setattr(router_module, "FeishuClient", lambda **kwargs: _FailingAfterArchiveFeishuClient())
+    monkeypatch.setattr(router_module, "FeishuClient", _FailingAfterArchiveFeishuClient)
     monkeypatch.setattr(router_module, "MinioFeishuArchiveAdapter", lambda: _StableArchiveAdapter())
     monkeypatch.setattr(
         router_module.pg_manager,
@@ -1376,8 +1376,8 @@ async def test_scan_worker_initialization_failure_marks_run_failed(monkeypatch, 
             return True
 
     class FailingClient:
-        def __init__(self, **kwargs):
-            raise RuntimeError("credential unavailable")
+        def __init__(self):
+            raise router_module.FeishuClientError("Missing Feishu application credentials")
 
     class WorkerDb:
         async def commit(self):
@@ -1409,7 +1409,7 @@ async def test_scan_worker_initialization_failure_marks_run_failed(monkeypatch, 
     expected_message = (
         "LookupError: Feishu source not found: source-1"
         if failure_stage == "source_lookup"
-        else "RuntimeError: credential unavailable"
+        else "FeishuClientError: Missing Feishu application credentials"
     )
     assert calls == [
         "request_commit",
@@ -1468,7 +1468,7 @@ async def test_scan_worker_concurrent_claim_failure_marks_queued_run_failed(monk
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
-    monkeypatch.setattr(router_module, "FeishuClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
     monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
     monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
     monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
@@ -1543,7 +1543,7 @@ async def test_rejected_queued_scan_worker_persists_failed_run_and_event(monkeyp
         captured["coroutine"] = kwargs["coroutine"]
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
 
-    monkeypatch.setattr(router_module, "FeishuClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
     monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
     monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
 
@@ -2042,7 +2042,7 @@ async def test_router_requires_login_and_admin_role():
     assert forbidden.status_code == 403
 
 
-async def test_create_source_persists_only_credential_environment_name(monkeypatch):
+async def test_create_source_uses_global_credential_marker_and_hides_legacy_field(monkeypatch):
     captured = {}
 
     class FakeRepository:
@@ -2055,16 +2055,19 @@ async def test_create_source_persists_only_credential_environment_name(monkeypat
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
     result = await router_module.create_source(
-        router_module.SourceCreate(
-            name="Docs",
-            wiki_root_token="root",
-            target_kb_id="kb-1",
-            credential_env_name="FEISHU_DOCS_TOKEN",
+        router_module.SourceCreate.model_validate(
+            {
+                "name": "Docs",
+                "wiki_root_token": "root",
+                "target_kb_id": "kb-1",
+                "credential_env_name": "LEGACY_TOKEN_NAME",
+            }
         ),
         db=SimpleNamespace(),
         current_user=SimpleNamespace(uid="admin"),
     )
-    assert result["credential_env_name"] == "FEISHU_DOCS_TOKEN"
+    assert captured["credential_env_name"] == "GLOBAL_FEISHU_APP"
+    assert "credential_env_name" not in result
     assert "credential" not in captured
     assert captured["created_by"] == "admin"
 
@@ -2112,8 +2115,8 @@ async def test_check_source_uses_read_only_feishu_client(monkeypatch):
             )
 
     class FakeClient:
-        def __init__(self, *, credential_env_name):
-            calls.append(("init", credential_env_name))
+        def __init__(self):
+            calls.append(("init",))
 
         async def get_node(self, node_token):
             calls.append(("get", node_token))
@@ -2126,7 +2129,7 @@ async def test_check_source_uses_read_only_feishu_client(monkeypatch):
     monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
     result = await router_module.check_source("source-1", db=SimpleNamespace())
     assert result == {"status": "ok", "source_id": "source-1", "root_title": "Root"}
-    assert calls == [("init", "FEISHU_DOCS_TOKEN"), ("get", "root"), ("close",)]
+    assert calls == [("init",), ("get", "root"), ("close",)]
 
 
 async def test_check_source_maps_client_initialization_error_to_422(monkeypatch):
@@ -2142,8 +2145,8 @@ async def test_check_source_maps_client_initialization_error_to_422(monkeypatch)
             )
 
     class FailingClient:
-        def __init__(self, *, credential_env_name):
-            raise router_module.FeishuClientError(f"Missing credential: {credential_env_name}")
+        def __init__(self):
+            raise router_module.FeishuClientError("Missing Feishu application credentials")
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
     monkeypatch.setattr(router_module, "FeishuClient", FailingClient)
@@ -2152,7 +2155,7 @@ async def test_check_source_maps_client_initialization_error_to_422(monkeypatch)
         await router_module.check_source("source-1", db=SimpleNamespace())
 
     assert exc_info.value.status_code == 422
-    assert exc_info.value.detail == "Missing credential: MISSING_FEISHU_TOKEN"
+    assert exc_info.value.detail == "Missing Feishu application credentials"
 
 
 async def test_check_source_maps_read_failure_to_422_and_closes_client(monkeypatch):
@@ -2170,8 +2173,8 @@ async def test_check_source_maps_read_failure_to_422_and_closes_client(monkeypat
             )
 
     class FailingClient:
-        def __init__(self, *, credential_env_name):
-            assert credential_env_name == "FEISHU_DOCS_TOKEN"
+        def __init__(self):
+            pass
 
         async def get_node(self, node_token):
             assert node_token == "root"
@@ -2270,7 +2273,6 @@ async def test_query_endpoints_return_sources_runs_materials_and_events(review_f
         "wiki_root_token": "root",
         "wiki_root_url": None,
         "target_kb_id": "kb-1",
-        "credential_env_name": "FEISHU_ACCESS_TOKEN",
         "enabled": True,
         "created_at": sources["items"][0]["created_at"],
         "updated_at": sources["items"][0]["updated_at"],

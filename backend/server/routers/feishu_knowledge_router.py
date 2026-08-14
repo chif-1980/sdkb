@@ -40,6 +40,7 @@ feishu_knowledge = APIRouter(
     tags=["feishu-knowledge"],
     dependencies=[Depends(get_admin_user)],
 )
+GLOBAL_FEISHU_CREDENTIAL_MARKER = "GLOBAL_FEISHU_APP"
 
 
 class RemovalAdapter(Protocol):
@@ -813,10 +814,9 @@ class SourceCreate(BaseModel):
     wiki_root_token: str = Field(min_length=1, max_length=255)
     wiki_root_url: str | None = Field(default=None, max_length=1024)
     target_kb_id: str = Field(min_length=1, max_length=80)
-    credential_env_name: str = Field(default="FEISHU_ACCESS_TOKEN", min_length=1, max_length=255)
     enabled: bool = True
 
-    @field_validator("name", "wiki_root_token", "target_kb_id", "credential_env_name")
+    @field_validator("name", "wiki_root_token", "target_kb_id")
     @classmethod
     def identifiers_must_not_be_blank(cls, value: str) -> str:
         value = value.strip()
@@ -879,7 +879,6 @@ def _source_dict(source: FeishuSource, summary: FeishuSourceSummary | None = Non
         "wiki_root_token": source.wiki_root_token,
         "wiki_root_url": source.wiki_root_url,
         "target_kb_id": source.target_kb_id,
-        "credential_env_name": source.credential_env_name,
         "enabled": source.enabled,
         "created_at": _iso(getattr(source, "created_at", None)),
         "updated_at": _iso(getattr(source, "updated_at", None)),
@@ -994,7 +993,7 @@ async def create_source(
         wiki_root_token=payload.wiki_root_token.strip(),
         wiki_root_url=payload.wiki_root_url,
         target_kb_id=payload.target_kb_id.strip(),
-        credential_env_name=payload.credential_env_name.strip(),
+        credential_env_name=GLOBAL_FEISHU_CREDENTIAL_MARKER,
         enabled=payload.enabled,
         created_by=current_user.uid,
     )
@@ -1007,7 +1006,7 @@ async def check_source(source_id: str, db: AsyncSession = Depends(get_db)):
     if source is None:
         raise HTTPException(status_code=404, detail="Feishu source not found")
     try:
-        client = FeishuClient(credential_env_name=source.credential_env_name)
+        client = FeishuClient()
     except FeishuClientError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
@@ -1051,7 +1050,7 @@ async def scan_source(
                         worker_source = await worker_repository.get_source(source_id)
                         if worker_source is None:
                             raise LookupError(f"Feishu source not found: {source_id}")
-                        client = FeishuClient(credential_env_name=worker_source.credential_env_name)
+                        client = FeishuClient()
                         result = await FeishuScanService(
                             repository=worker_repository,
                             client=client,
