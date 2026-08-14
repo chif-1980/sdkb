@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,7 +25,10 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.e2e]
 
 SOURCE_ID = "source-offline"
 TARGET_KB_ID = "kb-offline"
-OFFLINE_TOKEN = "offline-test-token"
+OFFLINE_APP_ID = "cli_offline_app"
+OFFLINE_APP_SECRET = "offline-app-secret"
+OFFLINE_TOKEN = "offline-tenant-token"
+AUTH_PATH = "/open-apis/auth/v3/tenant_access_token/internal"
 
 
 async def _no_sleep(_delay: float) -> None:
@@ -33,6 +37,7 @@ async def _no_sleep(_delay: float) -> None:
 
 class FakeFeishuTransport:
     def __init__(self) -> None:
+        self.auth_calls = 0
         self.permission_denied = False
         self.fail_children_for: str | None = None
         self.rate_limit_once = False
@@ -70,6 +75,20 @@ class FakeFeishuTransport:
         }
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == AUTH_PATH:
+            assert request.method == "POST"
+            assert request.headers.get("authorization") is None
+            assert request.read()
+            assert request.content
+            payload = json.loads(request.content)
+            assert payload == {"app_id": OFFLINE_APP_ID, "app_secret": OFFLINE_APP_SECRET}
+            self.auth_calls += 1
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": OFFLINE_TOKEN, "expire": 7200},
+            )
+
+        assert request.method == "GET"
         assert request.headers["authorization"] == f"Bearer {OFFLINE_TOKEN}"
         path = request.url.path
         if path == "/open-apis/wiki/v2/spaces/get_node":
@@ -206,7 +225,7 @@ class OfflinePipeline:
         http_client = httpx.AsyncClient(transport=httpx.MockTransport(self.transport))
         client = FeishuClient(
             client=http_client,
-            environ={"FEISHU_ACCESS_TOKEN": OFFLINE_TOKEN},
+            environ={"FEISHU_APP_ID": OFFLINE_APP_ID, "FEISHU_APP_SECRET": OFFLINE_APP_SECRET},
             sleep=_no_sleep,
         )
         try:
@@ -384,7 +403,7 @@ async def offline_pipeline(tmp_path, monkeypatch):
             wiki_root_token="root",
             wiki_root_url="https://quickdone.test/wiki/root",
             target_kb_id=TARGET_KB_ID,
-            credential_env_name="FEISHU_ACCESS_TOKEN",
+            credential_env_name="GLOBAL_FEISHU_APP",
             created_by="admin-offline",
         )
         await session.commit()
@@ -397,6 +416,7 @@ async def offline_pipeline(tmp_path, monkeypatch):
 async def test_full_scan_review_publish_and_retrieve_source(offline_pipeline):
     result = await offline_pipeline.initial_publish()
 
+    assert offline_pipeline.transport.auth_calls == 1
     assert result["scan"] == {
         "status": "succeeded",
         "scanned_count": 8,
@@ -524,6 +544,7 @@ async def test_scan_failures_never_bulk_invalidate_and_rate_limit_retry_hides_to
     assert recovered.status == "succeeded"
     assert recovered.failed_count == 0
     assert offline_pipeline.transport.rate_limit_attempts == 2
+    assert OFFLINE_APP_SECRET not in " ".join(log_messages)
     assert OFFLINE_TOKEN not in " ".join(log_messages)
 
 
