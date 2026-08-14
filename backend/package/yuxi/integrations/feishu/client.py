@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -17,7 +19,9 @@ from yuxi.integrations.feishu.schemas import (
 from yuxi.utils import logger
 
 FEISHU_OPEN_API_BASE_URL = "https://open.feishu.cn"
-DEFAULT_CREDENTIAL_ENV_NAME = "FEISHU_ACCESS_TOKEN"
+FEISHU_TENANT_TOKEN_PATH = "/open-apis/auth/v3/tenant_access_token/internal"
+DEFAULT_APP_ID_ENV_NAME = "FEISHU_APP_ID"
+DEFAULT_APP_SECRET_ENV_NAME = "FEISHU_APP_SECRET"
 
 
 class FeishuClientError(RuntimeError):
@@ -60,20 +64,30 @@ class FeishuClient:
     def __init__(
         self,
         *,
-        credential_env_name: str = DEFAULT_CREDENTIAL_ENV_NAME,
+        app_id_env_name: str = DEFAULT_APP_ID_ENV_NAME,
+        app_secret_env_name: str = DEFAULT_APP_SECRET_ENV_NAME,
         environ: Mapping[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
         max_retries: int = 3,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         environment = os.environ if environ is None else environ
-        token = environment.get(credential_env_name)
-        if not token:
-            raise FeishuCredentialError(f"Missing Feishu credential environment variable: {credential_env_name}")
+        app_id = environment.get(app_id_env_name)
+        if not app_id or not app_id.strip():
+            raise FeishuCredentialError(f"Missing Feishu credential environment variable: {app_id_env_name}")
+        app_secret = environment.get(app_secret_env_name)
+        if not app_secret or not app_secret.strip():
+            raise FeishuCredentialError(f"Missing Feishu credential environment variable: {app_secret_env_name}")
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
 
-        self._token = token
+        self._app_id = app_id
+        self._app_secret = app_secret
+        self._tenant_token: str | None = None
+        self._token_refresh_at = 0.0
+        self._token_lock = asyncio.Lock()
+        self._monotonic = monotonic
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(base_url=FEISHU_OPEN_API_BASE_URL, timeout=30.0)
         self._max_retries = max_retries
@@ -302,10 +316,8 @@ class FeishuClient:
         response = await self._get_response(path, params=params)
         try:
             payload = response.json()
-        except ValueError as exc:
-            raise FeishuApiError(
-                "Feishu API returned an invalid JSON response", error=self._error_from_response(response)
-            ) from exc
+        except ValueError:
+            payload = None
         if not isinstance(payload, dict):
             raise FeishuApiError(
                 "Feishu API returned an invalid JSON response", error=self._error_from_response(response)
@@ -326,33 +338,125 @@ class FeishuClient:
         return payload
 
     async def _get_response(self, path: str, *, params: dict[str, str] | None = None) -> httpx.Response:
-        headers = {"Authorization": f"Bearer {self._token}"}
+        token = await self._get_tenant_token()
+        response = await self._get_with_retries(path, params=params, token=token)
+        if response.status_code == 401:
+            self._invalidate_tenant_token(token)
+            token = await self._get_tenant_token()
+            response = await self._get_with_retries(path, params=params, token=token)
+            if response.status_code == 401:
+                raise FeishuAuthenticationError(
+                    "Feishu authentication failed", error=self._error_from_response(response)
+                )
+        if response.status_code == 403:
+            raise FeishuPermissionError("Feishu permission denied", error=self._error_from_response(response))
+        if response.status_code == 404:
+            raise FeishuNotFoundError("Feishu resource not found", error=self._error_from_response(response))
+        if response.is_error:
+            raise FeishuApiError("Feishu request failed", error=self._error_from_response(response))
+        self._log_response(response)
+        return response
+
+    async def _get_with_retries(self, path: str, *, params: dict[str, str] | None, token: str) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {token}"}
         for attempt in range(self._max_retries + 1):
+            request_failed = False
             try:
                 response = await self._client.get(f"{FEISHU_OPEN_API_BASE_URL}{path}", params=params, headers=headers)
-            except httpx.HTTPError as exc:
+            except httpx.HTTPError:
                 if attempt >= self._max_retries:
-                    raise FeishuApiError("Feishu request failed") from exc
-                await self._sleep(self._backoff_delay(attempt))
-                continue
+                    request_failed = True
+                else:
+                    await self._sleep(self._backoff_delay(attempt))
+                    continue
+            if request_failed:
+                raise FeishuApiError("Feishu request failed")
 
             if (response.status_code == 429 or 500 <= response.status_code < 600) and attempt < self._max_retries:
                 self._log_response(response)
                 await self._sleep(self._retry_delay(response, attempt))
                 continue
-            if response.status_code == 401:
+            return response
+        raise FeishuApiError("Feishu request exhausted retries")
+
+    async def _get_tenant_token(self) -> str:
+        if self._token_is_fresh():
+            assert self._tenant_token is not None
+            return self._tenant_token
+        async with self._token_lock:
+            if not self._token_is_fresh():
+                await self._exchange_tenant_token()
+        assert self._tenant_token is not None
+        return self._tenant_token
+
+    def _token_is_fresh(self) -> bool:
+        return self._tenant_token is not None and self._monotonic() < self._token_refresh_at
+
+    async def _exchange_tenant_token(self) -> None:
+        response = await self._auth_response()
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            raise FeishuAuthenticationError(
+                "Feishu authentication returned an invalid response", error=self._error_from_response(response)
+            )
+        if type(payload.get("code")) is not int or payload["code"] != 0:
+            raise FeishuAuthenticationError("Feishu authentication failed", error=self._error_from_response(response))
+        token = payload.get("tenant_access_token")
+        expire = payload.get("expire")
+        if not isinstance(token, str) or not token.strip():
+            raise FeishuAuthenticationError(
+                "Feishu authentication returned an invalid response", error=self._error_from_response(response)
+            )
+        if isinstance(expire, bool) or not isinstance(expire, (int, float)) or not math.isfinite(expire) or expire <= 0:
+            raise FeishuAuthenticationError(
+                "Feishu authentication returned an invalid response", error=self._error_from_response(response)
+            )
+        refresh_margin = 300.0 if expire >= 600 else expire / 2
+        self._tenant_token = token
+        self._token_refresh_at = self._monotonic() + expire - refresh_margin
+
+    async def _auth_response(self) -> httpx.Response:
+        for attempt in range(self._max_retries + 1):
+            request_failed = False
+            try:
+                request = self._client.build_request(
+                    "POST",
+                    f"{FEISHU_OPEN_API_BASE_URL}{FEISHU_TENANT_TOKEN_PATH}",
+                    json={"app_id": self._app_id, "app_secret": self._app_secret},
+                )
+                request.headers.pop("Authorization", None)
+                response = await self._client.send(request, auth=None)
+            except httpx.HTTPError:
+                if attempt >= self._max_retries:
+                    request_failed = True
+                else:
+                    await self._sleep(self._backoff_delay(attempt))
+                    continue
+            if request_failed:
+                raise FeishuApiError("Feishu authentication request failed")
+
+            if response.status_code == 429 or 500 <= response.status_code < 600:
+                if attempt >= self._max_retries:
+                    raise FeishuApiError(
+                        "Feishu authentication request failed", error=self._error_from_response(response)
+                    )
+                self._log_response(response)
+                await self._sleep(self._retry_delay(response, attempt))
+                continue
+            if response.is_error:
                 raise FeishuAuthenticationError(
                     "Feishu authentication failed", error=self._error_from_response(response)
                 )
-            if response.status_code == 403:
-                raise FeishuPermissionError("Feishu permission denied", error=self._error_from_response(response))
-            if response.status_code == 404:
-                raise FeishuNotFoundError("Feishu resource not found", error=self._error_from_response(response))
-            if response.is_error:
-                raise FeishuApiError("Feishu request failed", error=self._error_from_response(response))
-            self._log_response(response)
             return response
-        raise FeishuApiError("Feishu request exhausted retries")
+        raise FeishuApiError("Feishu authentication request exhausted retries")
+
+    def _invalidate_tenant_token(self, token: str) -> None:
+        if self._tenant_token == token:
+            self._tenant_token = None
+            self._token_refresh_at = 0.0
 
     @staticmethod
     def _as_mapping(value: object, field_name: str) -> Mapping[str, Any]:

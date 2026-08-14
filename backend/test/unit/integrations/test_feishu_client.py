@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 import httpx
 import pytest
 
@@ -14,21 +17,414 @@ from yuxi.integrations.feishu import (
 )
 from yuxi.integrations.feishu.schemas import FeishuNode
 
+APP_ENV = {"FEISHU_APP_ID": "test-app-id", "FEISHU_APP_SECRET": "test-app-secret"}
+TENANT_TOKEN_PATH = "/open-apis/auth/v3/tenant_access_token/internal"
+
 
 def _client(handler, **kwargs) -> FeishuClient:
-    transport = httpx.MockTransport(handler)
+    async def authenticated_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == TENANT_TOKEN_PATH:
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "test-tenant-token", "expire": 7200})
+        response = handler(request)
+        return await response if hasattr(response, "__await__") else response
+
+    transport = httpx.MockTransport(authenticated_handler)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://open.feishu.test")
-    return FeishuClient(client=http_client, environ={"FEISHU_ACCESS_TOKEN": "test-token"}, **kwargs)
+    return FeishuClient(client=http_client, environ=APP_ENV, **kwargs)
+
+
+def test_app_credential_environment_names_are_exported() -> None:
+    assert feishu_client_module.DEFAULT_APP_ID_ENV_NAME == "FEISHU_APP_ID"
+    assert feishu_client_module.DEFAULT_APP_SECRET_ENV_NAME == "FEISHU_APP_SECRET"
+    assert not hasattr(feishu_client_module, "DEFAULT_CREDENTIAL_ENV_NAME")
+
+
+@pytest.mark.parametrize(
+    ("environ", "missing_name"),
+    [
+        ({"FEISHU_APP_SECRET": "secret-value"}, "FEISHU_APP_ID"),
+        ({"FEISHU_APP_ID": "app-value"}, "FEISHU_APP_SECRET"),
+        ({"FEISHU_APP_ID": "  ", "FEISHU_APP_SECRET": "secret-value"}, "FEISHU_APP_ID"),
+        ({"FEISHU_APP_ID": "app-value", "FEISHU_APP_SECRET": "\t"}, "FEISHU_APP_SECRET"),
+    ],
+)
+def test_missing_or_blank_app_credential_is_explicit(environ: dict[str, str], missing_name: str) -> None:
+    with pytest.raises(FeishuCredentialError) as raised:
+        FeishuClient(environ=environ)
+
+    assert str(raised.value) == f"Missing Feishu credential environment variable: {missing_name}"
+    assert "app-value" not in str(raised.value)
+    assert "secret-value" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_first_business_request_exchanges_app_credentials_for_tenant_token() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == TENANT_TOKEN_PATH:
+            assert request.method == "POST"
+            assert "authorization" not in request.headers
+            assert request.headers["content-type"] == "application/json"
+            assert json.loads(request.content) == {"app_id": "test-app-id", "app_secret": "test-app-secret"}
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        assert request.method == "GET"
+        assert request.headers["authorization"] == "Bearer tenant-token"
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), headers={"Authorization": "Bearer inherited-token"}
+    )
+    client = FeishuClient(client=http_client, environ=APP_ENV)
+
+    node = await client.get_node("page-token")
+
+    assert node.node_token == "page-token"
+    assert [request.url.path for request in requests] == [TENANT_TOKEN_PATH, "/open-apis/wiki/v2/spaces/get_node"]
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tenant_token_is_reused_while_fresh() -> None:
+    auth_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV)
+
+    await client.get_node("page-token")
+    await client.get_node("page-token")
+
+    assert auth_attempts == 1
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("expire", "before_refresh", "at_refresh"),
+    [(7200, 6899.0, 6900.0), (100, 49.0, 50.0)],
+)
+async def test_tenant_token_refreshes_at_expiry_margin(expire: int, before_refresh: float, at_refresh: float) -> None:
+    now = [0.0]
+    auth_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": f"tenant-token-{auth_attempts}", "expire": expire},
+            )
+        assert request.headers["authorization"] == f"Bearer tenant-token-{auth_attempts}"
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV, monotonic=lambda: now[0])
+
+    await client.get_node("page-token")
+    now[0] = before_refresh
+    await client.get_node("page-token")
+    assert auth_attempts == 1
+
+    now[0] = at_refresh
+    await client.get_node("page-token")
+    assert auth_attempts == 2
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_requests_exchange_tenant_token_once() -> None:
+    auth_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            await asyncio.sleep(0)
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV)
+
+    await asyncio.gather(*(client.get_node("page-token") for _ in range(10)))
+
+    assert auth_attempts == 1
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "auth_response",
+    [
+        httpx.Response(200, content=b"not-json-auth-secret"),
+        httpx.Response(200, json={"code": 10003, "msg": "auth-secret", "tenant_access_token": "leaked-token"}),
+        httpx.Response(200, json={"code": 0, "expire": 7200}),
+        httpx.Response(200, json={"code": 0, "tenant_access_token": "", "expire": 7200}),
+        httpx.Response(200, json={"code": 0, "tenant_access_token": 123, "expire": 7200}),
+        httpx.Response(200, json={"code": 0, "tenant_access_token": "leaked-token", "expire": True}),
+        httpx.Response(200, json={"code": 0, "tenant_access_token": "leaked-token", "expire": 0}),
+        httpx.Response(200, json={"code": 0, "tenant_access_token": "leaked-token", "expire": -1}),
+        httpx.Response(200, json={"code": 0, "tenant_access_token": "leaked-token", "expire": "7200"}),
+    ],
+)
+async def test_invalid_auth_response_is_normalized_without_secrets(auth_response: httpx.Response) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == TENANT_TOKEN_PATH
+        return auth_response
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV)
+
+    with pytest.raises(FeishuAuthenticationError) as raised:
+        await client.get_node("page-token")
+
+    exception_text = str(raised.value)
+    assert "test-app-secret" not in exception_text
+    assert "auth-secret" not in exception_text
+    assert "leaked-token" not in exception_text
+    assert "not-json-auth-secret" not in exception_text
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_rate_limit_retries_then_succeeds() -> None:
+    auth_attempts = 0
+    delays: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            if auth_attempts == 1:
+                return httpx.Response(429, headers={"retry-after": "0.25"})
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV, sleep=fake_sleep)
+
+    await client.get_node("page-token")
+
+    assert auth_attempts == 2
+    assert delays == [0.25]
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_server_error_exhaustion_is_api_error() -> None:
+    auth_attempts = 0
+    delays: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        assert request.url.path == TENANT_TOKEN_PATH
+        auth_attempts += 1
+        return httpx.Response(503, headers={"x-request-id": "auth-request"}, content=b"auth-secret")
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV, max_retries=2, sleep=fake_sleep)
+
+    with pytest.raises(FeishuApiError) as raised:
+        await client.get_node("page-token")
+
+    assert auth_attempts == 3
+    assert delays == [1.0, 2.0]
+    assert raised.value.request_id == "auth-request"
+    assert "auth-secret" not in str(raised.value)
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_network_error_exhaustion_is_api_error() -> None:
+    auth_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        assert request.url.path == TENANT_TOKEN_PATH
+        auth_attempts += 1
+        raise httpx.ConnectError("network-auth-secret", request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV, max_retries=2, sleep=lambda delay: asyncio.sleep(0))
+
+    with pytest.raises(FeishuApiError) as raised:
+        await client.get_node("page-token")
+
+    assert auth_attempts == 3
+    assert "network-auth-secret" not in str(raised.value)
+    assert "test-app-secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_first_business_401_refreshes_and_replays_once() -> None:
+    auth_attempts = 0
+    business_tokens: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": f"tenant-token-{auth_attempts}", "expire": 7200},
+            )
+        token = request.headers["authorization"]
+        business_tokens.append(token)
+        if token == "Bearer tenant-token-1":
+            return httpx.Response(401, headers={"x-request-id": "expired-request"})
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV)
+
+    node = await client.get_node("page-token")
+
+    assert node.node_token == "page-token"
+    assert auth_attempts == 2
+    assert business_tokens == ["Bearer tenant-token-1", "Bearer tenant-token-2"]
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_business_401_stops_after_one_replay() -> None:
+    auth_attempts = 0
+    business_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts, business_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": f"tenant-token-{auth_attempts}", "expire": 7200},
+            )
+        business_attempts += 1
+        return httpx.Response(401, headers={"x-request-id": f"business-{business_attempts}"})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV)
+
+    with pytest.raises(FeishuAuthenticationError) as raised:
+        await client.get_node("page-token")
+
+    assert auth_attempts == 2
+    assert business_attempts == 2
+    assert raised.value.request_id == "business-2"
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_business_403_does_not_refresh_tenant_token() -> None:
+    auth_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        return httpx.Response(403, headers={"x-request-id": "forbidden-request"})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV)
+
+    with pytest.raises(FeishuPermissionError):
+        await client.get_node("page-token")
+
+    assert auth_attempts == 1
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [429, 503])
+async def test_business_retryable_status_exhaustion_is_api_error(status_code: int) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(status_code, headers={"x-request-id": "business-request"}, content=b"body-secret")
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    client = _client(handler, max_retries=2, sleep=fake_sleep)
+
+    with pytest.raises(FeishuApiError) as raised:
+        await client.get_node("page-token")
+
+    assert attempts == 3
+    assert delays == [1.0, 2.0]
+    assert raised.value.status_code == status_code
+    assert raised.value.request_id == "business-request"
+    assert "body-secret" not in str(raised.value)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_business_network_error_exhaustion_is_api_error_without_sensitive_cause() -> None:
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectError("business-network-secret", request=request)
+
+    client = _client(handler, max_retries=2, sleep=lambda delay: asyncio.sleep(0))
+
+    with pytest.raises(FeishuApiError) as raised:
+        await client.get_node("page-token")
+
+    assert attempts == 3
+    assert "business-network-secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_business_invalid_json_does_not_retain_response_body() -> None:
+    client = _client(lambda request: httpx.Response(200, content=b"business-json-secret"))
+
+    with pytest.raises(FeishuApiError) as raised:
+        await client.get_node("page-token")
+
+    assert "business-json-secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    await client.aclose()
 
 
 @pytest.mark.asyncio
 async def test_injected_client_does_not_require_a_base_url() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "open.feishu.cn"
+        if request.url.path == TENANT_TOKEN_PATH:
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
         return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    client = FeishuClient(client=http_client, environ={"FEISHU_ACCESS_TOKEN": "test-token"})
+    client = FeishuClient(client=http_client, environ=APP_ENV)
 
     node = await client.get_node("page-token")
 
@@ -39,7 +435,7 @@ async def test_injected_client_does_not_require_a_base_url() -> None:
 @pytest.mark.asyncio
 async def test_aclose_does_not_close_an_injected_client() -> None:
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
-    client = FeishuClient(client=http_client, environ={"FEISHU_ACCESS_TOKEN": "test-token"})
+    client = FeishuClient(client=http_client, environ=APP_ENV)
 
     await client.aclose()
 
@@ -434,8 +830,11 @@ async def test_response_logging_excludes_tokens_and_response_body(monkeypatch: p
     await client.get_node("page-token")
 
     assert log_messages == ["Feishu response: status=200, request_id=request-1"]
-    assert "test-token" not in " ".join(log_messages)
-    assert "response-secret" not in " ".join(log_messages)
+    combined_logs = " ".join(log_messages)
+    assert APP_ENV["FEISHU_APP_SECRET"] not in combined_logs
+    assert "test-tenant-token" not in combined_logs
+    assert "Bearer test-tenant-token" not in combined_logs
+    assert "response-secret" not in combined_logs
     await client.aclose()
 
 
@@ -507,8 +906,3 @@ async def test_any_server_error_retries_with_bounded_backoff() -> None:
     assert attempts == 2
     assert delays == [1.0]
     await client.aclose()
-
-
-def test_missing_credential_is_explicit() -> None:
-    with pytest.raises(FeishuCredentialError, match="FEISHU_ACCESS_TOKEN"):
-        FeishuClient(credential_env_name="FEISHU_ACCESS_TOKEN", environ={})

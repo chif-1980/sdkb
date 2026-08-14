@@ -1,5 +1,6 @@
 from yuxi.integrations.feishu.client import (
-    DEFAULT_CREDENTIAL_ENV_NAME,
+    DEFAULT_APP_ID_ENV_NAME,
+    DEFAULT_APP_SECRET_ENV_NAME,
     FeishuApiError,
     FeishuAuthenticationError,
     FeishuClient,
@@ -17,7 +18,8 @@ from yuxi.integrations.feishu.schemas import (
 )
 
 __all__ = [
-    "DEFAULT_CREDENTIAL_ENV_NAME",
+    "DEFAULT_APP_ID_ENV_NAME",
+    "DEFAULT_APP_SECRET_ENV_NAME",
     "FeishuApiError",
     "FeishuAttachment",
     "FeishuAuthenticationError",
