@@ -48,13 +48,53 @@ FEISHU_APP_SECRET=
 可用以下命令只检查 `.env.prod` 中两个变量是否为非空配置，不输出真实值；该检查不验证凭据是否有效：
 
 ```sh
-for key in FEISHU_APP_ID FEISHU_APP_SECRET; do
-  if rg -q "^${key}=[^[:space:]].*$" .env.prod; then
-    printf '%s：已配置（未显示值）\n' "$key"
-  else
-    printf '%s：未配置\n' "$key"
-  fi
-done
+if [ ! -f .env.prod ]; then
+  printf '未找到 .env.prod\n'
+  exit 1
+fi
+awk '
+function trim(value) {
+  gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+  return value
+}
+function configured(value, length_value, first, last) {
+  value = trim(value)
+  length_value = length(value)
+  if (length_value >= 2) {
+    first = substr(value, 1, 1)
+    last = substr(value, length_value, 1)
+    if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+      value = trim(substr(value, 2, length_value - 2))
+    }
+  }
+  return length(value) > 0
+}
+BEGIN {
+  keys[1] = "FEISHU_APP_ID"
+  keys[2] = "FEISHU_APP_SECRET"
+}
+{
+  for (position = 1; position <= 2; position++) {
+    key = keys[position]
+    pattern = "^[[:space:]]*" key "[[:space:]]*="
+    if ($0 ~ pattern) {
+      value = $0
+      sub(pattern, "", value)
+      values[key] = value
+    }
+  }
+}
+END {
+  for (position = 1; position <= 2; position++) {
+    key = keys[position]
+    if (configured(values[key])) {
+      printf "%s：已配置（未显示值）\n", key
+    } else {
+      printf "%s：未配置\n", key
+    }
+  }
+}
+' .env.prod
 ```
 
 ### 2. 启动服务
