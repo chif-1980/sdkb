@@ -57,7 +57,24 @@ function trim(value) {
   gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
   return value
 }
+function strip_inline_comment(value, position, character, quote) {
+  quote = ""
+  for (position = 1; position <= length(value); position++) {
+    character = substr(value, position, 1)
+    if ((character == "\"" || character == "\047") && (quote == "" || quote == character)) {
+      if (quote == "") {
+        quote = character
+      } else {
+        quote = ""
+      }
+    } else if (character == "#" && quote == "" && (position == 1 || substr(value, position - 1, 1) ~ /[[:space:]]/)) {
+      return substr(value, 1, position - 1)
+    }
+  }
+  return value
+}
 function configured(value, length_value, first, last) {
+  value = strip_inline_comment(value)
   value = trim(value)
   length_value = length(value)
   if (length_value >= 2) {
@@ -103,10 +120,10 @@ END {
 
 ```bash
 # 仅启动核心服务（CPU 模式）
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
 
 # 启动所有服务（包含 GPU OCR）
-docker compose -f docker-compose.prod.yml --profile all up -d --build
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile all up -d --build
 ```
 
 ### 3. 验证部署
@@ -140,7 +157,7 @@ docker compose -f docker-compose.prod.yml --profile all up -d --build
 PostgreSQL 可以在数据库容器内使用交互式命令修改，避免新密码出现在 shell 历史和进程参数中：
 
 ```bash
-docker compose -f docker-compose.prod.yml exec postgres psql -U postgres -d yuxi -c '\password postgres'
+docker compose --env-file .env.prod -f docker-compose.prod.yml exec postgres psql -U postgres -d yuxi -c '\password postgres'
 ```
 
 Neo4j 应使用 `cypher-shell` 的当前用户密码修改流程；MinIO 应使用 `mc admin` 或部署所采用的密钥管理流程。不要把真实密码写入文档、测试脚本或命令历史。完成凭据轮换并配置 `SANDBOX_PROVISIONER_TOKEN` 后，再执行下面的重建命令。
@@ -152,7 +169,7 @@ Neo4j 应使用 `cypher-shell` 的当前用户密码修改流程；MinIO 应使�
 git pull
 
 # 重新构建并启动
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
 ```
 
 生产 Compose 不再向宿主机发布 PostgreSQL 和文档解析服务端口。确需从宿主机维护时，优先使用 `docker compose exec`；不要为了临时调试把这些端口重新暴露到公网。
