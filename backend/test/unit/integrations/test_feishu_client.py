@@ -174,6 +174,10 @@ async def test_concurrent_first_requests_exchange_tenant_token_once() -> None:
         httpx.Response(200, json={"code": 0, "tenant_access_token": "leaked-token", "expire": 0}),
         httpx.Response(200, json={"code": 0, "tenant_access_token": "leaked-token", "expire": -1}),
         httpx.Response(200, json={"code": 0, "tenant_access_token": "leaked-token", "expire": "7200"}),
+        pytest.param(
+            httpx.Response(200, json={"code": 0, "tenant_access_token": "leaked-token", "expire": 10**309}),
+            id="overflowing-expire",
+        ),
     ],
 )
 async def test_invalid_auth_response_is_normalized_without_secrets(auth_response: httpx.Response) -> None:
@@ -221,6 +225,34 @@ async def test_auth_rate_limit_retries_then_succeeds() -> None:
 
     assert auth_attempts == 2
     assert delays == [0.25]
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_after", ["nan", "inf"])
+async def test_auth_non_finite_retry_after_uses_backoff(retry_after: str) -> None:
+    auth_attempts = 0
+    delays: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            if auth_attempts == 1:
+                return httpx.Response(429, headers={"retry-after": retry_after})
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV, sleep=fake_sleep)
+
+    await client.get_node("page-token")
+
+    assert auth_attempts == 2
+    assert delays == [1.0]
     await http_client.aclose()
 
 
@@ -306,6 +338,42 @@ async def test_first_business_401_refreshes_and_replays_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delayed_old_401_does_not_invalidate_same_value_refreshed_token() -> None:
+    auth_attempts = 0
+    business_attempts = 0
+    second_request_started = asyncio.Event()
+    refreshed_token_used = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts, business_attempts
+        if request.url.path == TENANT_TOKEN_PATH:
+            auth_attempts += 1
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "same-token", "expire": 7200})
+
+        business_attempts += 1
+        if business_attempts == 1:
+            await second_request_started.wait()
+            return httpx.Response(401)
+        if business_attempts == 2:
+            second_request_started.set()
+            await refreshed_token_used.wait()
+            return httpx.Response(401)
+        if business_attempts == 3:
+            refreshed_token_used.set()
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ=APP_ENV)
+
+    nodes = await asyncio.gather(client.get_node("page-token"), client.get_node("page-token"))
+
+    assert [node.node_token for node in nodes] == ["page-token", "page-token"]
+    assert auth_attempts == 2
+    assert business_attempts == 4
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_repeated_business_401_stops_after_one_replay() -> None:
     auth_attempts = 0
     business_attempts = 0
@@ -378,6 +446,31 @@ async def test_business_retryable_status_exhaustion_is_api_error(status_code: in
     assert raised.value.status_code == status_code
     assert raised.value.request_id == "business-request"
     assert "body-secret" not in str(raised.value)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_after", ["nan", "inf"])
+async def test_business_non_finite_retry_after_uses_backoff(retry_after: str) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"retry-after": retry_after})
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    client = _client(handler, sleep=fake_sleep)
+
+    await client.get_node("page-token")
+
+    assert attempts == 2
+    assert delays == [1.0]
     await client.aclose()
 
 

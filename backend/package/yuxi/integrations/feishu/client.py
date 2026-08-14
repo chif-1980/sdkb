@@ -85,6 +85,7 @@ class FeishuClient:
         self._app_id = app_id
         self._app_secret = app_secret
         self._tenant_token: str | None = None
+        self._token_generation = 0
         self._token_refresh_at = 0.0
         self._token_lock = asyncio.Lock()
         self._monotonic = monotonic
@@ -338,11 +339,11 @@ class FeishuClient:
         return payload
 
     async def _get_response(self, path: str, *, params: dict[str, str] | None = None) -> httpx.Response:
-        token = await self._get_tenant_token()
+        token, generation = await self._get_tenant_token()
         response = await self._get_with_retries(path, params=params, token=token)
         if response.status_code == 401:
-            self._invalidate_tenant_token(token)
-            token = await self._get_tenant_token()
+            self._invalidate_tenant_token(token, generation)
+            token, _ = await self._get_tenant_token()
             response = await self._get_with_retries(path, params=params, token=token)
             if response.status_code == 401:
                 raise FeishuAuthenticationError(
@@ -379,15 +380,15 @@ class FeishuClient:
             return response
         raise FeishuApiError("Feishu request exhausted retries")
 
-    async def _get_tenant_token(self) -> str:
+    async def _get_tenant_token(self) -> tuple[str, int]:
         if self._token_is_fresh():
             assert self._tenant_token is not None
-            return self._tenant_token
+            return self._tenant_token, self._token_generation
         async with self._token_lock:
             if not self._token_is_fresh():
                 await self._exchange_tenant_token()
         assert self._tenant_token is not None
-        return self._tenant_token
+        return self._tenant_token, self._token_generation
 
     def _token_is_fresh(self) -> bool:
         return self._tenant_token is not None and self._monotonic() < self._token_refresh_at
@@ -410,13 +411,20 @@ class FeishuClient:
             raise FeishuAuthenticationError(
                 "Feishu authentication returned an invalid response", error=self._error_from_response(response)
             )
-        if isinstance(expire, bool) or not isinstance(expire, (int, float)) or not math.isfinite(expire) or expire <= 0:
+        normalized_expire: float | None = None
+        if not isinstance(expire, bool) and isinstance(expire, (int, float)):
+            try:
+                normalized_expire = float(expire)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if normalized_expire is None or not math.isfinite(normalized_expire) or normalized_expire <= 0:
             raise FeishuAuthenticationError(
                 "Feishu authentication returned an invalid response", error=self._error_from_response(response)
             )
-        refresh_margin = 300.0 if expire >= 600 else expire / 2
+        refresh_margin = 300.0 if normalized_expire >= 600 else normalized_expire / 2
         self._tenant_token = token
-        self._token_refresh_at = self._monotonic() + expire - refresh_margin
+        self._token_generation += 1
+        self._token_refresh_at = self._monotonic() + normalized_expire - refresh_margin
 
     async def _auth_response(self) -> httpx.Response:
         for attempt in range(self._max_retries + 1):
@@ -453,8 +461,8 @@ class FeishuClient:
             return response
         raise FeishuApiError("Feishu authentication request exhausted retries")
 
-    def _invalidate_tenant_token(self, token: str) -> None:
-        if self._tenant_token == token:
+    def _invalidate_tenant_token(self, token: str, generation: int) -> None:
+        if self._tenant_token == token and self._token_generation == generation:
             self._tenant_token = None
             self._token_refresh_at = 0.0
 
@@ -542,9 +550,12 @@ class FeishuClient:
         retry_after = response.headers.get("retry-after")
         if retry_after:
             try:
-                return min(max(float(retry_after), 0.0), 60.0)
-            except ValueError:
+                retry_delay = float(retry_after)
+            except (TypeError, ValueError, OverflowError):
                 pass
+            else:
+                if math.isfinite(retry_delay):
+                    return min(max(retry_delay, 0.0), 60.0)
         return cls._backoff_delay(attempt)
 
     @classmethod
