@@ -82,3 +82,4 @@ docs/vibe
 /models
 
 .taskr/
+.worktrees/
