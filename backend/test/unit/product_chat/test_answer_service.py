@@ -1,0 +1,291 @@
+import json
+from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
+
+from yuxi.product_chat.answer_service import (
+    INSUFFICIENT_TEXT,
+    NO_MODEL_VERSION,
+    PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    AnswerService,
+)
+from yuxi.product_chat.source_policy_service import ProductKnowledgeScope
+
+
+pytestmark = pytest.mark.unit
+
+
+PUBLISHED_AT = datetime(2026, 8, 16, 8, 0, tzinfo=UTC)
+
+
+def _published_material(file_id: str, *, item_id: str = "item-1", title: str = "产品手册"):
+    item = SimpleNamespace(
+        source_id="source-1",
+        item_id=item_id,
+        title=title,
+        source_url=f"https://example.test/{item_id}",
+        path_text="产品 / 手册",
+    )
+    version = SimpleNamespace(
+        version_id=f"version-{item_id}",
+        yuxi_file_id=file_id,
+        published_at=PUBLISHED_AT,
+    )
+    return item, version
+
+
+class _PolicyService:
+    def __init__(self, allowed_file_ids=("file-1", "file-2")):
+        self.scope = ProductKnowledgeScope(
+            source_id="source-1",
+            kb_id="kb-1",
+            allowed_file_ids=tuple(allowed_file_ids),
+        )
+        self.calls = []
+
+    async def resolve_scope(self, user):
+        self.calls.append(user)
+        return self.scope
+
+
+class _KnowledgeManager:
+    def __init__(self, chunks, *, error=None):
+        self.chunks = chunks
+        self.error = error
+        self.query_calls = []
+        self.info_calls = []
+
+    async def aquery(self, question, kb_id, **kwargs):
+        self.query_calls.append((question, kb_id, kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.chunks
+
+    async def get_database_info(self, kb_id):
+        self.info_calls.append(kb_id)
+        return {"llm_model_spec": "provider:model-1"}
+
+
+class _Repository:
+    def __init__(self, published):
+        self.published = published
+        self.calls = []
+
+    async def get_published_evidence(self, source_id, file_ids):
+        self.calls.append((source_id, tuple(file_ids)))
+        return self.published
+
+
+class _Model:
+    def __init__(self, content=None, *, error=None):
+        self.content = content
+        self.error = error
+        self.model_name = "model-1"
+        self.calls = []
+
+    async def call(self, prompt):
+        self.calls.append(prompt)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(content=self.content)
+
+
+class _ModelSelector:
+    def __init__(self, model):
+        self.model = model
+        self.calls = []
+
+    def __call__(self, model_spec):
+        self.calls.append(model_spec)
+        return self.model
+
+
+def _service(*, chunks, published, model_content=None, retrieval_error=None, model_error=None):
+    policy = _PolicyService()
+    knowledge = _KnowledgeManager(chunks, error=retrieval_error)
+    repository = _Repository(published)
+    model = _Model(model_content, error=model_error)
+    selector = _ModelSelector(model)
+    service = AnswerService(
+        db=object(),
+        repository=repository,
+        policy_service=policy,
+        knowledge_base=knowledge,
+        model_selector=selector,
+    )
+    return service, policy, knowledge, repository, model, selector
+
+
+@pytest.mark.asyncio
+async def test_supported_answer_uses_only_revalidated_evidence_in_retrieval_order():
+    current = _published_material("file-1")
+    chunks = [
+        {"content": "支持在企业内网私有部署。", "metadata": {"file_id": "file-1", "chunk_index": 2}},
+        {"content": "已经撤回的旧内容", "metadata": {"file_id": "file-stale", "chunk_index": 0}},
+    ]
+    payload = json.dumps(
+        {"status": "SUPPORTED", "answer": "该产品支持企业内网私有部署。", "citation_ids": ["E1"]},
+        ensure_ascii=False,
+    )
+    service, policy, knowledge, repository, model, selector = _service(
+        chunks=chunks,
+        published={"file-1": current},
+        model_content=payload,
+    )
+
+    result = await service.answer("是否支持私有部署？", {"id": 7}, "conversation-1")
+
+    assert result.status == "SUPPORTED"
+    assert result.content == "该产品支持企业内网私有部署。"
+    assert result.model_version == "model-1"
+    assert result.prompt_version == PROMPT_VERSION
+    assert len(result.citations) == 1
+    citation = result.citations[0]
+    assert citation.evidence_id == "E1"
+    assert citation.item_id == "item-1"
+    assert citation.version_id == "version-item-1"
+    assert citation.yuxi_file_id == "file-1"
+    assert citation.title == "产品手册"
+    assert citation.source_url == "https://example.test/item-1"
+    assert citation.path_text == "产品 / 手册"
+    assert citation.locator == "第3段"
+    assert citation.excerpt == "支持在企业内网私有部署。"
+    assert citation.source_version_at == PUBLISHED_AT
+    with pytest.raises(FrozenInstanceError):
+        citation.title = "changed"
+
+    assert policy.calls == [{"id": 7}]
+    assert knowledge.query_calls == [
+        (
+            "是否支持私有部署？",
+            "kb-1",
+            {
+                "search_mode": "hybrid",
+                "allowed_file_ids": ["file-1", "file-2"],
+                "use_graph_retrieval": False,
+            },
+        )
+    ]
+    assert repository.calls == [("source-1", ("file-1", "file-stale"))]
+    assert knowledge.info_calls == ["kb-1"]
+    assert selector.calls == ["provider:model-1"]
+    assert len(model.calls) == 1
+    assert SYSTEM_PROMPT in model.calls[0]
+    assert '"evidence_id": "E1"' in model.calls[0]
+    assert "已经撤回的旧内容" not in model.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_empty_revalidated_evidence_returns_exact_insufficient_without_model_call():
+    service, _policy, knowledge, _repository, model, selector = _service(
+        chunks=[{"content": "旧内容", "metadata": {"file_id": "file-stale"}}],
+        published={},
+    )
+
+    result = await service.answer("问题", object(), "conversation-1")
+
+    assert result.status == "INSUFFICIENT"
+    assert result.content == INSUFFICIENT_TEXT
+    assert result.citations == ()
+    assert result.model_version == NO_MODEL_VERSION
+    assert result.prompt_version == PROMPT_VERSION
+    assert selector.calls == []
+    assert model.calls == []
+    assert knowledge.info_calls == []
+
+
+@pytest.mark.asyncio
+async def test_conflicting_answer_keeps_model_citation_order_and_deduplicates_ids():
+    chunks = [
+        {"content": "标准版支持 100 人。", "metadata": {"file_id": "file-1"}},
+        {"content": "标准版支持 80 人。", "metadata": {"file_id": "file-2", "chunk_index": 0}},
+    ]
+    payload = json.dumps(
+        {
+            "status": "CONFLICTING",
+            "answer": "两份现行资料分别写明 80 人和 100 人。",
+            "citation_ids": ["E2", "E1", "E2"],
+        },
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=chunks,
+        published={
+            "file-1": _published_material("file-1", item_id="item-1"),
+            "file-2": _published_material("file-2", item_id="item-2", title="规格说明"),
+        },
+        model_content=payload,
+    )
+
+    result = await service.answer("标准版支持多少人？", object(), "conversation-1")
+
+    assert result.status == "CONFLICTING"
+    assert result.content == "两份现行资料分别写明 80 人和 100 人。"
+    assert [citation.evidence_id for citation in result.citations] == ["E2", "E1"]
+    assert [citation.locator for citation in result.citations] == ["第1段", "文档正文"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_content",
+    [
+        "not-json",
+        '```json\n{"status":"SUPPORTED","answer":"回答","citation_ids":["E1"]}\n```',
+        json.dumps({"status": "SUPPORTED", "answer": "回答", "citation_ids": ["E9"]}),
+        json.dumps({"status": "SUPPORTED", "answer": "   ", "citation_ids": ["E1"]}),
+        json.dumps({"status": "SUPPORTED", "answer": "回答", "citation_ids": []}),
+    ],
+    ids=["invalid-json", "json-fence", "unknown-evidence", "empty-answer", "missing-citation"],
+)
+async def test_invalid_model_payloads_fall_back_to_exact_insufficient(model_content):
+    service, *_rest, model, _selector = _service(
+        chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": _published_material("file-1")},
+        model_content=model_content,
+    )
+
+    result = await service.answer("问题", object(), "conversation-1")
+
+    assert result.status == "INSUFFICIENT"
+    assert result.content == INSUFFICIENT_TEXT
+    assert result.citations == ()
+    assert result.model_version == "model-1"
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_model_insufficient_status_forces_exact_text_and_no_citations():
+    payload = json.dumps(
+        {"status": "INSUFFICIENT", "answer": "模型自定义不足说明", "citation_ids": ["E1"]},
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": _published_material("file-1")},
+        model_content=payload,
+    )
+
+    result = await service.answer("问题", object(), "conversation-1")
+
+    assert result.status == "INSUFFICIENT"
+    assert result.content == INSUFFICIENT_TEXT
+    assert result.citations == ()
+    assert result.model_version == "model-1"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_and_model_failures_propagate():
+    service, *_ = _service(chunks=[], published={}, retrieval_error=RuntimeError("retrieval unavailable"))
+    with pytest.raises(RuntimeError, match="retrieval unavailable"):
+        await service.answer("问题", object(), "conversation-1")
+
+    service, *_ = _service(
+        chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": _published_material("file-1")},
+        model_error=RuntimeError("model unavailable"),
+    )
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        await service.answer("问题", object(), "conversation-1")
