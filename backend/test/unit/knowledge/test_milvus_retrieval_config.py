@@ -130,6 +130,51 @@ async def test_aquery_applies_allowed_file_filter_to_every_search_mode(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_aquery_with_none_allowed_files_runs_unfiltered_search(monkeypatch):
+    kb = object.__new__(MilvusKB)
+    collection = _RecordingCollection()
+    kb.databases_meta = {"kb-1": {"embedding_model_spec": "fake"}}
+    monkeypatch.setattr(kb, "_get_milvus_collection", lambda kb_id: _async_value(collection))
+    monkeypatch.setattr(kb, "_get_query_params", lambda kb_id: {})
+    monkeypatch.setattr(kb, "_build_file_name_expr", lambda kb_id, file_name: _async_value(None))
+    monkeypatch.setattr(kb, "_get_embedding_function", lambda spec, sync=False: lambda values: [[0.1]])
+
+    await kb.aquery("query", "kb-1", allowed_file_ids=None, include_distances=False)
+
+    assert len(collection.search_calls) == 1
+    assert collection.search_calls[0]["expr"] is None
+
+
+@pytest.mark.asyncio
+async def test_aquery_with_allowed_files_disables_graph_retrieval(monkeypatch):
+    kb = object.__new__(MilvusKB)
+    collection = _RecordingCollection()
+    graph_calls = []
+    kb.databases_meta = {"kb-1": {"embedding_model_spec": "fake"}}
+
+    async def fail_graph_retrieval(*args, **kwargs):
+        graph_calls.append((args, kwargs))
+        raise AssertionError("Graph retrieval must not run with a file whitelist")
+
+    monkeypatch.setattr(kb, "_get_milvus_collection", lambda kb_id: _async_value(collection))
+    monkeypatch.setattr(kb, "_get_query_params", lambda kb_id: {})
+    monkeypatch.setattr(kb, "_build_file_name_expr", lambda kb_id, file_name: _async_value(None))
+    monkeypatch.setattr(kb, "_get_embedding_function", lambda spec, sync=False: lambda values: [[0.1]])
+    monkeypatch.setattr(kb, "_retrieve_graph_chunks", fail_graph_retrieval)
+
+    await kb.aquery(
+        "query",
+        "kb-1",
+        allowed_file_ids=["file-current"],
+        use_graph_retrieval=True,
+        include_distances=False,
+    )
+
+    assert collection.search_calls[0]["expr"] == '(file_id in ["file-current"])'
+    assert graph_calls == []
+
+
+@pytest.mark.asyncio
 async def test_aquery_with_empty_allowed_files_does_not_touch_milvus(monkeypatch):
     kb = object.__new__(MilvusKB)
     calls = []

@@ -928,7 +928,11 @@ class MilvusKB(KnowledgeBase):
 
     async def aquery(self, query_text: str, kb_id: str, agent_call: bool = False, **kwargs) -> list[dict]:
         """异步查询知识库"""
-        if "allowed_file_ids" in kwargs and not kwargs["allowed_file_ids"]:
+        if (
+            "allowed_file_ids" in kwargs
+            and kwargs["allowed_file_ids"] is not None
+            and not kwargs["allowed_file_ids"]
+        ):
             return []
 
         query_params = self._get_query_params(kb_id)
