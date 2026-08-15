@@ -241,6 +241,33 @@ async def test_repository_revalidates_only_active_formal_material_versions(db_se
     assert result == {"file-current": current}
 
 
+async def test_repository_rejects_evidence_when_source_is_disabled(db_session):
+    db_session.add(
+        FeishuSource(
+            source_id="source-disabled",
+            name="Disabled Wiki",
+            wiki_root_token="root-disabled",
+            target_kb_id="kb-disabled",
+            credential_env_name="FEISHU_TOKEN_DISABLED",
+            enabled=False,
+        )
+    )
+    _add_material(
+        db_session,
+        item_id="disabled-source-item",
+        file_id="file-disabled-source",
+        source_id="source-disabled",
+    )
+    await db_session.commit()
+
+    result = await ProductChatRepository(db_session).get_published_evidence(
+        "source-disabled",
+        ["file-disabled-source"],
+    )
+
+    assert result == {}
+
+
 async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db_session):
     from yuxi.product_chat.answer_service import AnswerService
 
@@ -276,7 +303,7 @@ async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db
         def __init__(self):
             self.calls = 0
 
-        async def call(self, prompt):
+        async def call(self, prompt, stream=False):
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("model unavailable")

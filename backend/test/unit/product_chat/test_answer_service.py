@@ -86,8 +86,8 @@ class _Model:
         self.model_name = "model-1"
         self.calls = []
 
-    async def call(self, prompt):
-        self.calls.append(prompt)
+    async def call(self, message, stream=None):
+        self.calls.append((message, stream))
         if self.error is not None:
             raise self.error
         return SimpleNamespace(content=self.content)
@@ -173,9 +173,30 @@ async def test_supported_answer_uses_only_revalidated_evidence_in_retrieval_orde
     assert knowledge.info_calls == ["kb-1"]
     assert selector.calls == ["provider:model-1"]
     assert len(model.calls) == 1
-    assert SYSTEM_PROMPT in model.calls[0]
-    assert '"evidence_id": "E1"' in model.calls[0]
-    assert "已经撤回的旧内容" not in model.calls[0]
+    expected_evidence = json.dumps(
+        [
+            {
+                "evidence_id": "E1",
+                "title": "产品手册",
+                "locator": "第3段",
+                "excerpt": "支持在企业内网私有部署。",
+                "source_version_at": PUBLISHED_AT.isoformat(),
+            }
+        ],
+        ensure_ascii=False,
+    )
+    assert model.calls == [
+        (
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"EVIDENCE:\n{expected_evidence}\n\nQUESTION:\n是否支持私有部署？",
+                },
+            ],
+            False,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -237,8 +258,16 @@ async def test_conflicting_answer_keeps_model_citation_order_and_deduplicates_id
         json.dumps({"status": "SUPPORTED", "answer": "回答", "citation_ids": ["E9"]}),
         json.dumps({"status": "SUPPORTED", "answer": "   ", "citation_ids": ["E1"]}),
         json.dumps({"status": "SUPPORTED", "answer": "回答", "citation_ids": []}),
+        json.dumps({"status": [], "answer": "回答", "citation_ids": ["E1"]}),
     ],
-    ids=["invalid-json", "json-fence", "unknown-evidence", "empty-answer", "missing-citation"],
+    ids=[
+        "invalid-json",
+        "json-fence",
+        "unknown-evidence",
+        "empty-answer",
+        "missing-citation",
+        "non-string-status",
+    ],
 )
 async def test_invalid_model_payloads_fall_back_to_exact_insufficient(model_content):
     service, *_rest, model, _selector = _service(
@@ -254,6 +283,35 @@ async def test_invalid_model_payloads_fall_back_to_exact_insufficient(model_cont
     assert result.citations == ()
     assert result.model_version == "model-1"
     assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_conflicting_answer_requires_at_least_two_valid_citations():
+    payload = json.dumps(
+        {
+            "status": "CONFLICTING",
+            "answer": "两份现行资料存在冲突。",
+            "citation_ids": ["E1"],
+        },
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=[
+            {"content": "标准版支持 100 人。", "metadata": {"file_id": "file-1"}},
+            {"content": "标准版支持 80 人。", "metadata": {"file_id": "file-2"}},
+        ],
+        published={
+            "file-1": _published_material("file-1", item_id="item-1"),
+            "file-2": _published_material("file-2", item_id="item-2"),
+        },
+        model_content=payload,
+    )
+
+    result = await service.answer("标准版支持多少人？", object(), "conversation-1")
+
+    assert result.status == "INSUFFICIENT"
+    assert result.content == INSUFFICIENT_TEXT
+    assert result.citations == ()
 
 
 @pytest.mark.asyncio

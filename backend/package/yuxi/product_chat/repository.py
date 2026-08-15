@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion, FeishuSourceItem
+from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion, FeishuSource, FeishuSourceItem
 from yuxi.storage.postgres.models_product import (
     CitationKind,
     ConversationStatus,
@@ -160,7 +160,10 @@ class ProductChatRepository:
                 FeishuMaterialVersion,
                 FeishuSourceItem.active_version_id == FeishuMaterialVersion.version_id,
             )
+            .join(FeishuSource, FeishuSource.source_id == FeishuSourceItem.source_id)
             .where(
+                FeishuSource.source_id == source_id,
+                FeishuSource.enabled.is_(True),
                 FeishuSourceItem.source_id == source_id,
                 FeishuSourceItem.source_validity == "valid",
                 FeishuMaterialVersion.processing_status == "published",

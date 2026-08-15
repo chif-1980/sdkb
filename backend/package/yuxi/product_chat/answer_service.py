@@ -99,7 +99,7 @@ class AnswerService:
                 database_info = await self._knowledge_base.get_database_info(scope.kb_id)
                 model_spec = database_info.get("llm_model_spec") if isinstance(database_info, dict) else None
                 model = self._model_selector(model_spec)
-                response = await model.call(self._build_prompt(question, evidence))
+                response = await model.call(self._build_prompt(question, evidence), stream=False)
                 result = self._parse_model_response(
                     getattr(response, "content", None),
                     evidence,
@@ -173,7 +173,7 @@ class AnswerService:
         return tuple(evidence)
 
     @staticmethod
-    def _build_prompt(question: str, evidence: tuple[GroundedCitation, ...]) -> str:
+    def _build_prompt(question: str, evidence: tuple[GroundedCitation, ...]) -> list[dict[str, str]]:
         evidence_payload = [
             {
                 "evidence_id": citation.evidence_id,
@@ -186,9 +186,11 @@ class AnswerService:
             }
             for citation in evidence
         ]
-        return (
-            f"{SYSTEM_PROMPT}\n\nEVIDENCE:\n{json.dumps(evidence_payload, ensure_ascii=False)}\n\nQUESTION:\n{question}"
-        )
+        user_content = f"EVIDENCE:\n{json.dumps(evidence_payload, ensure_ascii=False)}\n\nQUESTION:\n{question}"
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
 
     @classmethod
     def _parse_model_response(
@@ -211,7 +213,8 @@ class AnswerService:
         content = payload["answer"]
         citation_ids = payload["citation_ids"]
         if (
-            status not in {"SUPPORTED", "INSUFFICIENT", "CONFLICTING"}
+            not isinstance(status, str)
+            or status not in {"SUPPORTED", "INSUFFICIENT", "CONFLICTING"}
             or not isinstance(content, str)
             or not isinstance(citation_ids, list)
             or any(not isinstance(evidence_id, str) for evidence_id in citation_ids)
