@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
@@ -21,17 +23,25 @@ from yuxi.product_chat.schemas import ProductUserResponse, SessionResponse
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.redis import get_async_redis_client
 
+logger = logging.getLogger(__name__)
+_FEISHU_CALLBACK_ROUTE_SUFFIXES = ("/auth/feishu/callback", "/auth/feishu/callback/")
+
 
 class ProductAuthRoute(APIRoute):
     def get_route_handler(self):
         route_handler = super().get_route_handler()
-        if not self.path.endswith("/auth/feishu/callback"):
+        if not self.path.endswith(_FEISHU_CALLBACK_ROUTE_SUFFIXES):
             return route_handler
 
         async def callback_route_handler(request: Request) -> Response:
             try:
                 return await route_handler(request)
-            except Exception:
+            except Exception as exc:
+                logger.error(
+                    "event=product_auth_callback_unexpected_error exception_type=%s error_id=%s",
+                    type(exc).__name__,
+                    uuid4().hex,
+                )
                 return RedirectResponse(url="/login?error=FEISHU_OAUTH_FAILED", status_code=303)
 
         return callback_route_handler
@@ -66,6 +76,7 @@ async def feishu_login(
 
 
 @product_auth.get("/auth/feishu/callback")
+@product_auth.get("/auth/feishu/callback/", include_in_schema=False)
 async def feishu_callback(
     code: str | None = None,
     state: str | None = None,
@@ -76,8 +87,6 @@ async def feishu_callback(
     except ProductAuthError as exc:
         error_query = urlencode({"error": exc.code})
         return RedirectResponse(url=f"/login?{error_query}", status_code=303)
-    except Exception:
-        return RedirectResponse(url="/login?error=FEISHU_OAUTH_FAILED", status_code=303)
 
     response = RedirectResponse(url="/chat", status_code=303)
     response.set_cookie(

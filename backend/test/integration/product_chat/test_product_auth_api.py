@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 from datetime import timedelta
 
 import pytest
@@ -24,7 +25,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 class FakeProductAuthService:
     def __init__(self, user: User):
         self.user = user
-        self.callback_error: ProductAuthError | None = None
+        self.callback_error: Exception | None = None
 
     async def create_login_url(self, return_path: str = "/chat") -> str:
         assert return_path == "/chat"
@@ -126,7 +127,7 @@ async def test_callback_sets_product_cookie_and_redirects_to_chat(api_context, m
     assert "Secure" in cookie
 
 
-async def test_callback_redirects_with_stable_error_code_only(api_context):
+async def test_callback_redirects_with_stable_error_code_only(api_context, caplog):
     client, service, _, _, _ = api_context
     service.callback_error = ProductAuthError(
         code="FEISHU_OAUTH_STATE_INVALID",
@@ -139,6 +140,7 @@ async def test_callback_redirects_with_stable_error_code_only(api_context):
     assert response.status_code == 303
     assert response.headers["location"] == "/login?error=FEISHU_OAUTH_STATE_INVALID"
     assert "sensitive" not in response.headers["location"]
+    assert "product_auth_callback_unexpected_error" not in caplog.text
 
 
 async def test_session_rejects_bearer_admin_token_without_product_cookie(api_context):
@@ -223,40 +225,73 @@ async def test_logout_clears_product_cookie(api_context):
     assert "SameSite=lax" in cookie
 
 
-async def test_callback_access_log_excludes_code_state_token_and_cookie(api_context):
+@pytest.mark.parametrize(
+    "callback_path",
+    ["/api/auth/feishu/callback", "/api/auth/feishu/callback/"],
+)
+async def test_callback_access_log_excludes_code_state_token_and_cookie(api_context, callback_path):
     client, _, _, access_log, _ = api_context
 
-    await client.get(
-        "/api/auth/feishu/callback",
+    response = await client.get(
+        callback_path,
         params={"code": "secret-oauth-code", "state": "secret-oauth-state"},
+        headers={"Cookie": "upstream_session=secret-cookie-value"},
     )
 
     logged = access_log.getvalue()
-    assert "/api/auth/feishu/callback" in logged
+    assert response.status_code == 303
+    assert "secret-oauth-code" not in response.headers["location"]
+    assert "secret-oauth-state" not in response.headers["location"]
+    assert callback_path in logged
     assert "secret-oauth-code" not in logged
     assert "secret-oauth-state" not in logged
-    assert "enterprise_assistant_session" not in logged
+    assert "secret-cookie-value" not in logged
 
 
-async def test_callback_dependency_failure_redirects_without_exposing_secrets(api_context, caplog):
-    client, _, _, access_log, app = api_context
+@pytest.mark.parametrize("failure_origin", ["service", "dependency"])
+async def test_callback_unexpected_failure_redirects_and_logs_safely(
+    api_context,
+    caplog,
+    failure_origin,
+):
+    client, service, _, access_log, app = api_context
+    exception_text = "sensitive dependency failure"
 
     async def failing_service_dependency():
-        raise RuntimeError("sensitive dependency failure")
+        raise RuntimeError(exception_text)
 
-    app.dependency_overrides[get_product_auth_service] = failing_service_dependency
+    if failure_origin == "service":
+        service.callback_error = RuntimeError(exception_text)
+    else:
+        app.dependency_overrides[get_product_auth_service] = failing_service_dependency
 
     response = await client.get(
         "/api/auth/feishu/callback",
         params={"code": "secret-oauth-code", "state": "secret-oauth-state"},
+        headers={"Cookie": "upstream_session=secret-cookie-value"},
     )
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login?error=FEISHU_OAUTH_FAILED"
     exposed_text = response.text + response.headers["location"] + access_log.getvalue() + caplog.text
-    assert "sensitive dependency failure" not in exposed_text
+    assert exception_text not in exposed_text
     assert "secret-oauth-code" not in exposed_text
     assert "secret-oauth-state" not in exposed_text
+    assert "secret-cookie-value" not in exposed_text
+
+    diagnostic_records = [
+        record
+        for record in caplog.records
+        if record.name == "server.routers.product_auth_router"
+        and record.getMessage().startswith("event=product_auth_callback_unexpected_error ")
+    ]
+    assert len(diagnostic_records) == 1
+    assert re.fullmatch(
+        r"event=product_auth_callback_unexpected_error "
+        r"exception_type=RuntimeError error_id=[0-9a-f]{32}",
+        diagnostic_records[0].getMessage(),
+    )
+    assert diagnostic_records[0].exc_info is None
 
 
 async def test_product_session_token_is_rejected_by_existing_bearer_api(api_context):

@@ -9,7 +9,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 # 创建专用的访问日志记录器
 access_logger = logging.getLogger("access_logger")
-_QUERY_REDACTED_PATHS = frozenset({"/api/auth/feishu/callback"})
+_QUERY_REDACTED_PATHS = frozenset(
+    {
+        "/api/auth/feishu/callback",
+        "/api/auth/feishu/callback/",
+    }
+)
 
 # 设置访问日志记录器
 if not access_logger.handlers:
