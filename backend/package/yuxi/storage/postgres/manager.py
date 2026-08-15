@@ -116,6 +116,24 @@ class PostgresManager(metaclass=SingletonMeta):
         """Ensure enterprise assistant indexes exist."""
         self._check_initialized()
         stmts = [
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'message_citations'
+                      AND column_name = 'locator'
+                      AND data_type IN ('json', 'jsonb')
+                ) THEN
+                    ALTER TABLE message_citations
+                    ALTER COLUMN locator TYPE TEXT
+                    USING (locator::jsonb #>> '{}');
+                END IF;
+            END
+            $$
+            """,
             (
                 "CREATE INDEX IF NOT EXISTS ix_product_conversations_owner_status_updated "
                 "ON product_conversations (owner_user_id, status, updated_at)"

@@ -1,4 +1,5 @@
 import inspect
+import json
 import os
 from collections import Counter
 from uuid import uuid4
@@ -102,7 +103,21 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         "CREATE INDEX IF NOT EXISTS ix_message_citations_message_id ON message_citations (message_id)",
         "CREATE INDEX IF NOT EXISTS ix_message_citations_version_id ON message_citations (version_id)",
     }
-    assert Counter(connection.statements) == Counter({statement: 2 for statement in expected_indexes})
+    statement_counts = Counter(connection.statements)
+    for statement in expected_indexes:
+        assert statement_counts[statement] == 2
+
+    migration_statements = [
+        statement
+        for statement in connection.statements
+        if "ALTER COLUMN locator TYPE TEXT" in statement
+    ]
+    assert len(migration_statements) == 2
+    assert len(connection.statements) == 2 * (len(expected_indexes) + 1)
+    assert connection.statements[0] == connection.statements[5] == migration_statements[0]
+    assert all(statement == migration_statements[0] for statement in migration_statements)
+    assert "data_type IN ('json', 'jsonb')" in migration_statements[0]
+    assert "locator::jsonb #>> '{}'" in migration_statements[0]
 
     assert set(BusinessBase.metadata.tables["product_messages"].columns.keys()) == {
         "id",
@@ -247,6 +262,122 @@ async def test_product_schema_is_idempotent_in_real_postgres():
         ):
             assert expected in schema["checks"]["product_messages"]
         assert "ENTERPRISE_EVIDENCE" in schema["checks"]["message_citations"]
+    finally:
+        manager._initialized, manager.async_engine = original_initialized, original_engine
+        try:
+            if schema_created:
+                async with engine.begin() as connection:
+                    await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
+        finally:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_product_schema_migrates_legacy_jsonb_locator_to_text():
+    postgres_url = os.getenv("POSTGRES_URL")
+    if not postgres_url:
+        pytest.skip("POSTGRES_URL is not configured for the PostgreSQL product schema integration test.")
+
+    schema_name = f"product_locator_migration_{uuid4().hex}"
+    engine = create_async_engine(postgres_url)
+    manager = PostgresManager()
+    original_initialized, original_engine = manager._initialized, manager.async_engine
+    schema_created = False
+
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+            schema_created = True
+            await connection.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
+            for legacy_table_ddl in (
+                """
+                CREATE TABLE product_conversations (
+                    owner_user_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE product_messages (
+                    conversation_id TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE message_citations (
+                    message_id TEXT NOT NULL,
+                    version_id TEXT NOT NULL,
+                    locator JSONB NOT NULL
+                )
+                """,
+            ):
+                await connection.execute(text(legacy_table_ddl))
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO message_citations (message_id, version_id, locator)
+                    VALUES
+                        ('object', 'version-1', CAST(:object_locator AS JSONB)),
+                        ('array', 'version-2', CAST(:array_locator AS JSONB)),
+                        ('string', 'version-3', CAST(:string_locator AS JSONB))
+                    """
+                ),
+                {
+                    "object_locator": '{"page":3,"sections":[1,2]}',
+                    "array_locator": '[1,2,{"label":"A B"}]',
+                    "string_locator": '"section-3"',
+                },
+            )
+
+        manager._initialized = True
+        manager.async_engine = _SearchPathEngine(engine, schema_name)
+        for _ in range(2):
+            await manager.ensure_product_schema()
+
+        async with engine.connect() as connection:
+            column = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT data_type, is_nullable
+                        FROM information_schema.columns
+                        WHERE table_schema = :schema_name
+                          AND table_name = 'message_citations'
+                          AND column_name = 'locator'
+                        """
+                    ),
+                    {"schema_name": schema_name},
+                )
+            ).one()
+            locator_rows = (
+                await connection.execute(
+                    text(f'SELECT message_id, locator FROM "{schema_name}".message_citations')
+                )
+            ).all()
+            index_names = set(
+                (
+                    await connection.execute(
+                        text("SELECT indexname FROM pg_indexes WHERE schemaname = :schema_name"),
+                        {"schema_name": schema_name},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        locator_by_message = {row.message_id: row.locator for row in locator_rows}
+        assert column.data_type == "text"
+        assert column.is_nullable == "NO"
+        assert json.loads(locator_by_message["object"]) == {"page": 3, "sections": [1, 2]}
+        assert json.loads(locator_by_message["array"]) == [1, 2, {"label": "A B"}]
+        assert locator_by_message["string"] == "section-3"
+        assert index_names >= {
+            "ix_product_conversations_owner_status_updated",
+            "ix_product_messages_conversation_created",
+            "ix_message_citations_message_id",
+            "ix_message_citations_version_id",
+        }
     finally:
         manager._initialized, manager.async_engine = original_initialized, original_engine
         try:
