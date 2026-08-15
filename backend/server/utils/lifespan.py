@@ -25,6 +25,7 @@ async def lifespan(app: FastAPI):
     try:
         pg_manager.initialize()
         await pg_manager.create_tables()
+        await pg_manager.ensure_product_schema()
         await pg_manager.ensure_business_schema()
         await pg_manager.ensure_knowledge_schema()
     except Exception as e:

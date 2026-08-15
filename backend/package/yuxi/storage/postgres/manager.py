@@ -4,6 +4,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 
+import yuxi.storage.postgres.models_product  # noqa: F401
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -110,6 +111,26 @@ class PostgresManager(metaclass=SingletonMeta):
             await conn.run_sync(KnowledgeBase.metadata.create_all)
             await conn.run_sync(BusinessBase.metadata.create_all)
         logger.info("PostgreSQL tables created/checked (knowledge + business)")
+
+    async def ensure_product_schema(self):
+        """Ensure enterprise assistant indexes exist."""
+        self._check_initialized()
+        stmts = [
+            (
+                "CREATE INDEX IF NOT EXISTS ix_product_conversations_owner_status_updated "
+                "ON product_conversations (owner_user_id, status, updated_at)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_product_messages_conversation_created "
+                "ON product_messages (conversation_id, created_at)"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_message_citations_message_id ON message_citations (message_id)",
+            "CREATE INDEX IF NOT EXISTS ix_message_citations_version_id ON message_citations (version_id)",
+        ]
+
+        async with self.async_engine.begin() as conn:
+            for stmt in stmts:
+                await conn.execute(text(stmt))
 
     async def create_business_tables(self):
         """创建所有业务数据表"""
