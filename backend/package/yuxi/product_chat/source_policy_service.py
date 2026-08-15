@@ -48,8 +48,6 @@ class ProductSourcePolicyService:
         try:
             if not await self._policy_manager().check_policy_accessible(user_dict, source.target_kb_id):
                 raise ProductAuthError("KNOWLEDGE_ACCESS_DENIED", 403)
-        except ProductAuthError:
-            raise
         except Exception as exc:
             raise ProductAuthError("KNOWLEDGE_ACCESS_DENIED", 403) from exc
 

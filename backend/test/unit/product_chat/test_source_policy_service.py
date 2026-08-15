@@ -49,6 +49,11 @@ class _PolicyManager:
         return self.accessible
 
 
+class _FailingPolicyManager:
+    async def check_policy_accessible(self, user, kb_id):
+        raise ProductAuthError("AUTH_SERVICE_UNAVAILABLE", 503)
+
+
 async def test_resolve_scope_rejects_a_missing_source(db_session):
     with pytest.raises(ProductAuthError) as exc_info:
         await ProductSourcePolicyService(
@@ -261,3 +266,26 @@ async def test_policy_errors_are_exposed_as_access_denied_without_retrieval(db_s
         ).resolve_scope(_user())
 
     assert exc_info.value.code == "KNOWLEDGE_ACCESS_DENIED"
+
+
+async def test_policy_manager_auth_errors_are_normalized_to_access_denied(db_session):
+    db_session.add(
+        FeishuSource(
+            source_id="source-1",
+            name="Wiki",
+            wiki_root_token="root",
+            target_kb_id="kb-1",
+            credential_env_name="FEISHU_TOKEN",
+            enabled=True,
+        )
+    )
+    await db_session.commit()
+
+    with pytest.raises(ProductAuthError) as exc_info:
+        await ProductSourcePolicyService(
+            db=db_session,
+            knowledge_base=_FailingPolicyManager(),
+        ).resolve_scope(_user())
+
+    assert exc_info.value.code == "KNOWLEDGE_ACCESS_DENIED"
+    assert exc_info.value.status_code == 403
