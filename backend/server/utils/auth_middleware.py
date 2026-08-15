@@ -153,6 +153,10 @@ async def get_product_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "IDENTITY_MAPPING_REQUIRED", "message": "账号尚未完成组织映射"},
         )
+    for attribute in User.__mapper__.column_attrs:
+        getattr(user, attribute.key)
+    db.expunge(user)
+    await db.rollback()
     return user
 
 

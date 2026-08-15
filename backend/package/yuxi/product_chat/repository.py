@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion, FeishuSource, FeishuSourceItem
@@ -74,6 +74,87 @@ class ProductChatRepository:
         if conversation is None:
             raise ProductChatNotFoundError
         return conversation
+
+    async def get_message_counts(self, conversation_ids: list[str]) -> dict[str, int]:
+        if not conversation_ids:
+            return {}
+        result = await self.session.execute(
+            select(ProductMessage.conversation_id, func.count(ProductMessage.id))
+            .where(ProductMessage.conversation_id.in_(conversation_ids))
+            .group_by(ProductMessage.conversation_id)
+        )
+        return {conversation_id: count for conversation_id, count in result.all()}
+
+    async def list_messages_with_citations(
+        self,
+        conversation_id: str,
+    ) -> list[tuple[ProductMessage, list[MessageCitation]]]:
+        messages = list(
+            (
+                await self.session.execute(
+                    select(ProductMessage)
+                    .where(ProductMessage.conversation_id == conversation_id)
+                    .order_by(ProductMessage.created_at, ProductMessage.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not messages:
+            return []
+
+        citations = list(
+            (
+                await self.session.execute(
+                    select(MessageCitation)
+                    .where(MessageCitation.message_id.in_([message.message_id for message in messages]))
+                    .order_by(MessageCitation.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        citations_by_message: dict[str, list[MessageCitation]] = {}
+        for citation in citations:
+            citations_by_message.setdefault(citation.message_id, []).append(citation)
+        return [(message, citations_by_message.get(message.message_id, [])) for message in messages]
+
+    async def get_owned_citation(
+        self,
+        citation_id: str,
+        owner_user_id: int,
+    ) -> MessageCitation | None:
+        result = await self.session.execute(
+            select(MessageCitation)
+            .join(
+                ProductMessage,
+                MessageCitation.message_id == ProductMessage.message_id,
+            )
+            .join(
+                ProductConversation,
+                ProductMessage.conversation_id == ProductConversation.conversation_id,
+            )
+            .where(
+                MessageCitation.citation_id == citation_id,
+                ProductConversation.owner_user_id == owner_user_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_citation_material(
+        self,
+        citation: MessageCitation,
+    ) -> tuple[
+        FeishuSource | None,
+        FeishuSourceItem | None,
+        FeishuMaterialVersion | None,
+    ]:
+        source = await self.session.scalar(select(FeishuSource).where(FeishuSource.source_id == citation.source_id))
+        item = await self.session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == citation.item_id))
+        version = await self.session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == citation.version_id)
+        )
+        return source, item, version
 
     async def archive_conversation(self, conversation_id: str, owner_user_id: int) -> None:
         try:
