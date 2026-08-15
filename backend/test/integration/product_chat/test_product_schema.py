@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import os
@@ -68,6 +69,84 @@ class _SearchPathEngine:
         return _SearchPathBegin(self.engine, self.schema_name)
 
 
+async def _create_legacy_product_tables(connection, locator_type: str):
+    for legacy_table_ddl in (
+        """
+        CREATE TABLE product_conversations (
+            owner_user_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE product_messages (
+            conversation_id TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL
+        )
+        """,
+        f"""
+        CREATE TABLE message_citations (
+            message_id TEXT NOT NULL,
+            version_id TEXT NOT NULL,
+            locator {locator_type} NOT NULL
+        )
+        """,
+    ):
+        await connection.execute(text(legacy_table_ddl))
+
+
+async def _inspect_legacy_product_migration(connection, schema_name: str):
+    column = (
+        await connection.execute(
+            text(
+                """
+                SELECT data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = :schema_name
+                  AND table_name = 'message_citations'
+                  AND column_name = 'locator'
+                """
+            ),
+            {"schema_name": schema_name},
+        )
+    ).one()
+    index_names = set(
+        (
+            await connection.execute(
+                text("SELECT indexname FROM pg_indexes WHERE schemaname = :schema_name"),
+                {"schema_name": schema_name},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return column, index_names
+
+
+async def _wait_for_table_lock_waiters(connection, schema_name: str, expected_count: int):
+    while True:
+        waiting_count = (
+            await connection.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM pg_locks AS waiting
+                    JOIN pg_class AS relation ON relation.oid = waiting.relation
+                    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                    WHERE namespace.nspname = :schema_name
+                      AND relation.relname = 'message_citations'
+                      AND waiting.mode = 'AccessExclusiveLock'
+                      AND NOT waiting.granted
+                    """
+                ),
+                {"schema_name": schema_name},
+            )
+        ).scalar_one()
+        if waiting_count >= expected_count:
+            return
+        await asyncio.sleep(0.01)
+
+
 @pytest.mark.asyncio
 async def test_product_schema_creation_and_index_ensure_are_idempotent():
     manager = PostgresManager()
@@ -118,6 +197,8 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
     assert all(statement == migration_statements[0] for statement in migration_statements)
     assert "data_type IN ('json', 'jsonb')" in migration_statements[0]
     assert "locator::jsonb #>> '{}'" in migration_statements[0]
+    assert "LOCK TABLE message_citations IN ACCESS EXCLUSIVE MODE" in migration_statements[0]
+    assert "COALESCE(locator::jsonb #>> '{}', 'null')" in migration_statements[0]
 
     assert set(BusinessBase.metadata.tables["product_messages"].columns.keys()) == {
         "id",
@@ -274,7 +355,8 @@ async def test_product_schema_is_idempotent_in_real_postgres():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_product_schema_migrates_legacy_jsonb_locator_to_text():
+@pytest.mark.parametrize("legacy_locator_type", ["JSON", "JSONB"])
+async def test_product_schema_migrates_legacy_locator_to_text(legacy_locator_type):
     postgres_url = os.getenv("POSTGRES_URL")
     if not postgres_url:
         pytest.skip("POSTGRES_URL is not configured for the PostgreSQL product schema integration test.")
@@ -290,43 +372,23 @@ async def test_product_schema_migrates_legacy_jsonb_locator_to_text():
             await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
             schema_created = True
             await connection.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
-            for legacy_table_ddl in (
-                """
-                CREATE TABLE product_conversations (
-                    owner_user_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    updated_at TIMESTAMPTZ NOT NULL
-                )
-                """,
-                """
-                CREATE TABLE product_messages (
-                    conversation_id TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL
-                )
-                """,
-                """
-                CREATE TABLE message_citations (
-                    message_id TEXT NOT NULL,
-                    version_id TEXT NOT NULL,
-                    locator JSONB NOT NULL
-                )
-                """,
-            ):
-                await connection.execute(text(legacy_table_ddl))
+            await _create_legacy_product_tables(connection, legacy_locator_type)
             await connection.execute(
                 text(
-                    """
+                    f"""
                     INSERT INTO message_citations (message_id, version_id, locator)
                     VALUES
-                        ('object', 'version-1', CAST(:object_locator AS JSONB)),
-                        ('array', 'version-2', CAST(:array_locator AS JSONB)),
-                        ('string', 'version-3', CAST(:string_locator AS JSONB))
+                        ('object', 'version-1', CAST(:object_locator AS {legacy_locator_type})),
+                        ('array', 'version-2', CAST(:array_locator AS {legacy_locator_type})),
+                        ('string', 'version-3', CAST(:string_locator AS {legacy_locator_type})),
+                        ('null', 'version-4', CAST(:null_locator AS {legacy_locator_type}))
                     """
                 ),
                 {
                     "object_locator": '{"page":3,"sections":[1,2]}',
                     "array_locator": '[1,2,{"label":"A B"}]',
                     "string_locator": '"section-3"',
+                    "null_locator": "null",
                 },
             )
 
@@ -336,35 +398,12 @@ async def test_product_schema_migrates_legacy_jsonb_locator_to_text():
             await manager.ensure_product_schema()
 
         async with engine.connect() as connection:
-            column = (
-                await connection.execute(
-                    text(
-                        """
-                        SELECT data_type, is_nullable
-                        FROM information_schema.columns
-                        WHERE table_schema = :schema_name
-                          AND table_name = 'message_citations'
-                          AND column_name = 'locator'
-                        """
-                    ),
-                    {"schema_name": schema_name},
-                )
-            ).one()
+            column, index_names = await _inspect_legacy_product_migration(connection, schema_name)
             locator_rows = (
                 await connection.execute(
                     text(f'SELECT message_id, locator FROM "{schema_name}".message_citations')
                 )
             ).all()
-            index_names = set(
-                (
-                    await connection.execute(
-                        text("SELECT indexname FROM pg_indexes WHERE schemaname = :schema_name"),
-                        {"schema_name": schema_name},
-                    )
-                )
-                .scalars()
-                .all()
-            )
 
         locator_by_message = {row.message_id: row.locator for row in locator_rows}
         assert column.data_type == "text"
@@ -372,6 +411,7 @@ async def test_product_schema_migrates_legacy_jsonb_locator_to_text():
         assert json.loads(locator_by_message["object"]) == {"page": 3, "sections": [1, 2]}
         assert json.loads(locator_by_message["array"]) == [1, 2, {"label": "A B"}]
         assert locator_by_message["string"] == "section-3"
+        assert locator_by_message["null"] == "null"
         assert index_names >= {
             "ix_product_conversations_owner_status_updated",
             "ix_product_messages_conversation_created",
@@ -380,6 +420,80 @@ async def test_product_schema_migrates_legacy_jsonb_locator_to_text():
         }
     finally:
         manager._initialized, manager.async_engine = original_initialized, original_engine
+        try:
+            if schema_created:
+                async with engine.begin() as connection:
+                    await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
+        finally:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_product_schema_concurrent_legacy_migrations_are_serialized():
+    postgres_url = os.getenv("POSTGRES_URL")
+    if not postgres_url:
+        pytest.skip("POSTGRES_URL is not configured for the PostgreSQL product schema integration test.")
+
+    schema_name = f"product_concurrent_{uuid4().hex}"
+    engine = create_async_engine(postgres_url)
+    manager_one = object.__new__(PostgresManager)
+    manager_two = object.__new__(PostgresManager)
+    blocker = None
+    blocker_transaction = None
+    migration_tasks = []
+    schema_created = False
+
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+            schema_created = True
+            await connection.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
+            await _create_legacy_product_tables(connection, "JSONB")
+
+        for manager in (manager_one, manager_two):
+            manager._initialized = True
+            manager.async_engine = _SearchPathEngine(engine, schema_name)
+
+        blocker = await engine.connect()
+        blocker_transaction = await blocker.begin()
+        await blocker.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
+        await blocker.execute(text("LOCK TABLE message_citations IN ACCESS EXCLUSIVE MODE"))
+
+        migration_tasks = [
+            asyncio.create_task(manager_one.ensure_product_schema()),
+            asyncio.create_task(manager_two.ensure_product_schema()),
+        ]
+        async with engine.connect() as monitor:
+            await asyncio.wait_for(
+                _wait_for_table_lock_waiters(monitor, schema_name, expected_count=2),
+                timeout=5,
+            )
+
+        await blocker_transaction.commit()
+        await asyncio.wait_for(asyncio.gather(*migration_tasks), timeout=5)
+
+        async with engine.connect() as connection:
+            column, index_names = await _inspect_legacy_product_migration(connection, schema_name)
+
+        assert column.data_type == "text"
+        assert column.is_nullable == "NO"
+        assert index_names >= {
+            "ix_product_conversations_owner_status_updated",
+            "ix_product_messages_conversation_created",
+            "ix_message_citations_message_id",
+            "ix_message_citations_version_id",
+        }
+    finally:
+        for task in migration_tasks:
+            if not task.done():
+                task.cancel()
+        if migration_tasks:
+            await asyncio.gather(*migration_tasks, return_exceptions=True)
+        if blocker_transaction is not None and blocker_transaction.is_active:
+            await blocker_transaction.rollback()
+        if blocker is not None:
+            await blocker.close()
         try:
             if schema_created:
                 async with engine.begin() as connection:

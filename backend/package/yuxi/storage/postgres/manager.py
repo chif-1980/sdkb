@@ -113,7 +113,7 @@ class PostgresManager(metaclass=SingletonMeta):
         logger.info("PostgreSQL tables created/checked (knowledge + business)")
 
     async def ensure_product_schema(self):
-        """Ensure enterprise assistant indexes exist."""
+        """Ensure product schema migrations and indexes exist."""
         self._check_initialized()
         stmts = [
             """
@@ -121,15 +121,23 @@ class PostgresManager(metaclass=SingletonMeta):
             BEGIN
                 IF EXISTS (
                     SELECT 1
-                    FROM information_schema.columns
+                    FROM information_schema.tables
                     WHERE table_schema = current_schema()
                       AND table_name = 'message_citations'
-                      AND column_name = 'locator'
-                      AND data_type IN ('json', 'jsonb')
                 ) THEN
-                    ALTER TABLE message_citations
-                    ALTER COLUMN locator TYPE TEXT
-                    USING (locator::jsonb #>> '{}');
+                    LOCK TABLE message_citations IN ACCESS EXCLUSIVE MODE;
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = 'message_citations'
+                          AND column_name = 'locator'
+                          AND data_type IN ('json', 'jsonb')
+                    ) THEN
+                        ALTER TABLE message_citations
+                        ALTER COLUMN locator TYPE TEXT
+                        USING (COALESCE(locator::jsonb #>> '{}', 'null'));
+                    END IF;
                 END IF;
             END
             $$
