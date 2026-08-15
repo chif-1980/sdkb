@@ -92,8 +92,7 @@ class PostgresManager(metaclass=SingletonMeta):
             port = f":{parsed_url.port}" if parsed_url.port else ""
             database = f"/{parsed_url.database}" if parsed_url.database else ""
             logger.info(
-                "PostgreSQL manager initialized for knowledge base: "
-                f"{parsed_url.drivername}://{host}{port}{database}"
+                f"PostgreSQL manager initialized for knowledge base: {parsed_url.drivername}://{host}{port}{database}"
             )
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL manager: {e}")

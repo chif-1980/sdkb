@@ -95,12 +95,24 @@ def make_file_record(**overrides):
 class FakeKnowledgeFileRepository:
     def __init__(self, records: dict[str, types.SimpleNamespace]):
         self.records = records
+        self.source_metadata_calls = []
         self.update_calls = []
         self.conditional_update_calls = []
         self.deleted = []
 
     async def get_by_file_id(self, file_id: str):
         return self.records.get(file_id)
+
+    async def get_source_metadata_by_file_ids(self, *, kb_id: str, file_ids: list[str]):
+        self.source_metadata_calls.append((kb_id, list(file_ids)))
+        return {
+            file_id: {
+                "filename": record.filename,
+                "processing_params": record.processing_params,
+            }
+            for file_id in file_ids
+            if (record := self.records.get(file_id)) is not None and record.kb_id == kb_id
+        }
 
     async def update_fields_if_status(self, *, kb_id: str, file_id: str, allowed_statuses: set[str], data: dict):
         record = self.records.get(file_id)
@@ -270,6 +282,84 @@ def test_calculate_chunk_stats_counts_chunks_and_tokens():
         "chunk_count": 2,
         "token_count": count_tokens("alpha beta") + count_tokens("中文"),
     }
+
+
+async def test_hydrate_chunk_sources_includes_feishu_citation(monkeypatch):
+    citation = {
+        "source_url": "https://example.feishu.cn/wiki/page",
+        "wiki_path": "Root / Product Guide",
+        "material_version": "version-1",
+        "page_info": {"item_type": "page", "title": "Product Guide"},
+        "internal_only": "must-not-be-returned",
+    }
+    file_repo = FakeKnowledgeFileRepository(
+        {
+            "file-1": make_file_record(
+                processing_params={
+                    "feishu": citation,
+                    "unrelated": "must-not-be-returned",
+                }
+            )
+        }
+    )
+    patch_file_repository(monkeypatch, file_repo)
+    kb = MilvusKB.__new__(MilvusKB)
+    chunks = [
+        {
+            "content": "content",
+            "metadata": {
+                "file_id": "file-1",
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+            },
+        }
+    ]
+
+    await kb._hydrate_chunk_sources("db", chunks)
+
+    assert file_repo.source_metadata_calls == [("db", ["file-1"])]
+    assert chunks[0]["metadata"] == {
+        "file_id": "file-1",
+        "chunk_id": "chunk-1",
+        "chunk_index": 0,
+        "source": "demo.md",
+        "source_url": citation["source_url"],
+        "wiki_path": citation["wiki_path"],
+        "material_version": citation["material_version"],
+        "page_info": citation["page_info"],
+    }
+
+
+async def test_hydrate_chunk_sources_clears_stale_citations_for_plain_and_cross_kb_files(monkeypatch):
+    file_repo = FakeKnowledgeFileRepository(
+        {
+            "plain-file": make_file_record(file_id="plain-file", filename="plain.md"),
+            "other-kb-file": make_file_record(
+                file_id="other-kb-file",
+                kb_id="other-db",
+                filename="private.md",
+                processing_params={"feishu": {"source_url": "https://example.feishu.cn/wiki/private"}},
+            ),
+        }
+    )
+    patch_file_repository(monkeypatch, file_repo)
+    kb = MilvusKB.__new__(MilvusKB)
+    stale_citation = {
+        "source_url": "https://stale.example/source",
+        "wiki_path": "stale path",
+        "material_version": "stale-version",
+        "page_info": {"title": "stale"},
+    }
+    chunks = [
+        {"content": "plain", "metadata": {"file_id": "plain-file", "keep": "plain", **stale_citation}},
+        {"content": "other", "metadata": {"file_id": "other-kb-file", "keep": "other", **stale_citation}},
+    ]
+
+    await kb._hydrate_chunk_sources("db", chunks)
+
+    assert file_repo.source_metadata_calls == [("db", ["other-kb-file", "plain-file"])]
+    assert chunks[0]["metadata"] == {"file_id": "plain-file", "keep": "plain", "source": "plain.md"}
+    assert chunks[1]["metadata"] == {"file_id": "other-kb-file", "keep": "other", "source": "未知来源"}
 
 
 async def test_index_file_persists_chunk_stats(monkeypatch):

@@ -621,12 +621,31 @@ class MilvusKB(KnowledgeBase):
         if not file_ids:
             return
 
-        filenames = await KnowledgeFileRepository().get_filenames_by_file_ids(kb_id=kb_id, file_ids=file_ids)
+        records = await KnowledgeFileRepository().get_source_metadata_by_file_ids(kb_id=kb_id, file_ids=file_ids)
+        source_metadata = {}
+        citation_fields = ("source_url", "wiki_path", "material_version", "page_info")
+        for file_id, record in records.items():
+            processing_params = record["processing_params"] if isinstance(record["processing_params"], dict) else {}
+            citation = processing_params.get("feishu")
+            source_metadata[file_id] = {
+                "source": record["filename"] or "未知来源",
+                **(
+                    {
+                        citation_field: citation[citation_field]
+                        for citation_field in citation_fields
+                        if citation_field in citation
+                    }
+                    if isinstance(citation, dict)
+                    else {}
+                ),
+            }
         for chunk in chunks:
             metadata = chunk.get("metadata")
             if not isinstance(metadata, dict):
                 continue
-            metadata["source"] = filenames.get(str(metadata.get("file_id") or ""), "") or "未知来源"
+            for citation_field in citation_fields:
+                metadata.pop(citation_field, None)
+            metadata.update(source_metadata.get(str(metadata.get("file_id") or ""), {"source": "未知来源"}))
 
     async def _build_file_name_expr(self, kb_id: str, file_name: str | None) -> str | None:
         if not file_name:

@@ -12,7 +12,7 @@
 | 阶段 | 结果 | 证据摘要 | 操作者 |
 | --- | --- | --- | --- |
 | 1 | PASS | SiliconFlow BAAI/bge-m3 实时返回 1024 维有效向量；TXT、PDF、中文 PNG 均完成解析和自动入库；Milvus 检索命中 3 个来源，重启 API/worker 后数据仍可检索 | Codex + 用户 |
-| 2 | RUNNING | 离线端到端测试已通过；真实飞书连接、限定权限完整扫描及生产持久化验收待执行 | Codex |
+| 2 | RUNNING | 已验证企业自建应用认证、单素材受控扫描与发布，以及 PostgreSQL/MinIO/Milvus 持久化；权限审计、多类型全量目录和 Redis 状态恢复待验证 | Codex + 用户 |
 
 ## 阶段一当前证据
 
@@ -34,6 +34,11 @@
 - 离线认证单元测试：61 个用例覆盖 tenant token 换取与内存缓存、到期刷新、401 后刷新并重放一次、并发首次请求只换取一次 token，以及日志和异常信息脱敏
 - 执行命令：`uv run --project backend --no-sync --no-dev pytest -q backend/test/unit/integrations/test_feishu_client.py`
 - 执行结果：`61 passed`；另有 1 条既有弃用警告
-- 待完成：当前未配置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，尚未执行企业自建应用认证、真实飞书连接、限定范围权限验证和完整扫描
-- 待完成：尚未执行仅重建 API/worker，以及 PostgreSQL、Redis、MinIO、Milvus 的持久化验证
-- 当前结论：阶段二仍为 `RUNNING`，不得标记为 `PASS`
+- 真实认证与受控扫描：API/worker 使用同一份本机企业自建应用配置换取 tenant token；检查连接成功后执行限定根目录扫描，数据库保留 2 个扫描批次（1 个成功、1 个失败诊断批次），成功批次扫描 1 个素材并完成归档、解析、审核和发布
+- 重启持久化：仅重启源码 API/worker 后，PostgreSQL 仍保留 1 个数据源、1 个成功批次、1 个素材版本；该版本为 `published`/`approved`，关联 Yuxi 文件并有 1 个 Chunk；MinIO 原始对象存在且非空，Milvus 检索仍可命中
+- 引用回填：检索结果会从 `knowledge_files.processing_params.feishu` 回填 `source_url`、`wiki_path`、`material_version`、`page_info`，普通文件不会被错误添加飞书引用；回归测试覆盖字段白名单
+- 安全检查：真实凭据未写入仓库、测试材料或日志；仓库扫描仅发现空配置模板、假值测试和变量名说明
+- 待完成：审计企业自建应用权限范围，确认应用只具备指定知识目录所需的最小权限
+- 待完成：对包含产品手册、解决方案、部署文档、会议纪要等真实多类型素材的完整目录执行扫描、加工、审核、发布与引用验收；音视频加工按当前决策置于最低优先级
+- 待完成：重启 Redis、API 和 worker 后，验证扫描任务、审核状态及失败任务诊断信息能够正确恢复
+- 当前结论：阶段二仍为 `RUNNING`，完成上述验收后才能标记为 `PASS`

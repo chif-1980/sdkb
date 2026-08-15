@@ -115,6 +115,40 @@ class KnowledgeFileRepository:
             )
             return {str(file_id): str(filename or "") for file_id, filename in result.all()}
 
+    async def get_source_metadata_by_file_ids(
+        self,
+        *,
+        kb_id: str,
+        file_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        normalized_ids = [file_id for file_id in file_ids if file_id]
+        if not normalized_ids:
+            return {}
+
+        records_by_id: dict[str, dict[str, Any]] = {}
+        async with pg_manager.get_async_session_context() as session:
+            for batch in self._iter_batches(normalized_ids):
+                result = await session.execute(
+                    select(
+                        KnowledgeFile.file_id,
+                        KnowledgeFile.filename,
+                        KnowledgeFile.processing_params,
+                    ).where(
+                        KnowledgeFile.kb_id == kb_id,
+                        KnowledgeFile.file_id.in_(batch),
+                    )
+                )
+                records_by_id.update(
+                    {
+                        str(file_id): {
+                            "filename": filename,
+                            "processing_params": processing_params,
+                        }
+                        for file_id, filename, processing_params in result.all()
+                    }
+                )
+        return records_by_id
+
     async def list_children(self, *, kb_id: str, parent_id: str | None) -> list[KnowledgeFile]:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
