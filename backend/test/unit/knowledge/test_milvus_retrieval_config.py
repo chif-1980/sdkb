@@ -2,6 +2,7 @@ import pytest
 
 from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
 from yuxi.knowledge.implementations.milvus import MilvusKB, _retrieval_config_options
+from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
 
 
 def test_milvus_retrieval_config_exposes_graph_and_dependencies():
@@ -56,9 +57,24 @@ def test_rrf_fusion_merges_chunk_and_graph_rankings():
 def test_allowed_file_expression_is_sorted_deduplicated_and_escaped():
     kb = object.__new__(MilvusKB)
 
-    assert kb._build_allowed_file_expr(["b", 'a"q', "b"]) == 'file_id in ["a\\"q", "b"]'
+    assert kb._build_allowed_file_expr([r"b\path", 'a"q', r"b\path"]) == (
+        'file_id in ["a\\"q", "b\\\\path"]'
+    )
     assert kb._build_allowed_file_expr([]) == "file_id in []"
     assert kb._build_allowed_file_expr(None) is None
+
+
+@pytest.mark.asyncio
+async def test_file_name_expression_escapes_backslashes_and_quotes(monkeypatch):
+    kb = object.__new__(MilvusKB)
+
+    async def list_file_ids(_repository, *, kb_id, filename_pattern):
+        assert (kb_id, filename_pattern) == ("kb-1", "report")
+        return ['folder\\report"current']
+
+    monkeypatch.setattr(KnowledgeFileRepository, "list_file_ids_by_filename_contains", list_file_ids)
+
+    assert await kb._build_file_name_expr("kb-1", "report") == 'file_id == "folder\\\\report\\"current"'
 
 
 def test_file_expressions_are_combined_with_and():
@@ -125,6 +141,26 @@ async def test_aquery_with_empty_allowed_files_does_not_touch_milvus(monkeypatch
     monkeypatch.setattr(kb, "_get_milvus_collection", fail_if_called)
 
     assert await kb.aquery("query", "kb-1", allowed_file_ids=[]) == []
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_aquery_with_empty_allowed_file_tuple_short_circuits_before_any_milvus_call(monkeypatch):
+    kb = object.__new__(MilvusKB)
+    calls = []
+
+    def fail_query_params(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("Query configuration must not be read for an empty whitelist")
+
+    async def fail_collection(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("Milvus must not be called for an empty whitelist")
+
+    monkeypatch.setattr(kb, "_get_query_params", fail_query_params)
+    monkeypatch.setattr(kb, "_get_milvus_collection", fail_collection)
+
+    assert await kb.aquery("query", "kb-1", allowed_file_ids=()) == []
     assert calls == []
 
 

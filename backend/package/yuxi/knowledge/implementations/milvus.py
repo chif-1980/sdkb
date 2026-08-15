@@ -674,11 +674,10 @@ class MilvusKB(KnowledgeBase):
         )
         if not matched_file_ids:
             return 'file_id == "__no_matching_file__"'
-        escaped_ids = [file_id.replace('"', '\\"') for file_id in matched_file_ids]
-        if len(escaped_ids) == 1:
-            return f'file_id == "{escaped_ids[0]}"'
-        joined_ids = '", "'.join(escaped_ids)
-        return f'file_id in ["{joined_ids}"]'
+        quoted_ids = [self._quote_expr_string(file_id) for file_id in matched_file_ids]
+        if len(quoted_ids) == 1:
+            return f"file_id == {quoted_ids[0]}"
+        return f"file_id in [{', '.join(quoted_ids)}]"
 
     async def index_file(
         self, kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None

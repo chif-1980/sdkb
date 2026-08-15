@@ -49,6 +49,40 @@ class _PolicyManager:
         return self.accessible
 
 
+async def test_resolve_scope_rejects_a_missing_source(db_session):
+    with pytest.raises(ProductAuthError) as exc_info:
+        await ProductSourcePolicyService(
+            db=db_session,
+            knowledge_base=_PolicyManager(True),
+        ).resolve_scope(_user())
+
+    assert exc_info.value.code == "PRODUCT_SOURCE_UNAVAILABLE"
+    assert exc_info.value.status_code == 503
+
+
+async def test_resolve_scope_rejects_a_disabled_source(db_session):
+    db_session.add(
+        FeishuSource(
+            source_id="source-1",
+            name="Wiki",
+            wiki_root_token="root",
+            target_kb_id="kb-1",
+            credential_env_name="FEISHU_TOKEN",
+            enabled=False,
+        )
+    )
+    await db_session.commit()
+
+    with pytest.raises(ProductAuthError) as exc_info:
+        await ProductSourcePolicyService(
+            db=db_session,
+            knowledge_base=_PolicyManager(True),
+        ).resolve_scope(_user())
+
+    assert exc_info.value.code == "PRODUCT_SOURCE_UNAVAILABLE"
+    assert exc_info.value.status_code == 503
+
+
 async def test_resolve_scope_only_returns_current_published_approved_versions(db_session):
     db_session.add(
         FeishuSource(
