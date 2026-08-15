@@ -195,9 +195,14 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
     assert len(connection.statements) == 2 * (len(expected_indexes) + 1)
     assert connection.statements[0] == connection.statements[5] == migration_statements[0]
     assert all(statement == migration_statements[0] for statement in migration_statements)
-    assert "data_type IN ('json', 'jsonb')" in migration_statements[0]
+    locator_type_check = "data_type IN ('json', 'jsonb')"
+    exclusive_lock = "LOCK TABLE message_citations IN ACCESS EXCLUSIVE MODE"
+    first_type_check = migration_statements[0].find(locator_type_check)
+    exclusive_lock_position = migration_statements[0].find(exclusive_lock)
+    second_type_check = migration_statements[0].find(locator_type_check, first_type_check + 1)
+    assert migration_statements[0].count(locator_type_check) == 2
+    assert first_type_check < exclusive_lock_position < second_type_check
     assert "locator::jsonb #>> '{}'" in migration_statements[0]
-    assert "LOCK TABLE message_citations IN ACCESS EXCLUSIVE MODE" in migration_statements[0]
     assert "COALESCE(locator::jsonb #>> '{}', 'null')" in migration_statements[0]
 
     assert set(BusinessBase.metadata.tables["product_messages"].columns.keys()) == {
@@ -430,6 +435,99 @@ async def test_product_schema_migrates_legacy_locator_to_text(legacy_locator_typ
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_product_schema_does_not_exclusively_lock_an_existing_text_locator():
+    postgres_url = os.getenv("POSTGRES_URL")
+    if not postgres_url:
+        pytest.skip("POSTGRES_URL is not configured for the PostgreSQL product schema integration test.")
+
+    schema_name = f"product_text_locator_{uuid4().hex}"
+    engine = create_async_engine(postgres_url)
+    manager = object.__new__(PostgresManager)
+    blocker = None
+    blocker_transaction = None
+    ensure_task = None
+    lock_observer_task = None
+    schema_created = False
+
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+            schema_created = True
+            await connection.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
+            await _create_legacy_product_tables(connection, "TEXT")
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO message_citations (message_id, version_id, locator)
+                    VALUES ('string', 'version-1', 'section-3')
+                    """
+                )
+            )
+
+        manager._initialized = True
+        manager.async_engine = _SearchPathEngine(engine, schema_name)
+
+        blocker = await engine.connect()
+        blocker_transaction = await blocker.begin()
+        await blocker.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
+        await blocker.execute(text("LOCK TABLE message_citations IN ACCESS SHARE MODE"))
+
+        ensure_task = asyncio.create_task(manager.ensure_product_schema())
+        async with engine.connect() as monitor:
+            lock_observer_task = asyncio.create_task(
+                _wait_for_table_lock_waiters(monitor, schema_name, expected_count=1)
+            )
+            completed, _ = await asyncio.wait(
+                {ensure_task, lock_observer_task},
+                timeout=5,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            assert ensure_task in completed
+            assert lock_observer_task not in completed
+            lock_observer_task.cancel()
+            await asyncio.gather(lock_observer_task, return_exceptions=True)
+
+        await ensure_task
+
+        async with engine.connect() as connection:
+            column, index_names = await _inspect_legacy_product_migration(connection, schema_name)
+            locator = (
+                await connection.execute(
+                    text(f'SELECT locator FROM "{schema_name}".message_citations WHERE message_id = \'string\'')
+                )
+            ).scalar_one()
+
+        assert column.data_type == "text"
+        assert column.is_nullable == "NO"
+        assert locator == "section-3"
+        assert index_names >= {
+            "ix_product_conversations_owner_status_updated",
+            "ix_product_messages_conversation_created",
+            "ix_message_citations_message_id",
+            "ix_message_citations_version_id",
+        }
+    finally:
+        for task in (ensure_task, lock_observer_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (ensure_task, lock_observer_task) if task is not None),
+            return_exceptions=True,
+        )
+        if blocker_transaction is not None and blocker_transaction.is_active:
+            await blocker_transaction.rollback()
+        if blocker is not None:
+            await blocker.close()
+        try:
+            if schema_created:
+                async with engine.begin() as connection:
+                    await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
+        finally:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_product_schema_concurrent_legacy_migrations_are_serialized():
     postgres_url = os.getenv("POSTGRES_URL")
     if not postgres_url:
@@ -450,6 +548,14 @@ async def test_product_schema_concurrent_legacy_migrations_are_serialized():
             schema_created = True
             await connection.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
             await _create_legacy_product_tables(connection, "JSONB")
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO message_citations (message_id, version_id, locator)
+                    VALUES ('string', 'version-1', '"section-3"')
+                    """
+                )
+            )
 
         for manager in (manager_one, manager_two):
             manager._initialized = True
@@ -475,9 +581,15 @@ async def test_product_schema_concurrent_legacy_migrations_are_serialized():
 
         async with engine.connect() as connection:
             column, index_names = await _inspect_legacy_product_migration(connection, schema_name)
+            locator = (
+                await connection.execute(
+                    text(f'SELECT locator FROM "{schema_name}".message_citations WHERE message_id = \'string\'')
+                )
+            ).scalar_one()
 
         assert column.data_type == "text"
         assert column.is_nullable == "NO"
+        assert locator == "section-3"
         assert index_names >= {
             "ix_product_conversations_owner_status_updated",
             "ix_product_messages_conversation_created",

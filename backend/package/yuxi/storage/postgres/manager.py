@@ -121,9 +121,11 @@ class PostgresManager(metaclass=SingletonMeta):
             BEGIN
                 IF EXISTS (
                     SELECT 1
-                    FROM information_schema.tables
+                    FROM information_schema.columns
                     WHERE table_schema = current_schema()
                       AND table_name = 'message_citations'
+                      AND column_name = 'locator'
+                      AND data_type IN ('json', 'jsonb')
                 ) THEN
                     LOCK TABLE message_citations IN ACCESS EXCLUSIVE MODE;
                     IF EXISTS (
