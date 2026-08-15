@@ -262,6 +262,23 @@ class KnowledgeBaseManager:
             },
         )
 
+    async def check_policy_accessible(self, user: dict, kb_id: str) -> bool:
+        """Check product-policy access without management-role or creator bypasses."""
+        from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
+        kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
+        if kb is None:
+            return False
+
+        config = self._normalize_share_config(kb.share_config)
+        if config["access_level"] == "global":
+            return True
+        if config["access_level"] == "department":
+            return str(user.get("department_id")) in {str(value) for value in config["department_ids"]}
+        if config["access_level"] == "user":
+            return str(user.get("uid") or "") in set(config["user_uids"])
+        return False
+
     async def get_databases_by_uid(self, uid: str) -> dict:
         """根据 uid 获取知识库列表"""
         from yuxi.repositories.user_repository import UserRepository

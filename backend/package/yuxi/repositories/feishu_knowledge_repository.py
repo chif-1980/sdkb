@@ -367,6 +367,29 @@ class FeishuKnowledgeRepository:
             )
             return result.scalar_one_or_none()
 
+    async def list_published_file_ids(self, source_id: str) -> list[str]:
+        """Return file IDs for the source's active, published, approved material versions."""
+        statement = (
+            select(FeishuMaterialVersion.yuxi_file_id)
+            .join(
+                FeishuSourceItem,
+                FeishuMaterialVersion.version_id == FeishuSourceItem.active_version_id,
+            )
+            .where(
+                FeishuSourceItem.source_id == source_id,
+                FeishuSourceItem.source_validity == "valid",
+                FeishuMaterialVersion.processing_status == "published",
+                FeishuMaterialVersion.review_status == "approved",
+                FeishuMaterialVersion.published_at.is_not(None),
+                FeishuMaterialVersion.yuxi_file_id.is_not(None),
+            )
+            .distinct()
+            .order_by(FeishuMaterialVersion.yuxi_file_id)
+        )
+        async with self._read_transaction():
+            result = await self.session.execute(statement)
+            return [file_id for file_id in result.scalars().all() if file_id]
+
     async def create_material_version(
         self,
         *,

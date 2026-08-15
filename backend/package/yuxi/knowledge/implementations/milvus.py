@@ -647,6 +647,23 @@ class MilvusKB(KnowledgeBase):
                 metadata.pop(citation_field, None)
             metadata.update(source_metadata.get(str(metadata.get("file_id") or ""), {"source": "未知来源"}))
 
+    @staticmethod
+    def _quote_expr_string(value: str) -> str:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def _build_allowed_file_expr(self, allowed_file_ids) -> str | None:
+        if allowed_file_ids is None:
+            return None
+        if not allowed_file_ids:
+            return "file_id in []"
+        values = ", ".join(self._quote_expr_string(value) for value in sorted(set(allowed_file_ids)))
+        return f"file_id in [{values}]"
+
+    @staticmethod
+    def _combine_expr(*expressions) -> str | None:
+        present = [f"({value})" for value in expressions if value]
+        return " and ".join(present) or None
+
     async def _build_file_name_expr(self, kb_id: str, file_name: str | None) -> str | None:
         if not file_name:
             return None
@@ -912,14 +929,20 @@ class MilvusKB(KnowledgeBase):
 
     async def aquery(self, query_text: str, kb_id: str, agent_call: bool = False, **kwargs) -> list[dict]:
         """异步查询知识库"""
-        collection = await self._get_milvus_collection(kb_id)
-        if not collection:
-            raise ValueError(f"Database {kb_id} not found")
+        if "allowed_file_ids" in kwargs and not kwargs["allowed_file_ids"]:
+            return []
 
         query_params = self._get_query_params(kb_id)
         # 合并查询参数：kwargs（临时参数）优先级高于 query_params（持久化参数）
         # 这样允许用户在单次查询中临时覆盖持久化配置
         merged_kwargs = {**query_params, **kwargs}
+        allowed_file_ids = merged_kwargs.get("allowed_file_ids")
+        if allowed_file_ids is not None and not allowed_file_ids:
+            return []
+
+        collection = await self._get_milvus_collection(kb_id)
+        if not collection:
+            raise ValueError(f"Database {kb_id} not found")
 
         try:
             # 查询参数（从 merged_kwargs 读取）
@@ -934,14 +957,16 @@ class MilvusKB(KnowledgeBase):
                 search_mode = "vector"
 
             use_reranker = bool(merged_kwargs.get("use_reranker", False))
-            use_graph_retrieval = bool(merged_kwargs.get("use_graph_retrieval", False))
+            use_graph_retrieval = bool(merged_kwargs.get("use_graph_retrieval", False)) and allowed_file_ids is None
             if use_reranker or use_graph_retrieval:
                 recall_top_k = int(merged_kwargs.get("recall_top_k", 50))
                 recall_top_k = max(recall_top_k, final_top_k)
             else:
                 recall_top_k = final_top_k
 
-            file_expr = await self._build_file_name_expr(kb_id, merged_kwargs.get("file_name"))
+            file_name_expr = await self._build_file_name_expr(kb_id, merged_kwargs.get("file_name"))
+            allowed_file_expr = self._build_allowed_file_expr(allowed_file_ids)
+            file_expr = self._combine_expr(file_name_expr, allowed_file_expr)
             if file_expr:
                 logger.debug(f"Using filter expression: {file_expr}")
 
