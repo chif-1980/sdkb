@@ -208,7 +208,7 @@ class AnswerService:
     def _openable_source_url(value: Any) -> str | None:
         if not isinstance(value, str):
             return None
-        if not value or any(character.isspace() or category(character) == "Cc" for character in value):
+        if not value or any(character.isspace() or category(character).startswith("C") for character in value):
             return None
         try:
             parsed = urlsplit(value)

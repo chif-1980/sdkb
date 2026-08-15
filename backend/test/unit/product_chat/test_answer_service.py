@@ -235,6 +235,7 @@ async def test_empty_revalidated_evidence_returns_exact_insufficient_without_mod
         pytest.param("https://quickdone.feishu.cn:invalid/wiki/item-1", id="invalid-port"),
         pytest.param(" https://quickdone.feishu.cn/wiki/item-1", id="leading-space"),
         pytest.param("https://quickdone.feishu.cn/wiki/item-1\x00", id="control-character"),
+        pytest.param("https://quickdone\u200d.feishu.cn/wiki/item-1", id="format-control"),
         pytest.param("https://localhost/wiki/item-1", id="localhost"),
         pytest.param("https://127.0.0.1/wiki/item-1", id="ipv4"),
         pytest.param("https://10.0.0.1/wiki/item-1", id="private-ipv4"),
