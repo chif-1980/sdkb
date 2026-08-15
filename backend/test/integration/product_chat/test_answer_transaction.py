@@ -142,6 +142,7 @@ async def test_append_exchange_commits_messages_citations_title_and_timestamp_to
 
     user_message, assistant_message = await repository.append_exchange(
         conversation,
+        7,
         question,
         _answer(),
     )
@@ -172,6 +173,41 @@ async def test_append_exchange_commits_messages_citations_title_and_timestamp_to
     assert conversation.updated_at >= previous_updated_at
 
 
+async def test_append_exchange_rejects_conversation_archived_after_require(db_session):
+    repository = ProductChatRepository(db_session)
+    conversation = await repository.create_conversation(7, "Owned")
+    await repository.require_conversation(conversation.conversation_id, 7)
+
+    other_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    async with other_factory() as other_session:
+        await ProductChatRepository(other_session).archive_conversation(conversation.conversation_id, 7)
+
+    with pytest.raises(ProductChatNotFoundError):
+        await repository.append_exchange(
+            conversation=conversation,
+            owner_user_id=7,
+            user_content="归档后不应写入",
+            answer=_answer(),
+        )
+
+    assert await db_session.scalar(select(func.count()).select_from(ProductMessage)) == 0
+
+
+async def test_append_exchange_rechecks_owner_inside_write_transaction(db_session):
+    repository = ProductChatRepository(db_session)
+    conversation = await repository.create_conversation(7, "Owned")
+
+    with pytest.raises(ProductChatNotFoundError):
+        await repository.append_exchange(
+            conversation=conversation,
+            owner_user_id=8,
+            user_content="其他用户不应写入",
+            answer=_answer(),
+        )
+
+    assert await db_session.scalar(select(func.count()).select_from(ProductMessage)) == 0
+
+
 async def test_append_exchange_rolls_back_every_row_when_a_citation_fails(db_session):
     repository = ProductChatRepository(db_session)
     conversation = await repository.create_conversation(7, "")
@@ -180,6 +216,7 @@ async def test_append_exchange_rolls_back_every_row_when_a_citation_fails(db_ses
     with pytest.raises(Exception):
         await repository.append_exchange(
             conversation,
+            7,
             "首问",
             _answer(citations=(_citation(source_url=None),)),
         )
@@ -268,6 +305,115 @@ async def test_repository_rejects_evidence_when_source_is_disabled(db_session):
     assert result == {}
 
 
+async def test_repository_rejects_ambiguous_formal_versions_sharing_a_file_id(db_session):
+    db_session.add(
+        FeishuSource(
+            source_id="source-1",
+            name="Wiki",
+            wiki_root_token="root",
+            target_kb_id="kb-1",
+            credential_env_name="FEISHU_TOKEN",
+            enabled=True,
+        )
+    )
+    _add_material(db_session, item_id="first", file_id="file-shared")
+    _add_material(db_session, item_id="second", file_id="file-shared")
+    await db_session.commit()
+
+    result = await ProductChatRepository(db_session).get_published_evidence(
+        "source-1",
+        ["file-shared", "file-shared"],
+    )
+
+    assert result == {}
+
+
+async def test_answer_service_owns_short_read_transactions_and_preserves_caller_writes(
+    tmp_path,
+    monkeypatch,
+):
+    from yuxi.product_chat.answer_service import AnswerService
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'answer-transactions.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as seed_session:
+        seed_session.add(
+            FeishuSource(
+                source_id="source-1",
+                name="Wiki",
+                wiki_root_token="root",
+                target_kb_id="kb-1",
+                credential_env_name="FEISHU_TOKEN",
+                enabled=True,
+            )
+        )
+        _add_material(seed_session, item_id="item-1", file_id="file-1")
+        await seed_session.commit()
+
+    read_sessions = []
+
+    def read_session_factory():
+        session = factory()
+        read_sessions.append(session)
+        return session
+
+    def assert_read_transactions_released(expected_session_count):
+        assert len(read_sessions) == expected_session_count
+        assert all(not session.in_transaction() for session in read_sessions)
+
+    class Knowledge:
+        async def check_policy_accessible(self, user, kb_id):
+            return True
+
+        async def aquery(self, question, kb_id, **kwargs):
+            assert_read_transactions_released(1)
+            return [{"content": "支持私有部署。", "metadata": {"file_id": "file-1", "chunk_index": 0}}]
+
+        async def get_database_info(self, kb_id):
+            assert_read_transactions_released(2)
+            return {"llm_model_spec": "provider:model-1"}
+
+    class Model:
+        model_name = "model-1"
+
+        async def call(self, prompt, stream=False):
+            assert_read_transactions_released(2)
+            return SimpleNamespace(
+                content=json.dumps(
+                    {"status": "SUPPORTED", "answer": "支持私有部署。", "citation_ids": ["E1"]},
+                    ensure_ascii=False,
+                )
+            )
+
+    monkeypatch.setenv("PRODUCT_FEISHU_SOURCE_ID", "source-1")
+    caller_session = factory()
+    unrelated = ProductConversation(owner_user_id=99, title="Unrelated")
+    caller_session.add(unrelated)
+    await caller_session.flush()
+    assert caller_session.in_transaction()
+
+    try:
+        result = await AnswerService(
+            db=caller_session,
+            read_session_factory=read_session_factory,
+            knowledge_base=Knowledge(),
+            model_selector=lambda model_spec: Model(),
+        ).answer("是否支持私有部署？", {"id": 7}, "conversation-1")
+
+        assert result.status == "SUPPORTED"
+        assert caller_session.in_transaction()
+        assert await caller_session.get(ProductConversation, unrelated.id) is unrelated
+        async with factory() as observer:
+            assert await observer.get(ProductConversation, unrelated.id) is None
+    finally:
+        await caller_session.rollback()
+        await caller_session.close()
+        await engine.dispose()
+
+
 async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db_session):
     from yuxi.product_chat.answer_service import AnswerService
 
@@ -328,7 +474,7 @@ async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db
     assert await db_session.scalar(select(func.count()).select_from(ProductMessage)) == 0
 
     answer = await answer_service.answer("是否支持私有部署？", object(), conversation.conversation_id)
-    await repository.append_exchange(conversation, "是否支持私有部署？", answer)
+    await repository.append_exchange(conversation, 7, "是否支持私有部署？", answer)
 
     messages = (await db_session.execute(select(ProductMessage).order_by(ProductMessage.id))).scalars().all()
     citations = (await db_session.execute(select(MessageCitation))).scalars().all()

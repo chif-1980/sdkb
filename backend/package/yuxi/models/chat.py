@@ -31,10 +31,13 @@ class LangChainChatAdapter:
                 return self._stream_response(messages)
             response = await self.model.ainvoke(messages)
             return GeneralResponse(response.text)
-        except Exception as e:
-            err = f"Error calling model: {e}, URL: {self.base_url}, Model: {self.model_name}"
-            logger.error(err)
-            raise Exception(err)
+        except Exception as exc:
+            logger.error(
+                "model_call_failed model_id={} error_type={}",
+                self.model_name,
+                type(exc).__name__,
+            )
+            raise
 
     async def _stream_response(self, messages):
         async for chunk in self.model.astream(messages):

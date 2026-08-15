@@ -217,6 +217,44 @@ async def test_langchain_chat_adapter_preserves_call_response_contract():
 
 
 @pytest.mark.asyncio
+async def test_langchain_chat_adapter_logs_only_model_id_and_exception_type(monkeypatch):
+    class SensitiveModelError(RuntimeError):
+        pass
+
+    original_error = SensitiveModelError("secret question and evidence")
+
+    class FailingLangChainModel:
+        async def ainvoke(self, messages):
+            raise original_error
+
+    logged = []
+    monkeypatch.setattr(
+        "yuxi.models.chat.logger",
+        SimpleNamespace(error=lambda *args, **kwargs: logged.append((args, kwargs))),
+    )
+    adapter = LangChainChatAdapter(
+        FailingLangChainModel(),
+        model_name="safe-model-id",
+        base_url="https://credential.example.test/v1?token=secret",
+    )
+
+    with pytest.raises(SensitiveModelError) as exc_info:
+        await adapter.call(
+            [{"role": "user", "content": "private question and evidence"}],
+            stream=False,
+        )
+
+    assert exc_info.value is original_error
+    assert logged == [
+        (("model_call_failed model_id={} error_type={}", "safe-model-id", "SensitiveModelError"), {}),
+    ]
+    serialized_log = repr(logged)
+    assert "secret question and evidence" not in serialized_log
+    assert "credential.example.test" not in serialized_log
+    assert "private question and evidence" not in serialized_log
+
+
+@pytest.mark.asyncio
 async def test_embedding_connection_checks_configured_dimension(monkeypatch):
     model = OtherEmbedding(
         model="namespace/embedding-model",

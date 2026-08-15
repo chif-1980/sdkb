@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +20,7 @@ from yuxi.utils import logger
 PROMPT_VERSION = "enterprise-grounded-v1"
 INSUFFICIENT_TEXT = "暂无足够可靠资料"
 NO_MODEL_VERSION = "not-called"
+UNTITLED_SOURCE_TEXT = "未命名文档"
 
 SYSTEM_PROMPT = """你是企业知识助手。只能依据 EVIDENCE 中的文字回答。
 不得使用常识补充企业能力、参数、承诺或案例。
@@ -56,6 +59,7 @@ class AnswerService:
         self,
         *,
         db: AsyncSession,
+        read_session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
         repository: ProductChatRepository | None = None,
         policy_service: Any | None = None,
         knowledge_base: Any | None = None,
@@ -70,20 +74,24 @@ class AnswerService:
 
             model_selector = select_model
 
-        self._repository = repository if repository is not None else ProductChatRepository(db)
+        if read_session_factory is None and (repository is None or policy_service is None):
+            from yuxi.storage.postgres.manager import pg_manager
+
+            read_session_factory = pg_manager.AsyncSession
+            if read_session_factory is None:
+                raise RuntimeError("PostgreSQL manager not initialized")
+
+        self._repository = repository
         self._knowledge_base = knowledge_base
-        self._policy_service = (
-            policy_service
-            if policy_service is not None
-            else ProductSourcePolicyService(db=db, knowledge_base=knowledge_base)
-        )
+        self._policy_service = policy_service
         self._model_selector = model_selector
+        self._read_session_factory = read_session_factory
 
     async def answer(self, question: str, user: Any, conversation_id: str) -> GroundedAnswer:
         started_at = perf_counter()
         evidence_count = 0
         try:
-            scope = await self._policy_service.resolve_scope(user)
+            scope = await self._resolve_scope(user)
             chunks = await self._knowledge_base.aquery(
                 question,
                 scope.kb_id,
@@ -124,6 +132,17 @@ class AnswerService:
             )
             raise
 
+    async def _resolve_scope(self, user: Any) -> Any:
+        if self._policy_service is not None:
+            return await self._policy_service.resolve_scope(user)
+        if self._read_session_factory is None:
+            raise RuntimeError("Read session factory is required")
+        async with self._read_session_factory() as session:
+            return await ProductSourcePolicyService(
+                db=session,
+                knowledge_base=self._knowledge_base,
+            ).resolve_scope(user)
+
     async def _revalidate_evidence(self, source_id: str, chunks: Any) -> tuple[GroundedCitation, ...]:
         usable_chunks: list[tuple[dict[str, Any], str]] = []
         file_ids: list[str] = []
@@ -141,7 +160,13 @@ class AnswerService:
                 usable_chunks.append((chunk, file_id))
                 file_ids.append(file_id)
 
-        published = await self._repository.get_published_evidence(source_id, file_ids)
+        if self._repository is not None:
+            published = await self._repository.get_published_evidence(source_id, file_ids)
+        else:
+            if self._read_session_factory is None:
+                raise RuntimeError("Read session factory is required")
+            async with self._read_session_factory() as session:
+                published = await ProductChatRepository(session).get_published_evidence(source_id, file_ids)
         evidence: list[GroundedCitation] = []
         for chunk, file_id in usable_chunks:
             material = published.get(file_id)
@@ -149,10 +174,13 @@ class AnswerService:
                 continue
             item, version = material
             metadata = chunk["metadata"]
+            source_url = self._openable_source_url(item.source_url)
+            if source_url is None:
+                continue
             chunk_index = metadata.get("chunk_index")
             locator = (
                 f"第{chunk_index + 1}段"
-                if isinstance(chunk_index, int) and not isinstance(chunk_index, bool)
+                if isinstance(chunk_index, int) and not isinstance(chunk_index, bool) and chunk_index >= 0
                 else "文档正文"
             )
             evidence.append(
@@ -162,8 +190,10 @@ class AnswerService:
                     item_id=item.item_id,
                     version_id=version.version_id,
                     yuxi_file_id=version.yuxi_file_id,
-                    title=item.title or "",
-                    source_url=item.source_url or "",
+                    title=item.title.strip()
+                    if isinstance(item.title, str) and item.title.strip()
+                    else UNTITLED_SOURCE_TEXT,
+                    source_url=source_url,
                     path_text=item.path_text,
                     locator=locator,
                     excerpt=chunk["content"],
@@ -171,6 +201,22 @@ class AnswerService:
                 )
             )
         return tuple(evidence)
+
+    @staticmethod
+    def _openable_source_url(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        source_url = value.strip()
+        if not source_url or any(character.isspace() for character in source_url):
+            return None
+        try:
+            parsed = urlsplit(source_url)
+            parsed.port
+        except ValueError:
+            return None
+        if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
+            return None
+        return source_url
 
     @staticmethod
     def _build_prompt(question: str, evidence: tuple[GroundedCitation, ...]) -> list[dict[str, str]]:

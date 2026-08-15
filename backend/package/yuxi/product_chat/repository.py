@@ -99,27 +99,41 @@ class ProductChatRepository:
     async def append_exchange(
         self,
         conversation: ProductConversation,
+        owner_user_id: int,
         user_content: str,
         answer: GroundedAnswer,
     ) -> tuple[ProductMessage, ProductMessage]:
-        user_message = ProductMessage(
-            conversation_id=conversation.conversation_id,
-            role=MessageRole.USER,
-            content=user_content,
-        )
-        assistant_message = ProductMessage(
-            conversation_id=conversation.conversation_id,
-            role=MessageRole.ASSISTANT,
-            content=answer.content,
-            answer_status=answer.status,
-            model_version=answer.model_version,
-            prompt_version=answer.prompt_version,
-        )
         try:
+            result = await self.session.execute(
+                select(ProductConversation)
+                .where(
+                    ProductConversation.conversation_id == conversation.conversation_id,
+                    ProductConversation.owner_user_id == owner_user_id,
+                    ProductConversation.status == ConversationStatus.ACTIVE,
+                )
+                .with_for_update()
+            )
+            active_conversation = result.scalar_one_or_none()
+            if active_conversation is None:
+                raise ProductChatNotFoundError
+
+            user_message = ProductMessage(
+                conversation_id=active_conversation.conversation_id,
+                role=MessageRole.USER,
+                content=user_content,
+            )
+            assistant_message = ProductMessage(
+                conversation_id=active_conversation.conversation_id,
+                role=MessageRole.ASSISTANT,
+                content=answer.content,
+                answer_status=answer.status,
+                model_version=answer.model_version,
+                prompt_version=answer.prompt_version,
+            )
             now = utc_now_naive()
-            if not (conversation.title or "").strip():
-                conversation.title = user_content.strip()[:30] or None
-            conversation.updated_at = now
+            if not (active_conversation.title or "").strip():
+                active_conversation.title = user_content.strip()[:30] or None
+            active_conversation.updated_at = now
             self.session.add_all([user_message, assistant_message])
             await self.session.flush()
             self.session.add_all(
@@ -173,6 +187,15 @@ class ProductChatRepository:
                 FeishuMaterialVersion.yuxi_file_id.in_(file_ids),
             )
         )
-        return {
-            version.yuxi_file_id: (item, version) for item, version in result.all() if version.yuxi_file_id is not None
-        }
+        published: dict[str, tuple[FeishuSourceItem, FeishuMaterialVersion]] = {}
+        ambiguous_file_ids: set[str] = set()
+        for item, version in result.all():
+            file_id = version.yuxi_file_id
+            if file_id is None or file_id in ambiguous_file_ids:
+                continue
+            if file_id in published:
+                published.pop(file_id)
+                ambiguous_file_ids.add(file_id)
+                continue
+            published[file_id] = (item, version)
+        return published

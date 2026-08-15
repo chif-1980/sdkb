@@ -219,6 +219,87 @@ async def test_empty_revalidated_evidence_returns_exact_insufficient_without_mod
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_url",
+    [None, "", "   ", "not-a-url", "ftp://example.test/item-1", "https:///missing-host"],
+)
+async def test_evidence_without_an_openable_source_url_fails_closed(source_url):
+    material = _published_material("file-1")
+    material[0].source_url = source_url
+    service, *_rest, model, selector = _service(
+        chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": material},
+    )
+
+    result = await service.answer("问题", object(), "conversation-1")
+
+    assert result.status == "INSUFFICIENT"
+    assert result.citations == ()
+    assert selector.calls == []
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("title", [None, "", "   "])
+async def test_missing_evidence_title_uses_a_stable_fallback(title):
+    material = _published_material("file-1")
+    material[0].title = title
+    payload = json.dumps(
+        {"status": "SUPPORTED", "answer": "有正式资料支持。", "citation_ids": ["E1"]},
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": material},
+        model_content=payload,
+    )
+
+    result = await service.answer("问题", object(), "conversation-1")
+
+    assert result.citations[0].title == "未命名文档"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chunk_index", [-1, -2, True, 1.5, "1", None])
+async def test_invalid_chunk_index_uses_document_body_locator(chunk_index):
+    payload = json.dumps(
+        {"status": "SUPPORTED", "answer": "有正式资料支持。", "citation_ids": ["E1"]},
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1", "chunk_index": chunk_index}}],
+        published={"file-1": _published_material("file-1")},
+        model_content=payload,
+    )
+
+    result = await service.answer("问题", object(), "conversation-1")
+
+    assert result.citations[0].locator == "文档正文"
+
+
+@pytest.mark.asyncio
+async def test_multiple_chunks_from_one_unambiguous_file_remain_usable():
+    payload = json.dumps(
+        {"status": "SUPPORTED", "answer": "两段正式资料均支持。", "citation_ids": ["E1", "E2"]},
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=[
+            {"content": "第一段正式内容", "metadata": {"file_id": "file-1", "chunk_index": 0}},
+            {"content": "第二段正式内容", "metadata": {"file_id": "file-1", "chunk_index": 1}},
+        ],
+        published={"file-1": _published_material("file-1")},
+        model_content=payload,
+    )
+
+    result = await service.answer("问题", object(), "conversation-1")
+
+    assert [citation.evidence_id for citation in result.citations] == ["E1", "E2"]
+    assert [citation.yuxi_file_id for citation in result.citations] == ["file-1", "file-1"]
+    assert [citation.locator for citation in result.citations] == ["第1段", "第2段"]
+
+
+@pytest.mark.asyncio
 async def test_conflicting_answer_keeps_model_citation_order_and_deduplicates_ids():
     chunks = [
         {"content": "标准版支持 100 人。", "metadata": {"file_id": "file-1"}},
