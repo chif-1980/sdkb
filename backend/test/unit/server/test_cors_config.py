@@ -42,10 +42,13 @@ def test_production_does_not_default_to_wildcard(monkeypatch):
 
 
 def test_cors_allows_configured_origin_with_credentials():
+    options = _build_cors_options(["http://localhost:5173"])
     client = _client_for_origins(["http://localhost:5173"])
 
     response = _preflight(client, "http://localhost:5173")
 
+    assert options["allow_credentials"] is True
+    assert "*" not in options["allow_origins"]
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
     assert response.headers["access-control-allow-credentials"] == "true"
