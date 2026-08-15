@@ -130,7 +130,10 @@ async def get_product_user(
 ) -> User:
     token = request.cookies.get(PRODUCT_SESSION_COOKIE_NAME)
     if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="LOGIN_REQUIRED")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "LOGIN_REQUIRED", "message": "请使用飞书登录"},
+        )
 
     try:
         payload = AuthUtils.verify_access_token(token)
@@ -138,12 +141,18 @@ async def get_product_user(
         if payload.get("token_kind") != "enterprise_assistant":
             raise ValueError
     except (TypeError, ValueError):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="SESSION_INVALID") from None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "SESSION_INVALID", "message": "登录已失效"},
+        ) from None
 
     result = await db.execute(select(User).filter(User.id == user_id, User.is_deleted == 0))
     user = result.scalar_one_or_none()
     if user is None or user.department_id is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="IDENTITY_MAPPING_REQUIRED")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "IDENTITY_MAPPING_REQUIRED", "message": "账号尚未完成组织映射"},
+        )
     return user
 
 

@@ -148,7 +148,9 @@ async def test_session_rejects_bearer_admin_token_without_product_cookie(api_con
     response = await client.get("/api/session", headers={"Authorization": f"Bearer {admin_token}"})
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "LOGIN_REQUIRED"
+    assert response.json() == {
+        "detail": {"code": "LOGIN_REQUIRED", "message": "请使用飞书登录"}
+    }
 
 
 async def test_session_rejects_wrong_token_kind_in_product_cookie(api_context):
@@ -161,7 +163,29 @@ async def test_session_rejects_wrong_token_kind_in_product_cookie(api_context):
     )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "SESSION_INVALID"
+    assert response.json() == {
+        "detail": {"code": "SESSION_INVALID", "message": "登录已失效"}
+    }
+
+
+async def test_session_rejects_missing_mapped_user_with_structured_error(api_context):
+    client, _, _, _, _ = api_context
+    token = AuthUtils.create_access_token(
+        {"sub": "999999", "token_kind": "enterprise_assistant"}
+    )
+
+    response = await client.get(
+        "/api/session",
+        cookies={"enterprise_assistant_session": token},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": {
+            "code": "IDENTITY_MAPPING_REQUIRED",
+            "message": "账号尚未完成组织映射",
+        }
+    }
 
 
 async def test_session_returns_bound_product_user(api_context):
