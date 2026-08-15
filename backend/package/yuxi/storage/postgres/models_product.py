@@ -4,7 +4,7 @@ from enum import StrEnum
 from secrets import token_bytes
 from time import time_ns
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, Index, Integer, String, Text
 
 from yuxi.storage.postgres.models_business import Base
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -130,7 +130,7 @@ class MessageCitation(Base):
     title = Column(String(512), nullable=False)
     source_url = Column(String(2048), nullable=False)
     path_text = Column(Text, nullable=True)
-    locator = Column(JSON, nullable=False)
+    locator = Column(Text, nullable=False)
     excerpt = Column(Text, nullable=False)
     source_version_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)

@@ -1,8 +1,8 @@
-from datetime import datetime
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import CheckConstraint, Enum, Integer, String
+from sqlalchemy import CheckConstraint, Enum, Integer, String, Text
 
 from yuxi.product_chat.schemas import (
     CitationResponse,
@@ -156,6 +156,10 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
     assert all(column.default.arg.__name__ == "utc_now_naive" for column in timestamp_columns)
 
 
+def test_message_citation_locator_is_stored_as_text():
+    assert isinstance(MessageCitation.__table__.c.locator.type, Text)
+
+
 def test_product_models_define_stable_enums_and_message_constraints():
     assert [status.value for status in AuthorizationStatus] == ["ACTIVE", "REVOKED"]
     assert [status.value for status in ConversationStatus] == ["ACTIVE", "ARCHIVED"]
@@ -195,8 +199,27 @@ def test_product_request_schemas_reject_extra_fields_and_enforce_message_length(
         CreateConversationRequest(title="x" * 81)
 
 
+def test_product_response_contract_uses_literals_and_string_timestamps():
+    assert ConversationSummaryResponse.model_fields["status"].annotation == Literal["ACTIVE", "ARCHIVED"]
+    assert CitationResponse.model_fields["kind"].annotation == Literal["ENTERPRISE_EVIDENCE"]
+    assert MessageResponse.model_fields["role"].annotation == Literal["USER", "ASSISTANT"]
+    assert MessageResponse.model_fields["answer_status"].annotation == (
+        Literal["SUPPORTED", "INSUFFICIENT", "CONFLICTING"] | None
+    )
+    assert ConversationSummaryResponse.model_fields["created_at"].annotation is str
+    assert ConversationSummaryResponse.model_fields["updated_at"].annotation is str
+    assert MessageResponse.model_fields["created_at"].annotation is str
+    assert CitationResponse.model_fields["version_at"].annotation == (str | None)
+
+
+def test_product_user_response_allows_omitting_avatar_url():
+    user = ProductUserResponse(id="user-1", name="Yuxi")
+
+    assert user.avatar_url is None
+
+
 def test_product_response_schemas_accept_snake_case_and_serialize_camel_case():
-    created_at = datetime(2026, 8, 16, 9, 30)
+    created_at = "2026-08-16T09:30:00Z"
     conversation = ConversationSummaryResponse(
         id="01K2V7RM06QJ1H1W6EJ8JECMKT",
         title="Enterprise answer",
@@ -210,9 +233,9 @@ def test_product_response_schemas_accept_snake_case_and_serialize_camel_case():
         kind="ENTERPRISE_EVIDENCE",
         title="Deployment guide",
         path=None,
-        locator={"page": 3},
+        locator="page=3",
         excerpt="Use the enterprise deployment profile.",
-        version_at=None,
+        version_at="2026-08-15T12:00:00Z",
     )
     user_message = MessageResponse(
         id="01K2V7RM06QJ1H1W6EJ8JECMKW",
@@ -231,7 +254,7 @@ def test_product_response_schemas_accept_snake_case_and_serialize_camel_case():
         created_at=created_at,
     )
 
-    session = SessionResponse(user=ProductUserResponse(id="user-1", name="Yuxi", avatar_url=None))
+    session = SessionResponse(user=ProductUserResponse(id="user-1", name="Yuxi"))
     listing = ConversationListResponse(conversations=[conversation])
     wrapped = ConversationResponse(conversation=conversation)
     detail = ConversationDetailResponse(conversation=conversation, messages=[user_message, assistant_message])
@@ -244,6 +267,9 @@ def test_product_response_schemas_accept_snake_case_and_serialize_camel_case():
     assert session.model_dump() == {"user": {"id": "user-1", "name": "Yuxi", "avatarUrl": None}}
     assert listing.model_dump()["conversations"][0]["messageCount"] == 2
     assert wrapped.model_dump()["conversation"]["status"] == "ACTIVE"
+    assert wrapped.model_dump()["conversation"]["createdAt"] == created_at
     assert detail.model_dump()["conversation"]["messageCount"] == 2
     assert exchange.model_dump()["userMessage"]["answerStatus"] is None
-    assert exchange.model_dump()["assistantMessage"]["citations"][0]["versionAt"] is None
+    serialized_citation = exchange.model_dump()["assistantMessage"]["citations"][0]
+    assert serialized_citation["locator"] == "page=3"
+    assert serialized_citation["versionAt"] == "2026-08-15T12:00:00Z"

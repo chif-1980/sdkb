@@ -1,10 +1,8 @@
 """Pydantic contracts for enterprise assistant product chat APIs."""
 
-from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-
-from yuxi.storage.postgres.models_product import AnswerStatus, CitationKind, ConversationStatus, MessageRole
 
 
 def to_camel(value: str) -> str:
@@ -31,7 +29,7 @@ class SendMessageRequest(StrictRequest):
 class ProductUserResponse(ProductResponse):
     id: str
     name: str
-    avatar_url: str | None
+    avatar_url: str | None = None
 
 
 class SessionResponse(ProductResponse):
@@ -41,29 +39,29 @@ class SessionResponse(ProductResponse):
 class ConversationSummaryResponse(ProductResponse):
     id: str
     title: str
-    status: ConversationStatus
+    status: Literal["ACTIVE", "ARCHIVED"]
     message_count: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: str
+    updated_at: str
 
 
 class CitationResponse(ProductResponse):
     id: str
-    kind: CitationKind
+    kind: Literal["ENTERPRISE_EVIDENCE"]
     title: str
     path: str | None
-    locator: dict[str, object]
+    locator: str
     excerpt: str
-    version_at: datetime | None
+    version_at: str | None
 
 
 class MessageResponse(ProductResponse):
     id: str
-    role: MessageRole
+    role: Literal["USER", "ASSISTANT"]
     content: str
-    answer_status: AnswerStatus | None
+    answer_status: Literal["SUPPORTED", "INSUFFICIENT", "CONFLICTING"] | None
     citations: list[CitationResponse]
-    created_at: datetime
+    created_at: str
 
 
 class ConversationListResponse(ProductResponse):
