@@ -9,6 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 # 创建专用的访问日志记录器
 access_logger = logging.getLogger("access_logger")
+_QUERY_REDACTED_PATHS = frozenset({"/api/auth/feishu/callback"})
 
 # 设置访问日志记录器
 if not access_logger.handlers:
@@ -42,6 +43,9 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         """处理请求并记录访问日志"""
         # 记录请求开始时间
         start_time = time.perf_counter()
+        request_target = request.url.path
+        if request.url.query and request.url.path not in _QUERY_REDACTED_PATHS:
+            request_target = f"{request_target}?{request.url.query}"
 
         # 获取客户端IP
         client_ip = _extract_client_ip(request)
@@ -56,7 +60,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         # 格式化日志消息，添加处理时间
         log_message = (
             f"{client_ip}:{request.client.port if request.client else 'unknown'} - "
-            f'"{request.method} {request.url.path}{"?" + request.url.query if request.url.query else ""} '
+            f'"{request.method} {request_target} '
             f'HTTP/{request.scope["http_version"]}" '
             f"{response.status_code} - {process_time_ms}ms"
         )

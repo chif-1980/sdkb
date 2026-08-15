@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
+from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_db, get_product_user
@@ -20,7 +21,23 @@ from yuxi.product_chat.schemas import ProductUserResponse, SessionResponse
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.redis import get_async_redis_client
 
-product_auth = APIRouter()
+
+class ProductAuthRoute(APIRoute):
+    def get_route_handler(self):
+        route_handler = super().get_route_handler()
+        if not self.path.endswith("/auth/feishu/callback"):
+            return route_handler
+
+        async def callback_route_handler(request: Request) -> Response:
+            try:
+                return await route_handler(request)
+            except Exception:
+                return RedirectResponse(url="/login?error=FEISHU_OAUTH_FAILED", status_code=303)
+
+        return callback_route_handler
+
+
+product_auth = APIRouter(route_class=ProductAuthRoute)
 
 
 def _is_production() -> bool:
@@ -50,12 +67,10 @@ async def feishu_login(
 
 @product_auth.get("/auth/feishu/callback")
 async def feishu_callback(
-    request: Request,
     code: str | None = None,
     state: str | None = None,
     service: ProductAuthService = Depends(get_product_auth_service),
 ) -> RedirectResponse:
-    request.scope["query_string"] = b""
     try:
         _, session_token = await service.complete_callback(code=code, state=state)
     except ProductAuthError as exc:

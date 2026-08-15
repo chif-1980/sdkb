@@ -154,6 +154,17 @@ class ProductAuthService:
             await self._db.commit()
         except IntegrityError as exc:
             await self._db.rollback()
+            result = await self._db.execute(
+                select(FeishuUserBinding).where(FeishuUserBinding.feishu_open_id == open_id)
+            )
+            concurrent_binding = result.scalar_one_or_none()
+            if concurrent_binding is not None:
+                return await self._resolve_existing_binding(
+                    concurrent_binding,
+                    profile,
+                    feishu_user_id,
+                    tenant_key,
+                )
             raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403) from exc
         return user
 

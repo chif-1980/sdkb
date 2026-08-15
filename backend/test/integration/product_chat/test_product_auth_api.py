@@ -238,6 +238,27 @@ async def test_callback_access_log_excludes_code_state_token_and_cookie(api_cont
     assert "enterprise_assistant_session" not in logged
 
 
+async def test_callback_dependency_failure_redirects_without_exposing_secrets(api_context, caplog):
+    client, _, _, access_log, app = api_context
+
+    async def failing_service_dependency():
+        raise RuntimeError("sensitive dependency failure")
+
+    app.dependency_overrides[get_product_auth_service] = failing_service_dependency
+
+    response = await client.get(
+        "/api/auth/feishu/callback",
+        params={"code": "secret-oauth-code", "state": "secret-oauth-state"},
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?error=FEISHU_OAUTH_FAILED"
+    exposed_text = response.text + response.headers["location"] + access_log.getvalue() + caplog.text
+    assert "sensitive dependency failure" not in exposed_text
+    assert "secret-oauth-code" not in exposed_text
+    assert "secret-oauth-state" not in exposed_text
+
+
 async def test_product_session_token_is_rejected_by_existing_bearer_api(api_context):
     client, _, user, _, _ = api_context
     product_token = AuthUtils.create_access_token(
