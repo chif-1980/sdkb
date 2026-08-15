@@ -7,8 +7,10 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
+from ipaddress import ip_address
 from time import perf_counter
 from typing import Any, Literal
+from unicodedata import category
 from urllib.parse import urlsplit
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -206,17 +208,47 @@ class AnswerService:
     def _openable_source_url(value: Any) -> str | None:
         if not isinstance(value, str):
             return None
-        source_url = value.strip()
-        if not source_url or any(character.isspace() for character in source_url):
+        if not value or any(character.isspace() or category(character) == "Cc" for character in value):
             return None
         try:
-            parsed = urlsplit(source_url)
-            parsed.port
+            parsed = urlsplit(value)
+            hostname = parsed.hostname
+            port = parsed.port
+        except (UnicodeError, ValueError):
+            return None
+        if (
+            parsed.scheme.lower() != "https"
+            or hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in {None, 443}
+            or hostname.endswith(".")
+        ):
+            return None
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return None
+        labels = ascii_hostname.split(".")
+        if len(ascii_hostname) > 253 or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or any(not character.isascii() or not (character.isalnum() or character == "-") for character in label)
+            for label in labels
+        ):
+            return None
+        try:
+            ip_address(ascii_hostname)
         except ValueError:
+            pass
+        else:
             return None
-        if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
+        trusted_domains = ("feishu.cn", "larksuite.com")
+        if not any(ascii_hostname == domain or ascii_hostname.endswith(f".{domain}") for domain in trusted_domains):
             return None
-        return source_url
+        return value
 
     @staticmethod
     def _build_prompt(question: str, evidence: tuple[GroundedCitation, ...]) -> list[dict[str, str]]:

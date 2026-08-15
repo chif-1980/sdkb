@@ -26,7 +26,7 @@ def _published_material(file_id: str, *, item_id: str = "item-1", title: str = "
         source_id="source-1",
         item_id=item_id,
         title=title,
-        source_url=f"https://example.test/{item_id}",
+        source_url=f"https://quickdone.feishu.cn/wiki/{item_id}",
         path_text="产品 / 手册",
     )
     version = SimpleNamespace(
@@ -149,7 +149,7 @@ async def test_supported_answer_uses_only_revalidated_evidence_in_retrieval_orde
     assert citation.version_id == "version-item-1"
     assert citation.yuxi_file_id == "file-1"
     assert citation.title == "产品手册"
-    assert citation.source_url == "https://example.test/item-1"
+    assert citation.source_url == "https://quickdone.feishu.cn/wiki/item-1"
     assert citation.path_text == "产品 / 手册"
     assert citation.locator == "第3段"
     assert citation.excerpt == "支持在企业内网私有部署。"
@@ -221,7 +221,34 @@ async def test_empty_revalidated_evidence_returns_exact_insufficient_without_mod
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "source_url",
-    [None, "", "   ", "not-a-url", "ftp://example.test/item-1", "https:///missing-host"],
+    [
+        pytest.param(None, id="null"),
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="blank"),
+        pytest.param("not-a-url", id="not-a-url"),
+        pytest.param("http://quickdone.feishu.cn/wiki/item-1", id="http"),
+        pytest.param("ftp://quickdone.feishu.cn/wiki/item-1", id="ftp"),
+        pytest.param("https:///missing-host", id="missing-host"),
+        pytest.param("https://user@quickdone.feishu.cn/wiki/item-1", id="username"),
+        pytest.param("https://user:secret@quickdone.feishu.cn/wiki/item-1", id="password"),
+        pytest.param("https://quickdone.feishu.cn:8443/wiki/item-1", id="nonstandard-port"),
+        pytest.param("https://quickdone.feishu.cn:invalid/wiki/item-1", id="invalid-port"),
+        pytest.param(" https://quickdone.feishu.cn/wiki/item-1", id="leading-space"),
+        pytest.param("https://quickdone.feishu.cn/wiki/item-1\x00", id="control-character"),
+        pytest.param("https://localhost/wiki/item-1", id="localhost"),
+        pytest.param("https://127.0.0.1/wiki/item-1", id="ipv4"),
+        pytest.param("https://10.0.0.1/wiki/item-1", id="private-ipv4"),
+        pytest.param("https://[::1]/wiki/item-1", id="ipv6"),
+        pytest.param("https://quickdone.feishu.cn./wiki/item-1", id="trailing-dot"),
+        pytest.param("https://-bad.feishu.cn/wiki/item-1", id="leading-hyphen-label"),
+        pytest.param("https://bad..feishu.cn/wiki/item-1", id="empty-label"),
+        pytest.param("https://bad_host.feishu.cn/wiki/item-1", id="invalid-label-character"),
+        pytest.param("https://\ud800.feishu.cn/wiki/item-1", id="invalid-idna"),
+        pytest.param("https://example.test/wiki/item-1", id="untrusted-domain"),
+        pytest.param("https://evilfeishu.cn/wiki/item-1", id="feishu-lookalike"),
+        pytest.param("https://quickdone.feishu.cn.evil.test/wiki/item-1", id="feishu-suffix-bypass"),
+        pytest.param("https://evillarksuite.com/wiki/item-1", id="lark-lookalike"),
+    ],
 )
 async def test_evidence_without_an_openable_source_url_fails_closed(source_url):
     material = _published_material("file-1")
@@ -237,6 +264,38 @@ async def test_evidence_without_an_openable_source_url_fails_closed(source_url):
     assert result.citations == ()
     assert selector.calls == []
     assert model.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://quickdone.feishu.cn/wiki/item-1",
+        "https://feishu.cn/wiki/item-1",
+        "https://tenant.larksuite.com/wiki/item-1",
+        "https://larksuite.com/wiki/item-1",
+        "https://quickdone.feishu.cn:443/wiki/item-1",
+    ],
+)
+async def test_evidence_from_trusted_feishu_and_lark_domains_is_usable(source_url):
+    material = _published_material("file-1")
+    material[0].source_url = source_url
+    payload = json.dumps(
+        {"status": "SUPPORTED", "answer": "有正式资料支持。", "citation_ids": ["E1"]},
+        ensure_ascii=False,
+    )
+    service, *_rest, model, selector = _service(
+        chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": material},
+        model_content=payload,
+    )
+
+    result = await service.answer("问题", object(), "conversation-1")
+
+    assert result.status == "SUPPORTED"
+    assert result.citations[0].source_url == source_url
+    assert selector.calls == ["provider:model-1"]
+    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio

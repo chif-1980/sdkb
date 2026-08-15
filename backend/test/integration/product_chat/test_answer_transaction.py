@@ -1,21 +1,32 @@
+import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import func, select, text, update
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from yuxi.product_chat.repository import ProductChatNotFoundError, ProductChatRepository
 from yuxi.product_chat.source_policy_service import ProductKnowledgeScope
-from yuxi.storage.postgres.models_business import Base
+from yuxi.storage.postgres.models_business import Base, Department, User
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
     FeishuSource,
     FeishuSourceItem,
 )
-from yuxi.storage.postgres.models_product import MessageCitation, MessageRole, ProductConversation, ProductMessage
+from yuxi.storage.postgres.models_product import (
+    ConversationStatus,
+    MessageCitation,
+    MessageRole,
+    ProductConversation,
+    ProductMessage,
+)
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -32,6 +43,85 @@ async def db_session():
     await engine.dispose()
 
 
+@pytest_asyncio.fixture()
+async def postgres_answer_context():
+    postgres_url = os.getenv("TEST_POSTGRES_URL")
+    if not postgres_url:
+        pytest.skip("TEST_POSTGRES_URL is not configured for PostgreSQL answer transaction tests.")
+    try:
+        parsed_url = make_url(postgres_url)
+    except ArgumentError:
+        pytest.fail("TEST_POSTGRES_URL must be a valid postgresql+asyncpg URL.")
+    if parsed_url.drivername != "postgresql+asyncpg":
+        pytest.fail("TEST_POSTGRES_URL must use the postgresql+asyncpg scheme.")
+
+    schema_name = f"product_answer_{uuid4().hex}"
+    engine = create_async_engine(
+        postgres_url,
+        isolation_level="READ COMMITTED",
+        pool_size=5,
+        max_overflow=0,
+    )
+    schema_engine = engine.execution_options(schema_translate_map={None: schema_name})
+    factory = async_sessionmaker(schema_engine, expire_on_commit=False)
+    schema_created = False
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+            schema_created = True
+        async with schema_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection,
+                    tables=[
+                        Department.__table__,
+                        User.__table__,
+                        ProductConversation.__table__,
+                        ProductMessage.__table__,
+                        MessageCitation.__table__,
+                    ],
+                )
+            )
+        yield schema_engine, factory
+    finally:
+        try:
+            if schema_created:
+                async with engine.begin() as connection:
+                    await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
+        finally:
+            await engine.dispose()
+
+
+async def _seed_postgres_conversation(factory):
+    async with factory() as session:
+        user = User(
+            username="Answer Transaction User",
+            uid="answer-transaction-user",
+            password_hash="not-used-by-product-chat",
+            role="user",
+        )
+        session.add(user)
+        await session.flush()
+        conversation = ProductConversation(owner_user_id=user.id, title="")
+        session.add(conversation)
+        await session.commit()
+        await session.refresh(conversation)
+        return user.id, conversation
+
+
+async def _assert_postgres_backend_is_blocked(factory, *, blocked_pid: int, blocker_pid: int) -> None:
+    statement = text("SELECT CAST(:blocker_pid AS integer) = ANY(pg_blocking_pids(CAST(:blocked_pid AS integer)))")
+    try:
+        async with asyncio.timeout(5), factory() as observer:
+            while not await observer.scalar(
+                statement,
+                {"blocked_pid": blocked_pid, "blocker_pid": blocker_pid},
+            ):
+                pass
+    except TimeoutError:
+        pytest.fail("PostgreSQL did not report the expected blocked backend before timeout.")
+
+
 def _citation(**overrides):
     values = {
         "evidence_id": "E1",
@@ -40,7 +130,7 @@ def _citation(**overrides):
         "version_id": "version-1",
         "yuxi_file_id": "file-1",
         "title": "产品手册",
-        "source_url": "https://example.test/item-1",
+        "source_url": "https://quickdone.feishu.cn/wiki/item-1",
         "path_text": "产品 / 手册",
         "locator": "第1段",
         "excerpt": "支持私有部署。",
@@ -58,6 +148,10 @@ def _answer(*, citations=(_citation(),)):
         model_version="model-1",
         prompt_version="enterprise-grounded-v1",
     )
+
+
+def _postgres_answer():
+    return _answer(citations=(_citation(source_version_at=datetime(2026, 8, 16, 8, 0)),))
 
 
 def _add_material(
@@ -80,7 +174,7 @@ def _add_material(
         item_type="page",
         title=f"Title {item_id}",
         path_text="产品 / 手册",
-        source_url=f"https://example.test/{item_id}",
+        source_url=f"https://quickdone.feishu.cn/wiki/{item_id}",
         source_validity=validity,
         active_version_id=version_id if active else f"other-{version_id}",
     )
@@ -206,6 +300,170 @@ async def test_append_exchange_rechecks_owner_inside_write_transaction(db_sessio
         )
 
     assert await db_session.scalar(select(func.count()).select_from(ProductMessage)) == 0
+
+
+async def test_postgres_archive_lock_wins_before_append(postgres_answer_context):
+    _, factory = postgres_answer_context
+    owner_user_id, conversation = await _seed_postgres_conversation(factory)
+    archive_locked = asyncio.Event()
+    release_archive = asyncio.Event()
+
+    async with factory() as archive_session, factory() as append_session:
+        archive_pid = await archive_session.scalar(text("SELECT pg_backend_pid()"))
+        append_pid = await append_session.scalar(text("SELECT pg_backend_pid()"))
+        assert archive_pid is not None
+        assert append_pid is not None
+
+        async def archive_first() -> None:
+            try:
+                result = await archive_session.execute(
+                    update(ProductConversation)
+                    .where(
+                        ProductConversation.conversation_id == conversation.conversation_id,
+                        ProductConversation.status == ConversationStatus.ACTIVE,
+                    )
+                    .values(status=ConversationStatus.ARCHIVED)
+                )
+                assert result.rowcount == 1
+                archive_locked.set()
+                await release_archive.wait()
+                await archive_session.commit()
+            except Exception:
+                await archive_session.rollback()
+                raise
+
+        archive_task = asyncio.create_task(archive_first())
+        append_task = None
+        try:
+            await asyncio.wait_for(archive_locked.wait(), timeout=2)
+            append_task = asyncio.create_task(
+                ProductChatRepository(append_session).append_exchange(
+                    conversation=conversation,
+                    owner_user_id=owner_user_id,
+                    user_content="归档竞争不应写入",
+                    answer=_postgres_answer(),
+                )
+            )
+            await _assert_postgres_backend_is_blocked(
+                factory,
+                blocked_pid=append_pid,
+                blocker_pid=archive_pid,
+            )
+            release_archive.set()
+            await asyncio.wait_for(archive_task, timeout=2)
+            with pytest.raises(ProductChatNotFoundError):
+                await asyncio.wait_for(append_task, timeout=2)
+        finally:
+            release_archive.set()
+            await asyncio.gather(
+                archive_task,
+                *([append_task] if append_task is not None else []),
+                return_exceptions=True,
+            )
+
+    async with factory() as verification_session:
+        stored_status = await verification_session.scalar(
+            select(ProductConversation.status).where(
+                ProductConversation.conversation_id == conversation.conversation_id
+            )
+        )
+        message_count = await verification_session.scalar(select(func.count()).select_from(ProductMessage))
+    assert stored_status == ConversationStatus.ARCHIVED
+    assert message_count == 0
+
+
+async def test_postgres_append_lock_wins_before_archive(postgres_answer_context):
+    schema_engine, factory = postgres_answer_context
+    owner_user_id, conversation = await _seed_postgres_conversation(factory)
+    append_selected = asyncio.Event()
+    release_append = asyncio.Event()
+    archive_update_started = asyncio.Event()
+
+    class PausingAppendSession(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            result = await super().execute(statement, *args, **kwargs)
+            selects_conversation = getattr(statement, "is_select", False) and any(
+                description.get("entity") is ProductConversation
+                for description in getattr(statement, "column_descriptions", ())
+            )
+            if selects_conversation:
+                append_selected.set()
+                await release_append.wait()
+            return result
+
+    class SignalingArchiveSession(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            updates_conversation = (
+                getattr(statement, "is_update", False)
+                and getattr(getattr(statement, "table", None), "name", None) == ProductConversation.__tablename__
+            )
+            if updates_conversation:
+                archive_update_started.set()
+            return await super().execute(statement, *args, **kwargs)
+
+    append_factory = async_sessionmaker(
+        schema_engine,
+        class_=PausingAppendSession,
+        expire_on_commit=False,
+    )
+    archive_factory = async_sessionmaker(
+        schema_engine,
+        class_=SignalingArchiveSession,
+        expire_on_commit=False,
+    )
+    async with append_factory() as append_session, archive_factory() as archive_session:
+        append_pid = await append_session.scalar(text("SELECT pg_backend_pid()"))
+        archive_pid = await archive_session.scalar(text("SELECT pg_backend_pid()"))
+        assert append_pid is not None
+        assert archive_pid is not None
+
+        append_task = asyncio.create_task(
+            ProductChatRepository(append_session).append_exchange(
+                conversation=conversation,
+                owner_user_id=owner_user_id,
+                user_content="追加先取得锁",
+                answer=_postgres_answer(),
+            )
+        )
+        archive_task = None
+        try:
+            await asyncio.wait_for(append_selected.wait(), timeout=2)
+            archive_task = asyncio.create_task(
+                ProductChatRepository(archive_session).archive_conversation(
+                    conversation.conversation_id,
+                    owner_user_id,
+                )
+            )
+            await asyncio.wait_for(archive_update_started.wait(), timeout=2)
+            await _assert_postgres_backend_is_blocked(
+                factory,
+                blocked_pid=archive_pid,
+                blocker_pid=append_pid,
+            )
+            release_append.set()
+            user_message, assistant_message = await asyncio.wait_for(append_task, timeout=2)
+            await asyncio.wait_for(archive_task, timeout=2)
+            assert [user_message.role, assistant_message.role] == [
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+            ]
+        finally:
+            release_append.set()
+            await asyncio.gather(
+                append_task,
+                *([archive_task] if archive_task is not None else []),
+                return_exceptions=True,
+            )
+
+    async with factory() as verification_session:
+        stored_status = await verification_session.scalar(
+            select(ProductConversation.status).where(
+                ProductConversation.conversation_id == conversation.conversation_id
+            )
+        )
+        message_count = await verification_session.scalar(select(func.count()).select_from(ProductMessage))
+    assert stored_status == ConversationStatus.ARCHIVED
+    assert message_count == 2
 
 
 async def test_append_exchange_rolls_back_every_row_when_a_citation_fails(db_session):
