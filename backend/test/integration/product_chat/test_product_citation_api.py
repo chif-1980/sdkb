@@ -222,7 +222,12 @@ async def test_citation_endpoints_require_product_session(citation_api_context, 
     response = await context.client.get(f"/api/citations/{context.citation_id}{suffix}")
 
     assert response.status_code == 401
-    assert response.json()["detail"]["code"] == "LOGIN_REQUIRED"
+    assert response.json() == {
+        "error": {
+            "code": "LOGIN_REQUIRED",
+            "message": "请使用飞书登录",
+        }
+    }
 
 
 async def test_get_citation_returns_persisted_camel_case_snapshot_after_current_policy_check(
@@ -284,6 +289,12 @@ async def test_nonexistent_and_cross_user_citations_are_hidden_as_not_found(
     )
 
     assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "CITATION_NOT_FOUND",
+            "message": "引用不存在",
+        }
+    }
     assert context.policy_calls == []
 
 
@@ -312,6 +323,12 @@ async def test_current_knowledge_policy_denial_or_failure_returns_403_even_for_s
     )
 
     assert response.status_code == 403
+    assert response.json() == {
+        "error": {
+            "code": "CITATION_ACCESS_DENIED",
+            "message": "当前无权访问该引用",
+        }
+    }
 
 
 @pytest.mark.parametrize("suffix", ["", "/open"])
@@ -342,6 +359,12 @@ async def test_withdrawn_source_version_or_material_returns_410(
     )
 
     assert response.status_code == 410
+    assert response.json() == {
+        "error": {
+            "code": "CITATION_GONE",
+            "message": "引用资料已失效",
+        }
+    }
 
 
 async def test_citation_is_gone_when_version_no_longer_belongs_to_original_item(

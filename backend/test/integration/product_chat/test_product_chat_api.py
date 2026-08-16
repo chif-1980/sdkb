@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, inspect, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -138,6 +138,10 @@ async def chat_api_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.include_router(router, prefix="/api")
     app.dependency_overrides[get_db] = override_db
 
+    @app.get("/api/test/non-product-error")
+    async def non_product_error():
+        raise HTTPException(status_code=418, detail="非产品接口错误")
+
     async def create_conversation(
         *,
         owner_id_override: int | None = None,
@@ -196,7 +200,19 @@ async def test_chat_endpoints_require_product_session(
     response = await chat_api_context.client.request(method, path, json=json_body)
 
     assert response.status_code == 401
-    assert response.json()["detail"]["code"] == "LOGIN_REQUIRED"
+    assert response.json() == {
+        "error": {
+            "code": "LOGIN_REQUIRED",
+            "message": "请使用飞书登录",
+        }
+    }
+
+
+async def test_non_product_route_keeps_fastapi_default_error_shape(chat_api_context):
+    response = await chat_api_context.client.get("/api/test/non-product-error")
+
+    assert response.status_code == 418
+    assert response.json() == {"detail": "非产品接口错误"}
 
 
 async def test_create_and_list_conversations_use_camel_case_owned_active_summaries(
@@ -265,7 +281,7 @@ async def test_send_and_detail_return_persisted_exchange_for_each_answer_status(
         headers=context.owner_headers,
     )
 
-    assert send_response.status_code == 200
+    assert send_response.status_code == 201
     exchange = send_response.json()
     assert exchange["conversation"]["title"] == "企业版如何部署？"
     assert exchange["conversation"]["messageCount"] == 2
@@ -340,6 +356,12 @@ async def test_cross_user_conversation_access_is_hidden_as_not_found(
     )
 
     assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "CONVERSATION_NOT_FOUND",
+            "message": "会话不存在",
+        }
+    }
     assert answer_calls == 0
 
 
@@ -427,6 +449,12 @@ async def test_technical_request_fields_are_rejected_without_side_effects(
         message_count = await session.scalar(select(func.count()).select_from(ProductMessage))
         conversation_count = await session.scalar(select(func.count()).select_from(ProductConversation))
     assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "REQUEST_VALIDATION_ERROR",
+            "message": "请求参数不合法",
+        }
+    }
     assert message_count == 0
     assert conversation_count == 1
     assert answer_calls == 0
@@ -457,7 +485,7 @@ async def test_send_releases_auth_and_read_transactions_before_answer_and_uses_n
         json={"content": "事务边界问题"},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert context.session_events == ["enter:1", "exit:1", "enter:2", "exit:2"]
     assert len(context.short_sessions) == 2
     assert context.short_sessions[0] is not context.short_sessions[1]

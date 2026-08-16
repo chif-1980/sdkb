@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 
+from server.routers.product_api_route import ProductApiRoute
 from server.utils.auth_middleware import get_product_user
 from yuxi.product_chat.citation_service import CitationResolutionError, CitationService
 from yuxi.product_chat.schemas import CitationResponse
@@ -11,7 +12,7 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.storage.postgres.models_product import MessageCitation
 from yuxi.utils.datetime_utils import format_utc_datetime
 
-product_citation = APIRouter()
+product_citation = APIRouter(route_class=ProductApiRoute)
 
 
 def _citation_response(citation: MessageCitation) -> CitationResponse:

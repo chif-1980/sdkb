@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse, Response
 
+from server.routers.product_api_route import ProductApiRoute
 from server.utils.auth_middleware import get_product_user
 from yuxi.product_chat.answer_service import AnswerService
 from yuxi.product_chat.repository import ProductChatNotFoundError, ProductChatRepository
@@ -29,7 +30,7 @@ from yuxi.storage.postgres.models_product import (
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import format_utc_datetime
 
-product_chat = APIRouter()
+product_chat = APIRouter(route_class=ProductApiRoute)
 
 
 def _not_found() -> HTTPException:
@@ -159,6 +160,7 @@ async def get_conversation(
 @product_chat.post(
     "/chat/conversations/{conversation_id}/messages",
     response_model=MessageExchangeResponse,
+    status_code=status.HTTP_201_CREATED,
 )
 async def send_message(
     conversation_id: str,
