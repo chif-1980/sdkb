@@ -228,18 +228,19 @@ async def test_repository_hides_wrong_owner_and_archived_conversations(db_sessio
     assert await repository.list_conversations(7) == []
 
 
-async def test_append_exchange_commits_messages_citations_title_and_timestamp_together(db_session):
+async def test_append_exchange_stages_messages_citations_title_and_timestamp_for_caller_commit(db_session):
     repository = ProductChatRepository(db_session)
     conversation = await repository.create_conversation(7, "  ")
     previous_updated_at = conversation.updated_at
     question = "   这是一个用于生成会话标题的首问内容，超过三十个字符后应截断。   "
 
-    user_message, assistant_message = await repository.append_exchange(
+    user_message, assistant_message, stored_citations = await repository.append_exchange(
         conversation,
         7,
         question,
         _answer(),
     )
+    await db_session.commit()
 
     messages = (
         (
@@ -260,6 +261,7 @@ async def test_append_exchange_commits_messages_citations_title_and_timestamp_to
     assert assistant_message.model_version == "model-1"
     assert assistant_message.prompt_version == "enterprise-grounded-v1"
     assert len(citations) == 1
+    assert citations == stored_citations
     assert citations[0].message_id == assistant_message.message_id
     assert citations[0].message_id != user_message.message_id
     assert citations[0].excerpt == "支持私有部署。"
@@ -417,14 +419,17 @@ async def test_postgres_append_lock_wins_before_archive(postgres_answer_context)
         assert append_pid is not None
         assert archive_pid is not None
 
-        append_task = asyncio.create_task(
-            ProductChatRepository(append_session).append_exchange(
+        async def append_and_commit():
+            exchange = await ProductChatRepository(append_session).append_exchange(
                 conversation=conversation,
                 owner_user_id=owner_user_id,
                 user_content="追加先取得锁",
                 answer=_postgres_answer(),
             )
-        )
+            await append_session.commit()
+            return exchange
+
+        append_task = asyncio.create_task(append_and_commit())
         archive_task = None
         try:
             await asyncio.wait_for(append_selected.wait(), timeout=2)
@@ -441,7 +446,7 @@ async def test_postgres_append_lock_wins_before_archive(postgres_answer_context)
                 blocker_pid=append_pid,
             )
             release_append.set()
-            user_message, assistant_message = await asyncio.wait_for(append_task, timeout=2)
+            user_message, assistant_message, _ = await asyncio.wait_for(append_task, timeout=2)
             await asyncio.wait_for(archive_task, timeout=2)
             assert [user_message.role, assistant_message.role] == [
                 MessageRole.USER,
@@ -466,7 +471,7 @@ async def test_postgres_append_lock_wins_before_archive(postgres_answer_context)
     assert message_count == 2
 
 
-async def test_append_exchange_rolls_back_every_row_when_a_citation_fails(db_session):
+async def test_caller_rollback_removes_every_exchange_row_when_a_citation_fails(db_session):
     repository = ProductChatRepository(db_session)
     conversation = await repository.create_conversation(7, "")
     conversation_id = conversation.conversation_id
@@ -478,6 +483,7 @@ async def test_append_exchange_rolls_back_every_row_when_a_citation_fails(db_ses
             "首问",
             _answer(citations=(_citation(source_url=None),)),
         )
+    await db_session.rollback()
 
     message_count = await db_session.scalar(select(func.count()).select_from(ProductMessage))
     citation_count = await db_session.scalar(select(func.count()).select_from(MessageCitation))
@@ -733,6 +739,7 @@ async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db
 
     answer = await answer_service.answer("是否支持私有部署？", object(), conversation.conversation_id)
     await repository.append_exchange(conversation, 7, "是否支持私有部署？", answer)
+    await db_session.commit()
 
     messages = (await db_session.execute(select(ProductMessage).order_by(ProductMessage.id))).scalars().all()
     citations = (await db_session.execute(select(MessageCitation))).scalars().all()

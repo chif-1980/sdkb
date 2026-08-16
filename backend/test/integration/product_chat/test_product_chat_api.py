@@ -16,12 +16,15 @@ from sqlalchemy import func, inspect, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.routers import router
+from server.routers import product_chat_router
 from server.utils.auth_middleware import get_db
 from yuxi.product_chat.answer_service import AnswerService, GroundedAnswer, GroundedCitation
+from yuxi.product_chat.repository import ProductChatRepository
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Base, Department, User
 from yuxi.storage.postgres.models_product import (
     ConversationStatus,
+    MessageCitation,
     ProductConversation,
     ProductMessage,
 )
@@ -531,6 +534,94 @@ async def test_knowledge_failure_returns_stable_503_without_half_write_or_error_
     assert secret_error not in response.text
     assert message_count == 0
     assert context.session_events == ["enter:1", "exit:1"]
+
+
+async def test_response_construction_failure_rolls_back_exchange_and_returns_stable_503(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation()
+
+    async def answer_question(*args, **kwargs):
+        return _answer("SUPPORTED")
+
+    def fail_response_construction(*args, **kwargs):
+        raise RuntimeError("response-construction-secret")
+
+    monkeypatch.setattr(AnswerService, "answer", answer_question)
+    monkeypatch.setattr(product_chat_router, "_conversation_response", fail_response_construction)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=context.app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/api/chat/conversations/{conversation.conversation_id}/messages",
+            headers=context.owner_headers,
+            json={"content": "响应构造失败不应留下半写入"},
+        )
+
+    async with context.factory() as session:
+        message_count = await session.scalar(select(func.count()).select_from(ProductMessage))
+        citation_count = await session.scalar(select(func.count()).select_from(MessageCitation))
+
+    assert (response.status_code, message_count, citation_count) == (503, 0, 0)
+    assert response.json() == {
+        "error": {
+            "code": "KNOWLEDGE_SERVICE_UNAVAILABLE",
+            "message": "知识服务暂时不可用，请稍后重试",
+        }
+    }
+    assert "response-construction-secret" not in response.text
+
+
+async def test_send_counts_messages_without_loading_full_history(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation(title="已有会话")
+    async with context.factory() as session:
+        await ProductChatRepository(session).append_exchange(
+            conversation,
+            context.owner_id,
+            "历史问题",
+            _answer("SUPPORTED"),
+        )
+        await session.commit()
+
+    current_answer = GroundedAnswer(
+        status="SUPPORTED",
+        content="这是本次回答。",
+        citations=(_citation(2),),
+        model_version="model-2",
+    )
+
+    async def answer_question(*args, **kwargs):
+        return current_answer
+
+    async def fail_full_history_load(*args, **kwargs):
+        raise AssertionError("send_message must not load full message history")
+
+    monkeypatch.setattr(AnswerService, "answer", answer_question)
+    monkeypatch.setattr(ProductChatRepository, "list_messages_with_citations", fail_full_history_load)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=context.app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/api/chat/conversations/{conversation.conversation_id}/messages",
+            headers=context.owner_headers,
+            json={"content": "本次问题"},
+        )
+
+    assert response.status_code == 201
+    exchange = response.json()
+    assert exchange["conversation"]["messageCount"] == 4
+    assert exchange["assistantMessage"]["content"] == current_answer.content
+    assert [citation["title"] for citation in exchange["assistantMessage"]["citations"]] == ["产品手册 2"]
 
 
 async def test_product_chat_routes_are_not_registered_in_lite_mode():

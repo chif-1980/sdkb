@@ -203,7 +203,7 @@ async def send_message(
     try:
         async with pg_manager.get_async_session_context() as write_db:
             repository = ProductChatRepository(write_db)
-            user_message, assistant_message = await repository.append_exchange(
+            user_message, assistant_message, assistant_citations = await repository.append_exchange(
                 conversation,
                 current_user.id,
                 request.content,
@@ -213,21 +213,19 @@ async def send_message(
                 conversation_id,
                 current_user.id,
             )
-            message_citations = await repository.list_messages_with_citations(conversation_id)
-            citations_by_message = {message.message_id: citations for message, citations in message_citations}
+            message_count = (await repository.get_message_counts([conversation_id])).get(conversation_id, 0)
             return MessageExchangeResponse(
                 conversation=_conversation_response(
                     stored_conversation,
-                    len(message_citations),
+                    message_count,
                 ),
                 user_message=_message_response(user_message, []),
-                assistant_message=_message_response(
-                    assistant_message,
-                    citations_by_message.get(assistant_message.message_id, []),
-                ),
+                assistant_message=_message_response(assistant_message, assistant_citations),
             )
     except ProductChatNotFoundError:
         raise _not_found() from None
+    except Exception as exc:
+        return _knowledge_unavailable(conversation_id, exc)
 
 
 @product_chat.post(

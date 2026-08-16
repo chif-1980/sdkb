@@ -183,64 +183,72 @@ class ProductChatRepository:
         owner_user_id: int,
         user_content: str,
         answer: GroundedAnswer,
-    ) -> tuple[ProductMessage, ProductMessage]:
-        try:
-            result = await self.session.execute(
-                select(ProductConversation)
-                .where(
-                    ProductConversation.conversation_id == conversation.conversation_id,
-                    ProductConversation.owner_user_id == owner_user_id,
-                    ProductConversation.status == ConversationStatus.ACTIVE,
-                )
-                .with_for_update()
+    ) -> tuple[ProductMessage, ProductMessage, list[MessageCitation]]:
+        result = await self.session.execute(
+            select(ProductConversation)
+            .where(
+                ProductConversation.conversation_id == conversation.conversation_id,
+                ProductConversation.owner_user_id == owner_user_id,
+                ProductConversation.status == ConversationStatus.ACTIVE,
             )
-            active_conversation = result.scalar_one_or_none()
-            if active_conversation is None:
-                raise ProductChatNotFoundError
+            .with_for_update()
+        )
+        active_conversation = result.scalar_one_or_none()
+        if active_conversation is None:
+            raise ProductChatNotFoundError
 
-            user_message = ProductMessage(
-                conversation_id=active_conversation.conversation_id,
-                role=MessageRole.USER,
-                content=user_content,
+        user_message = ProductMessage(
+            conversation_id=active_conversation.conversation_id,
+            role=MessageRole.USER,
+            content=user_content,
+        )
+        assistant_message = ProductMessage(
+            conversation_id=active_conversation.conversation_id,
+            role=MessageRole.ASSISTANT,
+            content=answer.content,
+            answer_status=answer.status,
+            model_version=answer.model_version,
+            prompt_version=answer.prompt_version,
+        )
+        now = utc_now_naive()
+        if not (active_conversation.title or "").strip():
+            active_conversation.title = user_content.strip()[:30] or None
+        active_conversation.updated_at = now
+        self.session.add_all([user_message, assistant_message])
+        await self.session.flush()
+        citations = [
+            MessageCitation(
+                message_id=assistant_message.message_id,
+                kind=CitationKind.ENTERPRISE_EVIDENCE,
+                source_id=citation.source_id,
+                item_id=citation.item_id,
+                version_id=citation.version_id,
+                yuxi_file_id=citation.yuxi_file_id,
+                title=citation.title,
+                source_url=citation.source_url,
+                path_text=citation.path_text,
+                locator=citation.locator,
+                excerpt=citation.excerpt,
+                source_version_at=citation.source_version_at,
             )
-            assistant_message = ProductMessage(
-                conversation_id=active_conversation.conversation_id,
-                role=MessageRole.ASSISTANT,
-                content=answer.content,
-                answer_status=answer.status,
-                model_version=answer.model_version,
-                prompt_version=answer.prompt_version,
-            )
-            now = utc_now_naive()
-            if not (active_conversation.title or "").strip():
-                active_conversation.title = user_content.strip()[:30] or None
-            active_conversation.updated_at = now
-            self.session.add_all([user_message, assistant_message])
-            await self.session.flush()
-            self.session.add_all(
-                [
-                    MessageCitation(
-                        message_id=assistant_message.message_id,
-                        kind=CitationKind.ENTERPRISE_EVIDENCE,
-                        source_id=citation.source_id,
-                        item_id=citation.item_id,
-                        version_id=citation.version_id,
-                        yuxi_file_id=citation.yuxi_file_id,
-                        title=citation.title,
-                        source_url=citation.source_url,
-                        path_text=citation.path_text,
-                        locator=citation.locator,
-                        excerpt=citation.excerpt,
-                        source_version_at=citation.source_version_at,
+            for citation in answer.citations
+        ]
+        self.session.add_all(citations)
+        await self.session.flush()
+        if citations:
+            citations = list(
+                (
+                    await self.session.execute(
+                        select(MessageCitation)
+                        .where(MessageCitation.message_id == assistant_message.message_id)
+                        .order_by(MessageCitation.id)
+                        .execution_options(populate_existing=True)
                     )
-                    for citation in answer.citations
-                ]
+                )
+                .scalars()
+                .all()
             )
-            await self.session.commit()
-            return user_message, assistant_message
-        except Exception:
-            await self.session.rollback()
-            raise
+        return user_message, assistant_message, citations
 
     async def get_published_evidence(
         self,

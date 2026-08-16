@@ -947,9 +947,9 @@ class PostgresManager(metaclass=SingletonMeta):
         try:
             yield session
             await session.commit()
-        except Exception as e:
+        except Exception as exc:
             await session.rollback()
-            logger.error(f"PostgreSQL async operation failed: {e}")
+            logger.error("PostgreSQL async operation failed: {}", type(exc).__name__)
             raise
         finally:
             await session.close()
