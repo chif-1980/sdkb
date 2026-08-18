@@ -22,6 +22,10 @@ EXPECTED_ROUTES = {
     ("GET", "/feishu-knowledge/sources"),
     ("POST", "/feishu-knowledge/sources"),
     ("POST", "/feishu-knowledge/sources/{source_id}/check"),
+    ("GET", "/feishu-knowledge/sources/{source_id}/tree"),
+    ("POST", "/feishu-knowledge/sources/{source_id}/oauth/authorize"),
+    ("GET", "/feishu-knowledge/sources/{source_id}/oauth/status"),
+    ("GET", "/feishu-knowledge/oauth/callback"),
     ("POST", "/feishu-knowledge/sources/{source_id}/scan"),
     ("GET", "/feishu-knowledge/sources/{source_id}/runs"),
     ("GET", "/feishu-knowledge/runs/{run_id}"),
@@ -113,6 +117,13 @@ async def test_lite_mode_does_not_register_feishu_knowledge_routes():
             {"name": "Docs", "wiki_root_token": "root", "target_kb_id": "kb-1"},
         ),
         ("POST", "/api/feishu-knowledge/sources/source-1/check", None),
+        ("GET", "/api/feishu-knowledge/sources/source-1/tree", None),
+        (
+            "POST",
+            "/api/feishu-knowledge/sources/source-1/oauth/authorize",
+            {"mode": "qr"},
+        ),
+        ("GET", "/api/feishu-knowledge/sources/source-1/oauth/status", None),
         ("POST", "/api/feishu-knowledge/sources/source-1/scan", {"mode": "incremental"}),
         ("GET", "/api/feishu-knowledge/sources/source-1/runs", None),
         ("GET", "/api/feishu-knowledge/runs/run-1", None),
@@ -225,6 +236,14 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
             calls.append(("approve", version_id, operator_id))
             return SimpleNamespace(version_id=version_id, processing_status="publish_queued")
 
+    class FakeOAuthService:
+        def __init__(self, *, db):
+            assert db is database
+
+        async def get_authorization_status(self, source_id):
+            assert source_id == "source-1"
+            return {"authorized": True, "status": "active"}
+
     async def fake_enqueue_unique_by_payload(**kwargs):
         calls.append(("enqueue_scan", kwargs["payload"]))
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
@@ -234,8 +253,13 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
         return SimpleNamespace(id="task-publish")
 
     monkeypatch.setattr(feishu_module, "FeishuKnowledgeRepository", FakeRepository)
-    monkeypatch.setattr(feishu_module, "FeishuClient", FakeFeishuClient)
+    monkeypatch.setattr(
+        feishu_module,
+        "create_user_authorized_feishu_client",
+        lambda _source_id: FakeFeishuClient(),
+    )
     monkeypatch.setattr(feishu_module, "FeishuReviewService", FakeReviewService)
+    monkeypatch.setattr(feishu_module, "FeishuUserOAuthService", FakeOAuthService)
     monkeypatch.setattr(feishu_module.tasker, "enqueue_unique_by_payload", fake_enqueue_unique_by_payload)
     monkeypatch.setattr(feishu_module, "_enqueue_publish", fake_enqueue_publish)
 
@@ -278,6 +302,7 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
         "name": "Docs",
         "wiki_root_token": "root",
         "wiki_root_url": None,
+        "scan_scope": "root",
         "target_kb_id": "kb-1",
         "enabled": True,
         "created_at": None,

@@ -26,6 +26,7 @@ STATE_TTL_SECONDS = 300
 SESSION_TTL_SECONDS = 8 * 60 * 60
 
 FEISHU_AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
+FEISHU_QR_AUTHORIZE_URL = "https://passport.feishu.cn/suite/passport/oauth/authorize"
 FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
 FEISHU_PROFILE_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 _STATE_KEY_PREFIX = "enterprise-assistant:oauth-state:"
@@ -58,40 +59,29 @@ class ProductAuthService:
 
     async def create_login_url(self, return_path: str = _DEFAULT_RETURN_PATH) -> str:
         self._require_configuration(include_secret=False)
-        normalized_return_path = self._normalize_return_path(return_path)
+        state = await self._create_state(return_path)
+        query = urlencode(
+            {
+                "app_id": self._app_id,
+                "redirect_uri": self._redirect_uri,
+                "response_type": "code",
+                "state": state,
+            }
+        )
+        return f"{FEISHU_AUTHORIZE_URL}?{query}"
 
-        for _ in range(3):
-            state = secrets.token_urlsafe(32)
-            state_hash = self._hash_state(state)
-            payload = json.dumps(
-                {
-                    "state_hash": state_hash,
-                    "return_path": normalized_return_path,
-                    "expires_at": int(time.time()) + STATE_TTL_SECONDS,
-                },
-                separators=(",", ":"),
-            )
-            try:
-                created = await self._redis.set(
-                    self._state_key(state_hash),
-                    payload,
-                    ex=STATE_TTL_SECONDS,
-                    nx=True,
-                )
-            except Exception as exc:
-                raise ProductAuthError("AUTH_SERVICE_UNAVAILABLE", 503) from exc
-            if created:
-                query = urlencode(
-                    {
-                        "app_id": self._app_id,
-                        "redirect_uri": self._redirect_uri,
-                        "response_type": "code",
-                        "state": state,
-                    }
-                )
-                return f"{FEISHU_AUTHORIZE_URL}?{query}"
-
-        raise ProductAuthError("AUTH_SERVICE_UNAVAILABLE", 503)
+    async def create_qr_login_url(self, return_path: str = _DEFAULT_RETURN_PATH) -> str:
+        self._require_configuration(include_secret=False)
+        state = await self._create_state(return_path)
+        query = urlencode(
+            {
+                "client_id": self._app_id,
+                "redirect_uri": self._redirect_uri,
+                "response_type": "code",
+                "state": state,
+            }
+        )
+        return f"{FEISHU_QR_AUTHORIZE_URL}?{query}"
 
     async def complete_callback(self, code: str | None, state: str | None) -> tuple[User, str]:
         await self._consume_state(state)
@@ -220,6 +210,34 @@ class ProductAuthService:
         if not is_valid:
             raise ProductAuthError("FEISHU_OAUTH_STATE_INVALID", 401)
         return payload
+
+    async def _create_state(self, return_path: str) -> str:
+        normalized_return_path = self._normalize_return_path(return_path)
+
+        for _ in range(3):
+            state = secrets.token_urlsafe(32)
+            state_hash = self._hash_state(state)
+            payload = json.dumps(
+                {
+                    "state_hash": state_hash,
+                    "return_path": normalized_return_path,
+                    "expires_at": int(time.time()) + STATE_TTL_SECONDS,
+                },
+                separators=(",", ":"),
+            )
+            try:
+                created = await self._redis.set(
+                    self._state_key(state_hash),
+                    payload,
+                    ex=STATE_TTL_SECONDS,
+                    nx=True,
+                )
+            except Exception as exc:
+                raise ProductAuthError("AUTH_SERVICE_UNAVAILABLE", 503) from exc
+            if created:
+                return state
+
+        raise ProductAuthError("AUTH_SERVICE_UNAVAILABLE", 503)
 
     async def _fetch_profile(self, code: str) -> dict[str, Any]:
         if self._http_client is not None:

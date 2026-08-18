@@ -74,7 +74,10 @@ class FeishuKnowledgeRepository:
         credential_env_name: str,
         enabled: bool = True,
         created_by: str | None = None,
+        scan_scope: str | None = None,
     ) -> FeishuSource:
+        if scan_scope is not None and scan_scope not in {"root", "space"}:
+            raise ValueError("scan_scope must be 'root' or 'space'")
         async with self._write_transaction():
             if self.session.get_bind().dialect.name == "postgresql":
                 result = await self.session.execute(
@@ -87,6 +90,7 @@ class FeishuKnowledgeRepository:
                         credential_env_name=credential_env_name,
                         enabled=enabled,
                         created_by=created_by,
+                        scan_scope=scan_scope,
                     ).returning(FeishuSource),
                     execution_options={"populate_existing": True},
                 )
@@ -104,6 +108,8 @@ class FeishuKnowledgeRepository:
             source.target_kb_id = target_kb_id
             source.credential_env_name = credential_env_name
             source.enabled = enabled
+            if scan_scope is not None:
+                source.scan_scope = scan_scope
             await self.session.flush()
             return source
 
@@ -118,6 +124,7 @@ class FeishuKnowledgeRepository:
         credential_env_name: str,
         enabled: bool,
         created_by: str | None,
+        scan_scope: str | None = None,
     ):
         statement = postgres_insert(FeishuSource).values(
             source_id=source_id,
@@ -128,18 +135,22 @@ class FeishuKnowledgeRepository:
             credential_env_name=credential_env_name,
             enabled=enabled,
             created_by=created_by,
+            scan_scope=scan_scope or "root",
         )
+        set_values = {
+            "name": statement.excluded.name,
+            "wiki_root_token": statement.excluded.wiki_root_token,
+            "wiki_root_url": statement.excluded.wiki_root_url,
+            "target_kb_id": statement.excluded.target_kb_id,
+            "credential_env_name": statement.excluded.credential_env_name,
+            "enabled": statement.excluded.enabled,
+            "updated_at": utc_now(),
+        }
+        if scan_scope is not None:
+            set_values["scan_scope"] = statement.excluded.scan_scope
         return statement.on_conflict_do_update(
             index_elements=[FeishuSource.source_id],
-            set_={
-                "name": statement.excluded.name,
-                "wiki_root_token": statement.excluded.wiki_root_token,
-                "wiki_root_url": statement.excluded.wiki_root_url,
-                "target_kb_id": statement.excluded.target_kb_id,
-                "credential_env_name": statement.excluded.credential_env_name,
-                "enabled": statement.excluded.enabled,
-                "updated_at": utc_now(),
-            },
+            set_=set_values,
         )
 
     async def start_sync_run(

@@ -151,7 +151,7 @@ def _answer(*, citations=(_citation(),)):
 
 
 def _postgres_answer():
-    return _answer(citations=(_citation(source_version_at=datetime(2026, 8, 16, 8, 0)),))
+    return _answer()
 
 
 def _add_material(
@@ -467,8 +467,10 @@ async def test_postgres_append_lock_wins_before_archive(postgres_answer_context)
             )
         )
         message_count = await verification_session.scalar(select(func.count()).select_from(ProductMessage))
+        source_version_at = await verification_session.scalar(select(MessageCitation.source_version_at))
     assert stored_status == ConversationStatus.ARCHIVED
     assert message_count == 2
+    assert source_version_at == datetime(2026, 8, 16, 8, 0)
 
 
 async def test_caller_rollback_removes_every_exchange_row_when_a_citation_fails(db_session):

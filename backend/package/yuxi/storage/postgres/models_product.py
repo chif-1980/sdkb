@@ -100,6 +100,7 @@ class ProductMessage(Base):
     )
     model_version = Column(String(128), nullable=True)
     prompt_version = Column(String(128), nullable=True)
+    feedback_rating = Column(String(8), nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
 
     __table_args__ = (
@@ -107,6 +108,10 @@ class ProductMessage(Base):
             "(role != 'USER' OR (answer_status IS NULL AND model_version IS NULL AND prompt_version IS NULL)) "
             "AND (role != 'ASSISTANT' OR answer_status IS NOT NULL)",
             name="ck_product_messages_role_payload",
+        ),
+        CheckConstraint(
+            "feedback_rating IS NULL OR feedback_rating IN ('LIKE', 'DISLIKE')",
+            name="ck_product_messages_feedback_rating",
         ),
         Index("ix_product_messages_conversation_created", "conversation_id", "created_at"),
     )

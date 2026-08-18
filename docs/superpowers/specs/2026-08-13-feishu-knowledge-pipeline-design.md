@@ -6,7 +6,7 @@
 
 已确认范围：
 
-- 飞书根节点：`https://quickdone.feishu.cn/wiki/VO95wRtWri5XoNkKqU0cLjQ3nqc`
+- 飞书根节点：`https://quickdone.feishu.cn/wiki/POFEwqvUaiwFBXkNRuScMy3inkd`
 - 递归读取该 Wiki 节点的子页面、目录和可访问附件。
 - 支持 Wiki 页面以及 PDF、DOCX、PPTX、XLSX、TXT、图片附件。
 - 音视频首版仅登记来源和“暂不支持加工”状态，不做转写、说话人识别或入库。

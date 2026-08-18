@@ -17,6 +17,7 @@ SUPPORTED_EXTENSIONS = {
     ".pdf",
     ".docx",
     ".pptx",
+    ".xls",
     ".xlsx",
     ".txt",
     ".png",
@@ -106,18 +107,50 @@ class FeishuScanService:
         seen_at = utc_now()
         try:
             root = await self.client.get_node(source.wiki_root_token)
-            await self._scan_node(
-                source=source,
-                node=root,
-                parent_item_key=None,
-                parent_path=None,
-                counts=counts,
-                seen_item_keys=seen_item_keys,
-                seen_at=seen_at,
-                visited=set(),
-                run_id=run_id,
-            )
-            await self._verify_unseen_page_roots(source_id=source_id, seen_item_keys=seen_item_keys)
+            visited: set[str] = set()
+            scan_scope = getattr(source, "scan_scope", "root") or "root"
+            if scan_scope == "space":
+                if not root.space_id:
+                    raise RuntimeError("Feishu root node did not include a space ID")
+                # The configured node is used to discover the space. The
+                # space-level endpoint is authoritative for sibling top-level
+                # nodes, so the configured root is not treated as the only
+                # branch anymore.
+                top_nodes = await self.client.list_nodes(root.space_id)
+                if not top_nodes:
+                    # Some tenants return no item when the configured node is
+                    # the only visible top-level node. Keep it discoverable
+                    # while still allowing a permission error to propagate.
+                    top_nodes = [root]
+                for top_node in top_nodes:
+                    await self._scan_node(
+                        source=source,
+                        node=top_node,
+                        parent_item_key=None,
+                        parent_path=None,
+                        counts=counts,
+                        seen_item_keys=seen_item_keys,
+                        seen_at=seen_at,
+                        visited=visited,
+                        run_id=run_id,
+                    )
+            else:
+                await self._scan_node(
+                    source=source,
+                    node=root,
+                    parent_item_key=None,
+                    parent_path=None,
+                    counts=counts,
+                    seen_item_keys=seen_item_keys,
+                    seen_at=seen_at,
+                    visited=visited,
+                    run_id=run_id,
+                )
+                await self._verify_unseen_page_roots(
+                    source_id=source_id,
+                    seen_item_keys=seen_item_keys,
+                    root=root,
+                )
             invalidated_count = await self.repository.complete_successful_scan(
                 run_id=run_id,
                 source_id=source_id,
@@ -158,7 +191,13 @@ class FeishuScanService:
         )
         return result
 
-    async def _verify_unseen_page_roots(self, *, source_id: str, seen_item_keys: set[str]) -> None:
+    async def _verify_unseen_page_roots(
+        self,
+        *,
+        source_id: str,
+        seen_item_keys: set[str],
+        root: FeishuNode,
+    ) -> None:
         unseen_roots = await self.repository.list_unseen_valid_page_roots(
             source_id=source_id,
             seen_item_keys=seen_item_keys,
@@ -169,10 +208,24 @@ class FeishuScanService:
                 raise RuntimeError(f"Invalid Feishu page item key: {item.item_key}")
             node_token = node_token.rsplit(":", 1)[-1]
             try:
-                await self.client.get_node(node_token)
+                node = await self.client.get_node(node_token)
             except FeishuNotFoundError:
                 continue
-            raise RuntimeError(f"Feishu page omitted from traversal but remains readable: {node_token}")
+            if node.space_id != root.space_id:
+                continue
+
+            visited = {node.node_token}
+            while node.parent_node_token:
+                parent_token = node.parent_node_token
+                if parent_token == root.node_token:
+                    raise RuntimeError(f"Feishu page omitted from traversal but remains under root: {node_token}")
+                if parent_token in visited:
+                    raise RuntimeError(f"Feishu page parent chain contains a cycle: {node_token}")
+                visited.add(parent_token)
+                node = await self.client.get_node(parent_token)
+
+            if node.node_token == root.node_token:
+                raise RuntimeError(f"Feishu page omitted from traversal but remains under root: {node_token}")
 
     async def _scan_node(
         self,
@@ -192,34 +245,75 @@ class FeishuScanService:
         visited.add(node.node_token)
         title = node.title or node.node_token
         path_text = f"{parent_path} / {title}" if parent_path else title
-        page_key = f"page:{node.space_id}:{node.node_token}"
-        page_url = self._page_url(source.wiki_root_url, node.node_token)
-        page_content = await self.client.get_wiki_document(node)
-        await self._record_material(
-            source=source,
-            item_key=page_key,
-            item_type="page",
-            title=title,
-            parent_item_key=parent_item_key,
-            path_text=path_text,
-            source_url=page_url,
-            token=node.obj_token or node.node_token,
-            revision=page_content.revision,
-            source_updated_at=node.source_updated_at,
-            supported=True,
-            counts=counts,
-            seen_item_keys=seen_item_keys,
-            seen_at=seen_at,
-            content=page_content.content,
-            run_id=run_id,
-        )
-        for attachment in page_content.attachments:
-            await self._record_attachment(
+        node_url = self._page_url(source.wiki_root_url, node.node_token)
+        node_token = node.obj_token or node.node_token
+        if node.obj_type == "docx":
+            node_item_key = f"page:{node.space_id}:{node.node_token}"
+            page_content = await self.client.get_wiki_document(node)
+            await self._record_material(
                 source=source,
-                attachment=attachment,
-                parent_item_key=page_key,
-                parent_path=path_text,
-                parent_source_url=page_url,
+                item_key=node_item_key,
+                item_type="page",
+                title=title,
+                parent_item_key=parent_item_key,
+                path_text=path_text,
+                source_url=node_url,
+                token=node_token,
+                revision=page_content.revision,
+                source_updated_at=node.source_updated_at,
+                supported=True,
+                counts=counts,
+                seen_item_keys=seen_item_keys,
+                seen_at=seen_at,
+                content=page_content.content,
+                run_id=run_id,
+            )
+            for attachment in page_content.attachments:
+                await self._record_attachment(
+                    source=source,
+                    attachment=attachment,
+                    parent_item_key=node_item_key,
+                    parent_path=path_text,
+                    parent_source_url=node_url,
+                    counts=counts,
+                    seen_item_keys=seen_item_keys,
+                    seen_at=seen_at,
+                    run_id=run_id,
+                )
+        elif node.obj_type == "file":
+            node_item_key = f"file:{node.space_id}:{node.node_token}"
+            item_type, supported = self._classify_attachment(title, node.obj_type)
+            await self._record_material(
+                source=source,
+                item_key=node_item_key,
+                item_type=item_type,
+                title=title,
+                parent_item_key=parent_item_key,
+                path_text=path_text,
+                source_url=node_url,
+                token=node_token,
+                revision=node.revision,
+                source_updated_at=node.source_updated_at,
+                supported=supported,
+                counts=counts,
+                seen_item_keys=seen_item_keys,
+                seen_at=seen_at,
+                run_id=run_id,
+            )
+        else:
+            node_item_key = f"node:{node.space_id}:{node.node_token}"
+            await self._record_material(
+                source=source,
+                item_key=node_item_key,
+                item_type="unsupported",
+                title=title,
+                parent_item_key=parent_item_key,
+                path_text=path_text,
+                source_url=node_url,
+                token=node_token,
+                revision=node.revision,
+                source_updated_at=node.source_updated_at,
+                supported=False,
                 counts=counts,
                 seen_item_keys=seen_item_keys,
                 seen_at=seen_at,
@@ -230,7 +324,7 @@ class FeishuScanService:
             await self._scan_node(
                 source=source,
                 node=child,
-                parent_item_key=page_key,
+                parent_item_key=node_item_key,
                 parent_path=path_text,
                 counts=counts,
                 seen_item_keys=seen_item_keys,

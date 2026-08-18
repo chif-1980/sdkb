@@ -297,6 +297,47 @@ async def test_login_state_only_stores_hash_normalized_path_and_expiry(db_sessio
     assert "test-app-secret" not in raw_value
 
 
+async def test_qr_login_uses_embeddable_authorize_url_and_one_time_state(db_session):
+    redis = FakeRedis()
+    service = _service(db_session, redis)
+
+    login_url = await service.create_qr_login_url()
+
+    parsed = urlparse(login_url)
+    query = parse_qs(parsed.query)
+    state = query["state"][0]
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "passport.feishu.cn"
+    assert parsed.path == "/suite/passport/oauth/authorize"
+    assert query["client_id"] == ["test-app-id"]
+    assert query["redirect_uri"] == ["https://assistant.example/api/auth/feishu/callback"]
+    assert query["response_type"] == ["code"]
+    assert "test-app-secret" not in login_url
+
+    assert len(redis.data) == 1
+    key, raw_value = next(iter(redis.data.items()))
+    stored = json.loads(raw_value)
+    assert redis.ttl[key] == 300
+    assert state not in key
+    assert state not in raw_value
+    assert set(stored) == {"state_hash", "return_path", "expires_at"}
+    assert stored["return_path"] == "/chat"
+    assert "test-app-secret" not in raw_value
+
+
+async def test_qr_login_callback_reuses_secure_product_session_flow(db_session):
+    await _add_user(db_session)
+    redis = FakeRedis()
+    service = _service(db_session, redis)
+    state = _state_from_url(await service.create_qr_login_url())
+
+    user, token = await service.complete_callback(code="qr-oauth-code", state=state)
+
+    assert user.uid == "employee-001"
+    assert AuthUtils.verify_access_token(token)["token_kind"] == "enterprise_assistant"
+    assert not redis.data
+
+
 async def test_callback_logs_exclude_code_access_token_and_cookie(db_session, caplog):
     await _add_user(db_session)
     redis = FakeRedis()

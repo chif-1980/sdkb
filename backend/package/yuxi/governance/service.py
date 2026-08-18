@@ -1,0 +1,454 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
+from yuxi.governance.comparator import CrossDocumentComparisonService
+from yuxi.governance.domain import (
+    CrossDocumentRelationType,
+    ProblemTag,
+    ReviewDecision,
+)
+from yuxi.governance.schemas import ReviewResolveRequest
+from yuxi.storage.postgres.models_knowledge import (
+    FeishuCrossDocumentRelation,
+    FeishuGovernanceReview,
+    FeishuMaterialVersion,
+    FeishuProcessingEvent,
+    FeishuSource,
+    FeishuSourceItem,
+)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _relation_problem_tag(relation_type: str) -> str | None:
+    return {
+        CrossDocumentRelationType.EXACT_DUPLICATE: ProblemTag.DUPLICATE,
+        CrossDocumentRelationType.OVERLAP: ProblemTag.OVERLAP,
+        CrossDocumentRelationType.CONFLICT: ProblemTag.CONFLICT,
+        CrossDocumentRelationType.INSUFFICIENT: ProblemTag.INSUFFICIENT_EVIDENCE,
+    }.get(relation_type)
+
+
+class GovernanceService:
+    TERMINAL_REVIEW_STATUSES = {"resolved", "rejected", "changes_requested"}
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def has_open_conflict(self, version_id: str) -> bool:
+        return await CrossDocumentComparisonService(self.session).has_open_conflict(version_id)
+
+    async def list_reviews(
+        self,
+        source_id: str,
+        *,
+        status: str | None = None,
+        problem_tag: str | None = None,
+    ) -> list[dict]:
+        statement = (
+            select(FeishuMaterialVersion, FeishuSourceItem, FeishuSource, FeishuGovernanceReview)
+            .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+            .join(FeishuSource, FeishuSource.source_id == FeishuSourceItem.source_id)
+            .outerjoin(FeishuGovernanceReview, FeishuGovernanceReview.version_id == FeishuMaterialVersion.version_id)
+            .where(
+                FeishuSourceItem.source_id == source_id,
+                FeishuMaterialVersion.processing_status.in_({"parsed", "awaiting_review"}),
+                FeishuMaterialVersion.review_status.in_({"pending", "changes_requested"}),
+            )
+            .order_by(FeishuMaterialVersion.created_at.desc())
+        )
+        if status:
+            statement = statement.where(func.coalesce(FeishuGovernanceReview.status, "pending") == status)
+        rows = (await self.session.execute(statement)).all()
+        reviews = []
+        for version, item, source, review in rows:
+            relations = await self._relations_for_version(version.version_id)
+            review_data = self._review_dict(version, item, source, review, relations)
+            if problem_tag and problem_tag not in review_data["problem_tags"]:
+                continue
+            reviews.append(review_data)
+        return reviews
+
+    async def get_review(self, review_id: str) -> dict:
+        version, item, source, review = await self._get_review_row(review_id)
+        relations = await self._relations_for_version(version.version_id)
+        return self._review_dict(version, item, source, review, relations)
+
+    async def list_review_comparisons(self, review_id: str) -> list[dict]:
+        version, _, _, _ = await self._get_review_row(review_id)
+        relations = await self._relations_for_version(version.version_id)
+        return [await self._relation_dict(relation, version.version_id) for relation in relations]
+
+    async def list_relations(
+        self,
+        source_id: str,
+        *,
+        relation_type: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        source_version = aliased(FeishuMaterialVersion)
+        target_version = aliased(FeishuMaterialVersion)
+        source_item = aliased(FeishuSourceItem)
+        target_item = aliased(FeishuSourceItem)
+        statement = (
+            select(FeishuCrossDocumentRelation, source_item, target_item)
+            .join(source_version, source_version.version_id == FeishuCrossDocumentRelation.source_version_id)
+            .join(source_item, source_item.item_id == source_version.item_id)
+            .join(target_version, target_version.version_id == FeishuCrossDocumentRelation.target_version_id)
+            .join(target_item, target_item.item_id == target_version.item_id)
+            .where(or_(source_item.source_id == source_id, target_item.source_id == source_id))
+            .order_by(FeishuCrossDocumentRelation.created_at.desc())
+        )
+        if relation_type:
+            statement = statement.where(FeishuCrossDocumentRelation.relation_type == relation_type)
+        if status:
+            statement = statement.where(FeishuCrossDocumentRelation.status == status)
+        rows = (await self.session.execute(statement)).all()
+        return [
+            self._relation_row_dict(relation, source_item_record, target_item_record)
+            for relation, source_item_record, target_item_record in rows
+        ]
+
+    async def list_formal_knowledge(self, source_id: str) -> list[dict]:
+        statement = (
+            select(FeishuSourceItem, FeishuMaterialVersion, FeishuSource)
+            .join(FeishuMaterialVersion, FeishuMaterialVersion.version_id == FeishuSourceItem.active_version_id)
+            .join(FeishuSource, FeishuSource.source_id == FeishuSourceItem.source_id)
+            .where(
+                FeishuSourceItem.source_id == source_id,
+                FeishuSourceItem.source_validity == "valid",
+                FeishuMaterialVersion.processing_status == "published",
+                FeishuMaterialVersion.review_status == "approved",
+                FeishuMaterialVersion.published_at.is_not(None),
+                FeishuMaterialVersion.yuxi_file_id.is_not(None),
+            )
+            .order_by(FeishuMaterialVersion.published_at.desc())
+        )
+        rows = (await self.session.execute(statement)).all()
+        return [
+            {
+                "knowledge_id": item.item_id,
+                "title": item.title or "未命名知识",
+                "current_version_id": version.version_id,
+                "revision": version.revision,
+                "source_id": item.source_id,
+                "source_url": item.source_url,
+                "wiki_path": item.path_text,
+                "source_role": "PRIMARY",
+                "applicability_scope": (version.processing_params or {}).get("applicability_scope", {}),
+                "index_status": "INDEXED",
+                "yuxi_file_id": version.yuxi_file_id,
+                "chunk_count": version.chunk_count or 0,
+                "published_at": _iso(version.published_at),
+                "updated_at": _iso(version.updated_at),
+                "target_kb_id": source.target_kb_id,
+            }
+            for item, version, source in rows
+        ]
+
+    async def list_knowledge_versions(self, knowledge_id: str) -> list[dict]:
+        item = await self.session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == knowledge_id))
+        if item is None:
+            raise LookupError(f"Formal knowledge not found: {knowledge_id}")
+        versions = (
+            await self.session.scalars(
+                select(FeishuMaterialVersion)
+                .where(FeishuMaterialVersion.item_id == knowledge_id)
+                .order_by(FeishuMaterialVersion.created_at.desc())
+            )
+        ).all()
+        return [
+            {
+                "version_id": version.version_id,
+                "revision": version.revision,
+                "processing_status": version.processing_status,
+                "review_status": version.review_status,
+                "active": item.active_version_id == version.version_id,
+                "yuxi_file_id": version.yuxi_file_id,
+                "published_at": _iso(version.published_at),
+                "created_at": _iso(version.created_at),
+            }
+            for version in versions
+        ]
+
+    async def list_knowledge_relations(self, knowledge_id: str) -> list[dict]:
+        version_ids = list(
+            await self.session.scalars(
+                select(FeishuMaterialVersion.version_id).where(FeishuMaterialVersion.item_id == knowledge_id)
+            )
+        )
+        if not version_ids:
+            raise LookupError(f"Formal knowledge not found: {knowledge_id}")
+        relations = (
+            await self.session.scalars(
+                select(FeishuCrossDocumentRelation)
+                .where(
+                    or_(
+                        FeishuCrossDocumentRelation.source_version_id.in_(version_ids),
+                        FeishuCrossDocumentRelation.target_version_id.in_(version_ids),
+                    )
+                )
+                .order_by(FeishuCrossDocumentRelation.created_at.desc())
+            )
+        ).all()
+        return [await self._relation_dict(relation, version_ids[0]) for relation in relations]
+
+    async def prepare_resolution(
+        self,
+        review_id: str,
+        *,
+        operator_id: str,
+    ) -> tuple[FeishuGovernanceReview, FeishuMaterialVersion, FeishuSourceItem]:
+        version, item, _, review = await self._get_review_row(review_id, lock=True)
+        if review is None:
+            review = FeishuGovernanceReview(
+                review_id=f"review-{uuid4().hex}",
+                version_id=version.version_id,
+                status="pending",
+            )
+            self.session.add(review)
+            await self.session.flush()
+        if review.status in self.TERMINAL_REVIEW_STATUSES:
+            raise ValueError("Review task is already completed")
+        if review.assignee_id and review.assignee_id != operator_id:
+            raise PermissionError("Review task is assigned to another reviewer")
+        return review, version, item
+
+    async def record_resolution(
+        self,
+        review: FeishuGovernanceReview,
+        version: FeishuMaterialVersion,
+        item: FeishuSourceItem,
+        payload: ReviewResolveRequest,
+        *,
+        operator_id: str,
+    ) -> None:
+        now = datetime.now(UTC)
+        review.decision = payload.decision
+        review.action = payload.action
+        review.problem_tags = [tag.value for tag in payload.problem_tags]
+        review.decision_comment = payload.decision_comment
+        review.applicability_scope = payload.applicability_scope.model_dump(mode="json", exclude_none=True)
+
+        if payload.decision == ReviewDecision.TRANSFER:
+            review.status = "pending"
+            review.assignee_id = payload.assignee_id
+            review.decided_by = None
+            review.decided_at = None
+            self._append_event(
+                version,
+                item,
+                event_type="review_transferred",
+                operator_id=operator_id,
+                message=payload.decision_comment,
+                payload={"assignee_id": payload.assignee_id},
+            )
+        elif payload.decision == ReviewDecision.REQUEST_CHANGES:
+            review.status = "changes_requested"
+            review.decided_by = operator_id
+            review.decided_at = now
+            version.review_status = "changes_requested"
+            version.reviewer_id = operator_id
+            version.reviewed_at = now
+            version.review_comment = payload.decision_comment
+            self._append_event(
+                version,
+                item,
+                event_type="changes_requested",
+                operator_id=operator_id,
+                message=payload.decision_comment,
+            )
+        else:
+            review.status = "rejected" if payload.decision == ReviewDecision.REJECT else "resolved"
+            review.decided_by = operator_id
+            review.decided_at = now
+
+        processing_params = dict(version.processing_params or {})
+        processing_params["applicability_scope"] = review.applicability_scope
+        version.processing_params = processing_params
+        await self._resolve_related_comparisons(version.version_id, payload, operator_id=operator_id, now=now)
+        await self.session.flush()
+
+    async def _get_review_row(self, review_id: str, *, lock: bool = False):
+        statement = (
+            select(FeishuMaterialVersion, FeishuSourceItem, FeishuSource, FeishuGovernanceReview)
+            .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+            .join(FeishuSource, FeishuSource.source_id == FeishuSourceItem.source_id)
+            .outerjoin(FeishuGovernanceReview, FeishuGovernanceReview.version_id == FeishuMaterialVersion.version_id)
+            .where(
+                or_(
+                    FeishuGovernanceReview.review_id == review_id,
+                    FeishuMaterialVersion.version_id == review_id,
+                )
+            )
+        )
+        if lock:
+            statement = statement.with_for_update()
+        row = (await self.session.execute(statement)).one_or_none()
+        if row is None:
+            raise LookupError(f"Review task not found: {review_id}")
+        return row
+
+    async def _relations_for_version(self, version_id: str) -> list[FeishuCrossDocumentRelation]:
+        return list(
+            await self.session.scalars(
+                select(FeishuCrossDocumentRelation)
+                .where(
+                    or_(
+                        FeishuCrossDocumentRelation.source_version_id == version_id,
+                        FeishuCrossDocumentRelation.target_version_id == version_id,
+                    )
+                )
+                .order_by(FeishuCrossDocumentRelation.created_at.desc())
+            )
+        )
+
+    async def _relation_dict(self, relation: FeishuCrossDocumentRelation, current_version_id: str) -> dict:
+        source_version, source_item = await self._version_item(relation.source_version_id)
+        target_version, target_item = await self._version_item(relation.target_version_id)
+        data = self._relation_row_dict(relation, source_item, target_item)
+        data["current_side"] = "source" if relation.source_version_id == current_version_id else "target"
+        data["source_revision"] = source_version.revision
+        data["target_revision"] = target_version.revision
+        return data
+
+    async def _version_item(self, version_id: str) -> tuple[FeishuMaterialVersion, FeishuSourceItem]:
+        row = (
+            await self.session.execute(
+                select(FeishuMaterialVersion, FeishuSourceItem)
+                .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+                .where(FeishuMaterialVersion.version_id == version_id)
+            )
+        ).one()
+        return row
+
+    def _relation_row_dict(
+        self,
+        relation: FeishuCrossDocumentRelation,
+        source_item: FeishuSourceItem,
+        target_item: FeishuSourceItem,
+    ) -> dict:
+        return {
+            "relation_id": relation.relation_id,
+            "source_version_id": relation.source_version_id,
+            "target_version_id": relation.target_version_id,
+            "source_title": source_item.title or "未命名资料",
+            "target_title": target_item.title or "未命名资料",
+            "source_url": source_item.source_url,
+            "target_url": target_item.source_url,
+            "source_path": source_item.path_text,
+            "target_path": target_item.path_text,
+            "relation_type": relation.relation_type,
+            "similarity": relation.similarity,
+            "confidence": relation.confidence,
+            "same_content": relation.same_content or [],
+            "different_content": relation.different_content or [],
+            "scope_difference": relation.scope_difference or {},
+            "reasoning": relation.reasoning,
+            "status": relation.status,
+            "human_decision": relation.human_decision,
+            "human_comment": relation.human_comment,
+            "resolved_by": relation.resolved_by,
+            "resolved_at": _iso(relation.resolved_at),
+            "created_at": _iso(relation.created_at),
+        }
+
+    def _review_dict(
+        self,
+        version: FeishuMaterialVersion,
+        item: FeishuSourceItem,
+        source: FeishuSource,
+        review: FeishuGovernanceReview | None,
+        relations: list[FeishuCrossDocumentRelation],
+    ) -> dict:
+        relation_types = {relation.relation_type for relation in relations if relation.status == "open"}
+        derived_tags = {_relation_problem_tag(relation_type) for relation_type in relation_types}
+        problem_tags = sorted(
+            set(review.problem_tags if review else []) | {str(tag) for tag in derived_tags if tag is not None}
+        )
+        risk_level = "HIGH" if CrossDocumentRelationType.CONFLICT in relation_types else "MEDIUM"
+        if not relation_types or relation_types == {CrossDocumentRelationType.EXACT_DUPLICATE}:
+            risk_level = "LOW"
+        return {
+            "review_id": review.review_id if review else version.version_id,
+            "version_id": version.version_id,
+            "item_id": item.item_id,
+            "source_id": item.source_id,
+            "target_kb_id": source.target_kb_id,
+            "title": item.title or "未命名素材",
+            "item_type": item.item_type,
+            "wiki_path": item.path_text,
+            "source_url": item.source_url,
+            "revision": version.revision,
+            "processing_status": version.processing_status,
+            "review_status": version.review_status,
+            "status": review.status if review else "pending",
+            "assignee_id": review.assignee_id if review else None,
+            "last_decision": review.decision if review else None,
+            "last_action": review.action if review else None,
+            "decision_comment": review.decision_comment if review else version.review_comment,
+            "problem_tags": problem_tags,
+            "applicability_scope": (
+                review.applicability_scope
+                if review
+                else (version.processing_params or {}).get("applicability_scope", {})
+            ),
+            "relation_types": sorted(relation_types),
+            "comparison_count": len(relations),
+            "risk_level": risk_level,
+            "source_updated_at": _iso(item.source_updated_at),
+            "created_at": _iso(version.created_at),
+            "updated_at": _iso(version.updated_at),
+        }
+
+    async def _resolve_related_comparisons(
+        self,
+        version_id: str,
+        payload: ReviewResolveRequest,
+        *,
+        operator_id: str,
+        now: datetime,
+    ) -> None:
+        if payload.decision == ReviewDecision.TRANSFER:
+            return
+        relations = await self._relations_for_version(version_id)
+        for relation in relations:
+            if relation.status != "open":
+                continue
+            relation.status = "resolved"
+            relation.human_decision = payload.action
+            relation.human_comment = payload.decision_comment
+            relation.resolved_by = operator_id
+            relation.resolved_at = now
+
+    def _append_event(
+        self,
+        version: FeishuMaterialVersion,
+        item: FeishuSourceItem,
+        *,
+        event_type: str,
+        operator_id: str,
+        message: str | None,
+        payload: dict | None = None,
+    ) -> None:
+        self.session.add(
+            FeishuProcessingEvent(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type=event_type,
+                from_status=version.review_status,
+                to_status=version.review_status,
+                operator_id=operator_id,
+                message=message,
+                payload_json=payload or {},
+            )
+        )

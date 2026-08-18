@@ -5,7 +5,9 @@ RapidOCR 解析器 - 纯OCR文字识别
 """
 
 import os
+import multiprocessing
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -18,12 +20,34 @@ from yuxi.knowledge.parser.base import BaseDocumentProcessor, OCRException
 from yuxi.utils import logger
 
 
+def _rapid_ocr_process_entry(
+    connection,
+    file_path: str,
+    params: dict | None,
+    det_box_thresh: float,
+    result_path: str,
+) -> None:
+    """Run native OCR outside the API process so native crashes are contained."""
+    try:
+        parser = RapidOCRParser(det_box_thresh=det_box_thresh)
+        result = parser._process_file_inline(file_path, params)
+        with open(result_path, "w", encoding="utf-8") as result_file:
+            result_file.write(result)
+        connection.send(("ok", None))
+    except BaseException as exc:  # noqa: BLE001
+        connection.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        connection.close()
+
+
 class RapidOCRParser(BaseDocumentProcessor):
     """RapidOCR 解析器 - 使用 ONNX 模型进行文字识别"""
 
     def __init__(self, det_box_thresh: float = 0.3):
         self.ocr = None
         self.det_box_thresh = det_box_thresh
+        self._model_lock = threading.Lock()
+        self._process_lock = threading.Lock()
 
     def get_service_name(self) -> str:
         return "rapid_ocr"
@@ -63,13 +87,17 @@ class RapidOCRParser(BaseDocumentProcessor):
         if self.ocr is not None:
             return
 
-        logger.info("加载 RapidOCR 模型...")
+        with self._model_lock:
+            if self.ocr is not None:
+                return
 
-        try:
-            self.ocr = RapidOCR(params=self._get_model_params())
-            logger.info(f"RapidOCR PP-OCRv5 模型加载成功 (det_box_thresh={self.det_box_thresh})")
-        except Exception as e:
-            raise OCRException(f"RapidOCR模型加载失败: {str(e)}", self.get_service_name(), "load_failed")
+            logger.info("加载 RapidOCR 模型...")
+
+            try:
+                self.ocr = RapidOCR(params=self._get_model_params())
+                logger.info(f"RapidOCR PP-OCRv5 模型加载成功 (det_box_thresh={self.det_box_thresh})")
+            except Exception as e:
+                raise OCRException(f"RapidOCR模型加载失败: {str(e)}", self.get_service_name(), "load_failed")
 
     def process_image(self, image, params: dict | None = None) -> str:
         """
@@ -100,7 +128,10 @@ class RapidOCRParser(BaseDocumentProcessor):
             try:
                 # 执行 OCR
                 start_time = time.time()
-                result = self.ocr(image_path)
+                # ONNXRuntime-backed OCR instances are shared by the factory;
+                # serialize inference to avoid native runtime races.
+                with self._process_lock:
+                    result = self.ocr(image_path)
                 processing_time = time.time() - start_time
 
                 # 提取文本
@@ -203,7 +234,7 @@ class RapidOCRParser(BaseDocumentProcessor):
             logger.error(error_msg)
             raise OCRException(error_msg, self.get_service_name(), "pdf_processing_failed")
 
-    def process_file(self, file_path: str, params: dict | None = None) -> str:
+    def _process_file_inline(self, file_path: str, params: dict | None = None) -> str:
         """
         处理文件 (PDF 或图像)
 
@@ -223,3 +254,46 @@ class RapidOCRParser(BaseDocumentProcessor):
             return self.process_pdf(file_path, params)
         else:
             return self.process_image(file_path, params)
+
+    def process_file(self, file_path: str, params: dict | None = None) -> str:
+        """Run OCR in a child process so ONNXRuntime failures stay isolated."""
+        timeout_seconds = float(os.getenv("RAPID_OCR_PROCESS_TIMEOUT_SECONDS", "300"))
+        context = multiprocessing.get_context("spawn")
+        parent_connection, child_connection = context.Pipe(duplex=False)
+        result_handle = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+        result_path = result_handle.name
+        result_handle.close()
+        process = context.Process(
+            target=_rapid_ocr_process_entry,
+            args=(child_connection, file_path, params, self.det_box_thresh, result_path),
+            daemon=True,
+        )
+        process.start()
+        child_connection.close()
+        try:
+            process.join(timeout_seconds)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+                raise OCRException(
+                    f"OCR 子进程超过 {timeout_seconds:g} 秒未完成",
+                    self.get_service_name(),
+                    "processing_timeout",
+                )
+            if parent_connection.poll():
+                status, payload = parent_connection.recv()
+                if status == "ok":
+                    with open(result_path, encoding="utf-8") as result_file:
+                        return result_file.read()
+                raise OCRException(f"OCR 子进程失败: {payload}", self.get_service_name(), "processing_failed")
+            raise OCRException(
+                f"OCR 子进程异常退出 (exitcode={process.exitcode})",
+                self.get_service_name(),
+                "process_crashed",
+            )
+        finally:
+            parent_connection.close()
+            try:
+                os.unlink(result_path)
+            except FileNotFoundError:
+                pass

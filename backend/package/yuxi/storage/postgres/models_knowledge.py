@@ -303,10 +303,37 @@ class FeishuSource(Base):
     name = Column(String(255), nullable=False)
     wiki_root_token = Column(String(255), nullable=False)
     wiki_root_url = Column(String(1024))
+    # root 保持历史行为；space 扫描同一知识空间下的全部顶层节点。
+    scan_scope = Column(String(16), nullable=False, default="root", server_default="root")
     target_kb_id = Column(String(80), nullable=False, index=True)
     credential_env_name = Column(String(255), nullable=False)
     enabled = Column(Boolean, nullable=False, default=True, index=True)
     created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class FeishuUserOAuthCredential(Base):
+    """Encrypted user OAuth credentials for one Feishu knowledge source."""
+
+    __tablename__ = "feishu_user_oauth_credentials"
+    __table_args__ = (UniqueConstraint("source_id", name="uq_feishu_user_oauth_credentials_source_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_id = Column(
+        String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    access_token_ciphertext = Column(Text, nullable=False)
+    refresh_token_ciphertext = Column(Text, nullable=False)
+    access_token_expires_at = Column(DateTime(timezone=True), nullable=False)
+    refresh_token_expires_at = Column(DateTime(timezone=True), nullable=False)
+    feishu_open_id = Column(String(128))
+    display_name = Column(String(255))
+    scopes = Column(Text)
+    authorization_status = Column(String(32), nullable=False, default="active", index=True)
+    authorized_by = Column(String(64))
+    last_error = Column(String(512))
+    last_refreshed_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
@@ -423,3 +450,67 @@ class FeishuProcessingEvent(Base):
     message = Column(Text)
     payload_json = Column(JSON_VALUE)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False, index=True)
+
+
+class FeishuGovernanceReview(Base):
+    """One persistent human-review task for a Feishu material version."""
+
+    __tablename__ = "feishu_governance_reviews"
+    __table_args__ = (
+        UniqueConstraint("review_id", name="uq_feishu_governance_reviews_review_id"),
+        UniqueConstraint("version_id", name="uq_feishu_governance_reviews_version_id"),
+        Index("ix_feishu_governance_reviews_status_assignee", "status", "assignee_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    review_id = Column(String(64), nullable=False, unique=True, index=True)
+    version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    status = Column(String(32), nullable=False, default="pending", index=True)
+    assignee_id = Column(String(64), index=True)
+    decision = Column(String(32))
+    action = Column(String(32))
+    problem_tags = Column(JSON_VALUE, nullable=False, default=list)
+    decision_comment = Column(Text)
+    applicability_scope = Column(JSON_VALUE, nullable=False, default=dict)
+    decided_by = Column(String(64))
+    decided_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+
+class FeishuCrossDocumentRelation(Base):
+    """Persisted evidence and adjudication for one cross-document comparison."""
+
+    __tablename__ = "feishu_cross_document_relations"
+    __table_args__ = (
+        UniqueConstraint("relation_id", name="uq_feishu_cross_document_relations_relation_id"),
+        UniqueConstraint("comparison_key", name="uq_feishu_cross_document_relations_comparison_key"),
+        Index("ix_feishu_cross_document_relations_source_status", "source_version_id", "status"),
+        Index("ix_feishu_cross_document_relations_target_status", "target_version_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    relation_id = Column(String(64), nullable=False, unique=True, index=True)
+    comparison_key = Column(String(256), nullable=False, unique=True)
+    source_version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    relation_type = Column(String(32), nullable=False, index=True)
+    similarity = Column(Float)
+    confidence = Column(Float)
+    same_content = Column(JSON_VALUE, nullable=False, default=list)
+    different_content = Column(JSON_VALUE, nullable=False, default=list)
+    scope_difference = Column(JSON_VALUE, nullable=False, default=dict)
+    reasoning = Column(Text)
+    status = Column(String(32), nullable=False, default="open", index=True)
+    human_decision = Column(String(32))
+    human_comment = Column(Text)
+    resolved_by = Column(String(64))
+    resolved_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)

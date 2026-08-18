@@ -141,6 +141,20 @@ class PostgresManager(metaclass=SingletonMeta):
                         USING (COALESCE(locator::jsonb #>> '{}', 'null'));
                     END IF;
                 END IF;
+
+                ALTER TABLE product_messages
+                ADD COLUMN IF NOT EXISTS feedback_rating VARCHAR(8);
+
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'ck_product_messages_feedback_rating'
+                      AND conrelid = 'product_messages'::regclass
+                ) THEN
+                    ALTER TABLE product_messages
+                    ADD CONSTRAINT ck_product_messages_feedback_rating
+                    CHECK (feedback_rating IS NULL OR feedback_rating IN ('LIKE', 'DISLIKE'));
+                END IF;
             END
             $$
             """,
@@ -375,10 +389,31 @@ class PostgresManager(metaclass=SingletonMeta):
                 name VARCHAR(255) NOT NULL,
                 wiki_root_token VARCHAR(255) NOT NULL,
                 wiki_root_url VARCHAR(1024),
+                scan_scope VARCHAR(16) NOT NULL DEFAULT 'root',
                 target_kb_id VARCHAR(80) NOT NULL,
                 credential_env_name VARCHAR(255) NOT NULL,
                 enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 created_by VARCHAR(64),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS feishu_user_oauth_credentials (
+                id SERIAL PRIMARY KEY,
+                source_id VARCHAR(64) NOT NULL UNIQUE
+                    REFERENCES feishu_sources(source_id) ON DELETE CASCADE,
+                access_token_ciphertext TEXT NOT NULL,
+                refresh_token_ciphertext TEXT NOT NULL,
+                access_token_expires_at TIMESTAMPTZ NOT NULL,
+                refresh_token_expires_at TIMESTAMPTZ NOT NULL,
+                feishu_open_id VARCHAR(128),
+                display_name VARCHAR(255),
+                scopes TEXT,
+                authorization_status VARCHAR(32) NOT NULL DEFAULT 'active',
+                authorized_by VARCHAR(64),
+                last_error VARCHAR(512),
+                last_refreshed_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
@@ -470,6 +505,9 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS sync_run_id VARCHAR(64)",
+            "ALTER TABLE IF EXISTS feishu_sources ADD COLUMN IF NOT EXISTS scan_scope VARCHAR(16) NOT NULL DEFAULT 'root'",
+            "ALTER TABLE IF EXISTS feishu_sources ALTER COLUMN scan_scope SET DEFAULT 'root'",
+            "UPDATE feishu_sources SET scan_scope = 'root' WHERE scan_scope IS NULL OR scan_scope NOT IN ('root', 'space')",
             """
             DO $$
             BEGIN
@@ -491,6 +529,10 @@ class PostgresManager(metaclass=SingletonMeta):
                 "ON feishu_material_versions(item_id, revision, content_hash)"
             ),
             "CREATE INDEX IF NOT EXISTS ix_feishu_sources_target_kb_id ON feishu_sources(target_kb_id)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_user_oauth_credentials_status "
+                "ON feishu_user_oauth_credentials(authorization_status)"
+            ),
             "CREATE INDEX IF NOT EXISTS ix_feishu_sync_runs_source_status ON feishu_sync_runs(source_id, status)",
             (
                 "CREATE INDEX IF NOT EXISTS ix_feishu_source_items_source_validity "

@@ -214,6 +214,7 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         "answer_status",
         "model_version",
         "prompt_version",
+        "feedback_rating",
         "created_at",
     }
     assert {index.name for index in BusinessBase.metadata.tables["message_citations"].indexes} == {
@@ -290,6 +291,7 @@ async def test_product_schema_is_idempotent_in_real_postgres():
                 "answer_status",
                 "model_version",
                 "prompt_version",
+                "feedback_rating",
                 "created_at",
             },
             "message_citations": {
@@ -345,6 +347,9 @@ async def test_product_schema_is_idempotent_in_real_postgres():
             "MODEL_VERSION IS NULL",
             "PROMPT_VERSION IS NULL",
             "ANSWER_STATUS IS NOT NULL",
+            "FEEDBACK_RATING",
+            "LIKE",
+            "DISLIKE",
         ):
             assert expected in schema["checks"]["product_messages"]
         assert "ENTERPRISE_EVIDENCE" in schema["checks"]["message_citations"]

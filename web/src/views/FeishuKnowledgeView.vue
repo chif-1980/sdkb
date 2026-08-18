@@ -61,6 +61,10 @@
             <strong>{{ currentSource.target_kb_id || '-' }}</strong>
           </div>
           <div class="source-field">
+            <label>飞书访问身份</label>
+            <strong>{{ oauthStatusLabel }}</strong>
+          </div>
+          <div class="source-field">
             <label>最近全量 / 增量</label>
             <span>{{ formatTime(currentSource.last_full_sync_at) }}</span>
             <span>{{ formatTime(currentSource.last_incremental_sync_at) }}</span>
@@ -74,28 +78,125 @@
           </div>
         </section>
 
-        <section class="workspace-section">
-          <div class="section-heading">
-            <div>
-              <h2>扫描批次</h2>
-              <p>选择批次可查看该次扫描产生或变更的素材</p>
+        <nav class="governance-tabs" aria-label="知识加工模块">
+          <button type="button" class="governance-tab" :class="{ active: activeModule === 'materials' }" @click="activeModule = 'materials'">
+            资料与扫描
+          </button>
+          <button type="button" class="governance-tab" :class="{ active: activeModule === 'reviews' }" @click="activeModule = 'reviews'">
+            待审核 <span class="governance-count">{{ governanceCounts.reviews }}</span>
+          </button>
+          <button type="button" class="governance-tab" :class="{ active: activeModule === 'relations' }" @click="activeModule = 'relations'">
+            跨文档问题 <span class="governance-count">{{ governanceCounts.relations }}</span>
+          </button>
+          <button type="button" class="governance-tab" :class="{ active: activeModule === 'formal' }" @click="activeModule = 'formal'">
+            正式知识 <span class="governance-count">{{ governanceCounts.formal }}</span>
+          </button>
+        </nav>
+
+        <section v-if="activeModule === 'materials'" aria-label="资料与扫描">
+        <div class="workspace-grid">
+          <section class="workspace-section tree-section" aria-label="飞书知识目录">
+            <div class="section-heading">
+              <div>
+                <div class="section-title">
+                  <h2>知识目录</h2>
+                  <a-tooltip title="列出当前知识空间的全部顶层节点及下级内容，仅读取目录元数据">
+                    <span class="section-help" aria-label="知识目录说明" role="img">
+                      <CircleHelp :size="14" />
+                    </span>
+                  </a-tooltip>
+                </div>
+              </div>
+              <div class="tree-actions">
+                <a-button
+                  data-testid="oauth-qr-authorize"
+                  type="primary"
+                  :loading="qrAuthorizing"
+                  :disabled="!currentSource"
+                  @click="startQrOAuth"
+                >
+                  <QrCode :size="16" />
+                  {{ oauthStatus.authorized ? '重新扫码授权' : '扫码授权' }}
+                </a-button>
+                <a-button
+                  data-testid="oauth-browser-authorize"
+                  :loading="authorizingUser"
+                  :disabled="!currentSource"
+                  @click="startBrowserOAuth"
+                >
+                  <ExternalLink :size="16" />
+                  浏览器授权
+                </a-button>
+                <a-button
+                  aria-label="刷新知识目录"
+                  :loading="loadingTree"
+                  :disabled="!oauthStatus.authorized"
+                  @click="loadTree(true)"
+                >
+                  <RefreshCw :size="16" />
+                  刷新目录
+                </a-button>
+              </div>
             </div>
-            <button
-              v-if="selectedRunId"
-              type="button"
-              class="clear-filter"
-              @click="selectRun('')"
-            >
-              清除批次筛选
-            </button>
-          </div>
-          <FeishuSyncRunsTable
-            :runs="runs"
-            :loading="loadingRuns"
-            :selected-run-id="selectedRunId"
-            @select="selectRun"
-          />
-        </section>
+            <div class="panel-body tree-body">
+              <a-alert
+                v-if="treeError"
+                class="tree-alert"
+                type="warning"
+                show-icon
+                :message="treeError"
+              />
+              <a-spin :spinning="loadingTree">
+                <a-tree
+                  v-if="treeData.length && !treeError"
+                  :tree-data="treeData"
+                  :default-expand-all="false"
+                  block-node
+                  show-line
+                >
+                  <template #title="{ data }">
+                    <a v-if="data.url" :href="data.url" target="_blank" rel="noopener noreferrer">{{
+                      data.title
+                    }}</a>
+                    <span v-else>{{ data.title }}</span>
+                  </template>
+                </a-tree>
+                <a-empty v-else-if="!treeError && !loadingTree" description="暂未读取到知识目录" />
+              </a-spin>
+            </div>
+          </section>
+
+          <section class="workspace-section runs-section">
+            <div class="section-heading">
+              <div>
+                <div class="section-title">
+                  <h2>扫描批次</h2>
+                  <a-tooltip title="选择批次查看该次扫描产生或变更的素材">
+                    <span class="section-help" aria-label="扫描批次说明" role="img">
+                      <CircleHelp :size="14" />
+                    </span>
+                  </a-tooltip>
+                </div>
+              </div>
+              <button
+                v-if="selectedRunId"
+                type="button"
+                class="clear-filter"
+                @click="selectRun('')"
+              >
+                清除筛选
+              </button>
+            </div>
+            <div class="panel-body runs-body">
+              <FeishuSyncRunsTable
+                :runs="runs"
+                :loading="loadingRuns"
+                :selected-run-id="selectedRunId"
+                @select="selectRun"
+              />
+            </div>
+          </section>
+        </div>
 
         <section class="workspace-section material-section">
           <div class="section-heading material-heading">
@@ -151,6 +252,26 @@
             @selection-limit="(limit) => message.warning(`单次批量操作最多选择 ${limit} 条素材`)"
           />
         </section>
+        </section>
+
+        <FeishuReviewWorkspace
+          v-else-if="activeModule === 'reviews'"
+          :source-id="currentSourceId"
+          :target-review-id="governanceReviewTarget"
+          @count-change="governanceCounts.reviews = $event"
+          @target-consumed="governanceReviewTarget = ''"
+        />
+        <FeishuRelationsPanel
+          v-else-if="activeModule === 'relations'"
+          :source-id="currentSourceId"
+          @count-change="governanceCounts.relations = $event"
+          @open-review="openGovernanceReview"
+        />
+        <FeishuFormalKnowledgePanel
+          v-else-if="activeModule === 'formal'"
+          :source-id="currentSourceId"
+          @count-change="governanceCounts.formal = $event"
+        />
       </template>
 
       <a-empty v-else class="empty-source" description="尚未配置飞书知识数据源" />
@@ -164,21 +285,77 @@
       :loading="loadingDetail"
       @close="closeDetail"
     />
+
+    <a-modal
+      :open="qrDialogOpen"
+      title="扫码授权飞书知识库"
+      :footer="null"
+      :width="520"
+      :mask-closable="qrPhase !== 'loading'"
+      @cancel="closeQrAuthorization"
+    >
+      <div class="qr-oauth-content">
+        <div class="qr-code-frame" aria-live="polite">
+          <a-spin v-if="qrPhase === 'loading'" />
+          <img
+            v-else-if="qrImageUrl"
+            data-testid="oauth-qr-image"
+            :src="qrImageUrl"
+            alt="飞书知识库授权二维码"
+          />
+          <div v-else class="qr-code-empty">
+            <ShieldAlert :size="30" />
+            <span>二维码生成失败</span>
+          </div>
+        </div>
+        <div class="qr-oauth-copy">
+          <h3>{{ qrPhase === 'success' ? '授权已完成' : '请使用手机飞书扫码' }}</h3>
+          <p v-if="qrPhase === 'success'">正在刷新电脑端的授权身份与知识目录。</p>
+          <p v-else>由能够访问“SD 知识库”的管理员扫码，并在手机上确认授权。</p>
+          <div class="qr-status" :class="`is-${qrPhase}`">
+            <CircleCheck v-if="qrPhase === 'success'" :size="16" />
+            <RefreshCw v-else-if="qrPhase === 'waiting'" :size="16" />
+            <ShieldAlert v-else-if="qrPhase === 'error' || qrPhase === 'expired'" :size="16" />
+            <span>{{ qrStatusLabel }}</span>
+          </div>
+          <p v-if="qrError" class="qr-error">{{ qrError }}</p>
+          <p class="qr-permission">二维码 5 分钟内有效，仅申请知识库只读访问与自动续期权限。</p>
+        </div>
+      </div>
+    </a-modal>
   </main>
 </template>
 
 <script setup>
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { Input, message, Modal } from 'ant-design-vue'
-import { BookOpen, Link2, RefreshCw, ScanSearch } from 'lucide-vue-next'
+import {
+  BookOpen,
+  CircleCheck,
+  CircleHelp,
+  ExternalLink,
+  Link2,
+  QrCode,
+  RefreshCw,
+  ScanSearch,
+  ShieldAlert
+} from 'lucide-vue-next'
+import QRCode from 'qrcode'
 
 import { feishuKnowledgeApi, MAX_BATCH_SIZE } from '@/apis/feishu_knowledge_api'
 import { documentApi } from '@/apis/knowledge_api'
 import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetailDrawer.vue'
 import FeishuMaterialTable from '@/components/feishu/FeishuMaterialTable.vue'
 import FeishuSyncRunsTable from '@/components/feishu/FeishuSyncRunsTable.vue'
+import FeishuFormalKnowledgePanel from '@/components/feishu/FeishuFormalKnowledgePanel.vue'
+import FeishuRelationsPanel from '@/components/feishu/FeishuRelationsPanel.vue'
+import FeishuReviewWorkspace from '@/components/feishu/FeishuReviewWorkspace.vue'
 
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
+const QR_AUTH_TTL_MS = 5 * 60 * 1000
+const QR_POLL_INTERVAL_MS = 2000
+const TREE_CACHE_KEY = 'feishu-knowledge-tree-cache-v1'
+const TREE_CACHE_TTL_MS = 10 * 60 * 1000
 
 const sources = ref([])
 const currentSourceId = ref('')
@@ -188,10 +365,22 @@ const selectedRunId = ref('')
 const activeRunId = ref('')
 const scanningMode = ref('')
 const checkingSource = ref(false)
+const authorizingUser = ref(false)
+const qrAuthorizing = ref(false)
+const qrDialogOpen = ref(false)
+const qrImageUrl = ref('')
+const qrPhase = ref('idle')
+const qrError = ref('')
+const qrStartedAt = ref('')
+const qrExpiresAt = ref(0)
 const loadingSources = ref(false)
 const loadingRuns = ref(false)
 const loadingMaterials = ref(false)
+const loadingTree = ref(false)
 const pageError = ref('')
+const treeError = ref('')
+const treeData = ref([])
+const oauthStatus = ref({ authorized: false, status: 'not_authorized' })
 const detailOpen = ref(false)
 const detailMaterial = ref(null)
 const detailEvents = ref([])
@@ -199,12 +388,22 @@ const detailContent = ref(emptyDetailContent())
 const loadingDetail = ref(false)
 const updatedRange = ref([])
 const materialTableRef = ref(null)
+const activeModule = ref('materials')
+const governanceCounts = reactive({ reviews: 0, relations: 0, formal: 0 })
+const governanceReviewTarget = ref('')
 let pollTimer = null
+let qrPollTimer = null
+let qrRequestSeq = 0
 let detailRequestSeq = 0
 let isAlive = true
 
 function emptyDetailContent() {
   return { content: '', lines: [], loading: false, error: '' }
+}
+
+function openGovernanceReview(relation) {
+  governanceReviewTarget.value = relation.source_version_id || relation.target_version_id || ''
+  activeModule.value = 'reviews'
 }
 
 const filters = reactive({
@@ -256,7 +455,30 @@ const currentSource = computed(() =>
 const hasActiveRun = computed(() =>
   runs.value.some((run) => run.status === 'queued' || run.status === 'running')
 )
-const scanLocked = computed(() => Boolean(scanningMode.value || activeRunId.value || hasActiveRun.value))
+const scanLocked = computed(() =>
+  Boolean(
+    !oauthStatus.value.authorized || scanningMode.value || activeRunId.value || hasActiveRun.value
+  )
+)
+
+const oauthStatusLabel = computed(() => {
+  if (oauthStatus.value.authorized) {
+    return oauthStatus.value.display_name ? `已授权 · ${oauthStatus.value.display_name}` : '已授权'
+  }
+  if (oauthStatus.value.status === 'reauthorization_required') return '授权已失效'
+  return '未授权'
+})
+
+const qrStatusLabel = computed(() => {
+  return {
+    idle: '等待生成二维码',
+    loading: '正在生成二维码',
+    waiting: '等待手机确认授权',
+    success: '授权成功',
+    expired: '二维码已过期',
+    error: '授权未完成'
+  }[qrPhase.value]
+})
 
 const stats = computed(() => [
   { label: '素材总数', value: currentSource.value?.total_count ?? 0 },
@@ -311,9 +533,208 @@ async function loadMaterials() {
   }
 }
 
-async function refreshAll() {
+function normalizeTree(nodes) {
+  return (nodes || []).map((node) => ({
+    key: node.node_token,
+    title: node.title || node.node_token,
+    url: node.url || '',
+    children: normalizeTree(node.children),
+    isLeaf: !node.children?.length
+  }))
+}
+
+function readTreeCache(sourceId) {
+  try {
+    const cache = JSON.parse(sessionStorage.getItem(TREE_CACHE_KEY) || '{}')
+    const entry = cache?.[sourceId]
+    if (!entry || !Array.isArray(entry.tree) || Date.now() - entry.cachedAt > TREE_CACHE_TTL_MS) {
+      return null
+    }
+    return entry.tree
+  } catch {
+    return null
+  }
+}
+
+function writeTreeCache(sourceId, tree) {
+  try {
+    const cache = JSON.parse(sessionStorage.getItem(TREE_CACHE_KEY) || '{}')
+    cache[sourceId] = { cachedAt: Date.now(), tree }
+    sessionStorage.setItem(TREE_CACHE_KEY, JSON.stringify(cache))
+  } catch {
+    // 缓存不可用时不影响目录读取。
+  }
+}
+
+async function loadTree(force = false) {
+  if (!currentSourceId.value) return
+  if (!oauthStatus.value.authorized) {
+    treeData.value = []
+    treeError.value = '请先授权一名能够访问该知识空间的飞书用户'
+    return
+  }
+  if (!force) {
+    const cachedTree = readTreeCache(currentSourceId.value)
+    if (cachedTree) {
+      treeData.value = cachedTree
+      treeError.value = ''
+      return
+    }
+  }
+  loadingTree.value = true
+  treeError.value = ''
+  try {
+    const response = await feishuKnowledgeApi.listTree(currentSourceId.value)
+    treeData.value = normalizeTree(response.nodes)
+    writeTreeCache(currentSourceId.value, treeData.value)
+  } catch (error) {
+    treeData.value = []
+    treeError.value = feishuKnowledgeApi.getErrorMessage(error, '加载知识目录失败')
+  } finally {
+    loadingTree.value = false
+  }
+}
+
+async function refreshAll({ forceTree = false } = {}) {
   await loadSources()
-  if (currentSourceId.value) await Promise.all([loadRuns(), loadMaterials()])
+  if (currentSourceId.value) {
+    await loadOAuthStatus()
+    await Promise.all([loadRuns(), loadMaterials(), loadTree(forceTree)])
+  }
+}
+
+async function loadOAuthStatus() {
+  if (!currentSourceId.value) return
+  try {
+    oauthStatus.value = await feishuKnowledgeApi.getOAuthStatus(currentSourceId.value)
+  } catch (error) {
+    oauthStatus.value = { authorized: false, status: 'not_authorized' }
+    throw error
+  }
+}
+
+function validateAuthorizationUrl(value) {
+  const authorizationUrl = new URL(value)
+  if (authorizationUrl.origin !== 'https://accounts.feishu.cn') {
+    throw new Error('飞书授权地址无效')
+  }
+  return authorizationUrl.toString()
+}
+
+async function startBrowserOAuth() {
+  if (!currentSource.value || authorizingUser.value) return
+  authorizingUser.value = true
+  try {
+    const response = await feishuKnowledgeApi.startOAuth(currentSource.value.source_id, 'redirect')
+    window.location.assign(validateAuthorizationUrl(response.authorization_url))
+  } catch (error) {
+    message.error(feishuKnowledgeApi.getErrorMessage(error, '发起飞书用户授权失败'))
+    authorizingUser.value = false
+  }
+}
+
+async function startQrOAuth() {
+  if (!currentSource.value || qrAuthorizing.value) return
+  const requestId = ++qrRequestSeq
+  clearTimeout(qrPollTimer)
+  qrDialogOpen.value = true
+  qrAuthorizing.value = true
+  qrPhase.value = 'loading'
+  qrImageUrl.value = ''
+  qrError.value = ''
+  try {
+    const response = await feishuKnowledgeApi.startOAuth(currentSource.value.source_id, 'qr')
+    const authorizationUrl = validateAuthorizationUrl(response.authorization_url)
+    const imageUrl = await QRCode.toDataURL(authorizationUrl, {
+      width: 232,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#172033', light: '#ffffff' }
+    })
+    if (!isAlive || requestId !== qrRequestSeq) return
+    qrStartedAt.value = response.started_at
+    qrExpiresAt.value = Date.now() + QR_AUTH_TTL_MS
+    qrImageUrl.value = imageUrl
+    qrPhase.value = 'waiting'
+    scheduleQrAuthorizationPoll(requestId)
+  } catch (error) {
+    if (requestId !== qrRequestSeq) return
+    qrPhase.value = 'error'
+    qrError.value = feishuKnowledgeApi.getErrorMessage(error, '生成飞书授权二维码失败')
+  } finally {
+    if (requestId === qrRequestSeq) qrAuthorizing.value = false
+  }
+}
+
+function scheduleQrAuthorizationPoll(requestId) {
+  if (!isAlive || !qrDialogOpen.value || requestId !== qrRequestSeq) return
+  clearTimeout(qrPollTimer)
+  qrPollTimer = setTimeout(() => pollQrAuthorization(requestId), QR_POLL_INTERVAL_MS)
+}
+
+function completedAfterQrStarted(status) {
+  const refreshedAt = Date.parse(status?.last_refreshed_at || '')
+  const startedAt = Date.parse(qrStartedAt.value || '')
+  return (
+    status?.authorized &&
+    Number.isFinite(refreshedAt) &&
+    Number.isFinite(startedAt) &&
+    refreshedAt >= startedAt
+  )
+}
+
+async function pollQrAuthorization(requestId) {
+  if (!isAlive || !qrDialogOpen.value || requestId !== qrRequestSeq) return
+  if (Date.now() >= qrExpiresAt.value) {
+    qrPhase.value = 'expired'
+    qrError.value = '二维码已过期，请关闭后重新发起授权。'
+    return
+  }
+  try {
+    const status = await feishuKnowledgeApi.getOAuthStatus(currentSourceId.value)
+    if (!isAlive || requestId !== qrRequestSeq) return
+    if (!completedAfterQrStarted(status)) {
+      scheduleQrAuthorizationPoll(requestId)
+      return
+    }
+    oauthStatus.value = status
+    qrPhase.value = 'success'
+    qrError.value = ''
+    await Promise.all([loadSources(), loadTree(true)])
+    if (!isAlive || requestId !== qrRequestSeq) return
+    message.success('飞书用户授权成功，知识目录已刷新')
+    qrPollTimer = setTimeout(() => closeQrAuthorization(), 800)
+  } catch {
+    if (!isAlive || requestId !== qrRequestSeq) return
+    qrError.value = '暂时无法确认授权结果，系统会继续检查。'
+    scheduleQrAuthorizationPoll(requestId)
+  }
+}
+
+function closeQrAuthorization() {
+  qrRequestSeq += 1
+  clearTimeout(qrPollTimer)
+  qrDialogOpen.value = false
+  qrAuthorizing.value = false
+  qrImageUrl.value = ''
+  qrPhase.value = 'idle'
+  qrError.value = ''
+  qrStartedAt.value = ''
+  qrExpiresAt.value = 0
+}
+
+function handleOAuthCallbackResult() {
+  const params = new URLSearchParams(window.location.search)
+  const status = params.get('oauth_status')
+  if (!status) return
+  if (status === 'success') {
+    message.success('飞书用户授权成功，后续读取将使用该用户权限')
+  } else {
+    const code = params.get('oauth_error') || 'FEISHU_USER_OAUTH_FAILED'
+    const error = { response: { data: { detail: { code } } } }
+    message.error(feishuKnowledgeApi.getErrorMessage(error, '飞书用户授权失败'))
+  }
+  window.history.replaceState({}, '', window.location.pathname)
 }
 
 async function initialize() {
@@ -385,7 +806,7 @@ async function pollActiveRun() {
     else runs.value.unshift(run)
     if (TERMINAL_RUN_STATUSES.has(run.status)) {
       activeRunId.value = ''
-      await refreshAll()
+      await refreshAll({ forceTree: true })
       if (!isAlive) return
       if (run.status === 'succeeded') {
         message.success(`${runType === 'full' ? '全量' : '增量'}扫描完成`)
@@ -612,10 +1033,14 @@ function formatTime(value) {
   }).format(new Date(value))
 }
 
-onMounted(initialize)
+onMounted(() => {
+  handleOAuthCallbackResult()
+  initialize()
+})
 onBeforeUnmount(() => {
   isAlive = false
   clearTimeout(pollTimer)
+  clearTimeout(qrPollTimer)
 })
 </script>
 
@@ -677,7 +1102,9 @@ onBeforeUnmount(() => {
 
 .source-strip {
   display: grid;
-  grid-template-columns: minmax(170px, 0.8fr) minmax(280px, 1.6fr) minmax(150px, 0.8fr) minmax(180px, 0.9fr);
+  grid-template-columns:
+    minmax(160px, 0.8fr) minmax(260px, 1.5fr) minmax(130px, 0.7fr)
+    minmax(160px, 0.8fr) minmax(180px, 0.9fr);
   gap: 0;
   margin: 12px var(--page-padding) 0;
   overflow: hidden;
@@ -759,6 +1186,70 @@ onBeforeUnmount(() => {
   background: var(--gray-0);
 }
 
+.governance-tabs {
+  display: flex;
+  align-items: flex-end;
+  height: 48px;
+  margin: 0 var(--page-padding);
+  border-bottom: 1px solid color-mix(in srgb, var(--gray-150) 50%, transparent);
+}
+
+.governance-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 6px;
+  padding: 6px 16px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.governance-tab::after {
+  position: absolute;
+  right: 14px;
+  bottom: -1px;
+  left: 14px;
+  height: 2px;
+  border-radius: 2px;
+  background: transparent;
+  content: '';
+}
+
+.governance-tab:hover,
+.governance-tab.active {
+  color: var(--main-700);
+}
+
+.governance-tab.active {
+  font-weight: 600;
+}
+
+.governance-tab.active::after {
+  background: var(--main-color);
+}
+
+.governance-count {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--gray-100);
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.governance-tab.active .governance-count {
+  background: var(--main-30);
+  color: var(--main-700);
+}
+
 .stat-item {
   display: flex;
   align-items: baseline;
@@ -783,9 +1274,15 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.stat-item strong.warning { color: var(--color-warning-900); }
-.stat-item strong.error { color: var(--color-error-700); }
-.stat-item strong.muted { color: var(--gray-600); }
+.stat-item strong.warning {
+  color: var(--color-warning-900);
+}
+.stat-item strong.error {
+  color: var(--color-error-700);
+}
+.stat-item strong.muted {
+  color: var(--gray-600);
+}
 
 .workspace-section {
   margin: 10px var(--page-padding) 0;
@@ -795,9 +1292,193 @@ onBeforeUnmount(() => {
   background: var(--gray-0);
 }
 
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.78fr) minmax(620px, 1.62fr);
+  gap: 10px;
+  margin: 10px var(--page-padding) 0;
+  height: 310px;
+  align-items: start;
+}
+
+.workspace-grid > .workspace-section {
+  box-sizing: border-box;
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
 .material-section {
   margin-bottom: 24px;
   padding-bottom: 14px;
+}
+
+.tree-section {
+  padding-bottom: 14px;
+}
+
+.runs-section {
+  padding-bottom: 14px;
+}
+
+.workspace-grid .section-heading {
+  flex-shrink: 0;
+  min-height: 42px;
+}
+
+.section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.section-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-tertiary);
+  cursor: help;
+  transition: color 160ms ease;
+}
+
+.section-help:hover {
+  color: var(--main-color);
+}
+
+.panel-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  scrollbar-color: color-mix(in srgb, var(--main-color) 30%, var(--gray-150)) transparent;
+  scrollbar-width: thin;
+}
+
+.tree-body {
+  padding-right: 4px;
+}
+
+.runs-body {
+  padding-bottom: 2px;
+}
+
+.runs-body :deep(.ant-table-wrapper) {
+  min-width: 0;
+}
+
+.tree-alert {
+  margin-bottom: 12px;
+}
+
+.tree-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tree-actions :deep(.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.qr-oauth-content {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  align-items: center;
+  gap: 24px;
+  padding: 12px 2px 4px;
+}
+
+.qr-code-frame {
+  display: grid;
+  width: 232px;
+  height: 232px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--main-color) 24%, var(--gray-150));
+  border-radius: 8px;
+  background: var(--gray-0);
+}
+
+.qr-code-frame img {
+  display: block;
+  width: 232px;
+  height: 232px;
+}
+
+.qr-code-empty {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+}
+
+.qr-oauth-copy h3 {
+  margin: 0 0 7px;
+  color: var(--color-text);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.qr-oauth-copy > p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.qr-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 16px;
+  color: var(--main-700);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.qr-status.is-waiting svg {
+  animation: qr-status-spin 1.6s linear infinite;
+}
+
+.qr-status.is-success {
+  color: var(--color-success-700, #287a58);
+}
+
+.qr-status.is-error,
+.qr-status.is-expired,
+.qr-error {
+  color: var(--color-error-700);
+}
+
+.qr-oauth-copy .qr-error {
+  margin-top: 8px;
+}
+
+.qr-oauth-copy .qr-permission {
+  margin-top: 14px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+@keyframes qr-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tree-section :deep(.ant-tree) {
+  padding: 4px 0;
+  background: transparent;
+}
+
+.tree-section :deep(.ant-tree-title a) {
+  color: var(--main-color);
 }
 
 .section-heading {
@@ -824,7 +1505,10 @@ onBeforeUnmount(() => {
 
 .filter-bar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(112px, 0.7fr)) minmax(160px, 1fr) minmax(260px, 1.4fr) auto auto;
+  grid-template-columns: repeat(4, minmax(112px, 0.7fr)) minmax(160px, 1fr) minmax(
+      260px,
+      1.4fr
+    ) auto auto;
   gap: 8px;
   margin-bottom: 12px;
   padding: 10px;
@@ -870,6 +1554,17 @@ onBeforeUnmount(() => {
 
   .filter-bar {
     grid-template-columns: repeat(4, minmax(110px, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  .workspace-grid {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .workspace-grid > .workspace-section {
+    height: 310px;
   }
 }
 
@@ -924,6 +1619,19 @@ onBeforeUnmount(() => {
 
   .workspace-section {
     padding-inline: 10px;
+  }
+
+  .workspace-grid > .workspace-section {
+    height: 280px;
+  }
+
+  .qr-oauth-content {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .qr-oauth-copy {
+    text-align: center;
   }
 }
 </style>

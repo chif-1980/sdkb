@@ -26,6 +26,10 @@ class SendMessageRequest(StrictRequest):
     content: str = Field(min_length=1, max_length=20_000)
 
 
+class MessageFeedbackRequest(StrictRequest):
+    rating: Literal["LIKE", "DISLIKE"] | None
+
+
 class ProductUserResponse(ProductResponse):
     id: str
     name: str
@@ -34,6 +38,11 @@ class ProductUserResponse(ProductResponse):
 
 class SessionResponse(ProductResponse):
     user: ProductUserResponse
+
+
+class FeishuQrLoginConfigResponse(ProductResponse):
+    goto: str
+    expires_in: int
 
 
 class ConversationSummaryResponse(ProductResponse):
@@ -60,8 +69,14 @@ class MessageResponse(ProductResponse):
     role: Literal["USER", "ASSISTANT"]
     content: str
     answer_status: Literal["SUPPORTED", "INSUFFICIENT", "CONFLICTING"] | None
+    feedback_rating: Literal["LIKE", "DISLIKE"] | None = None
     citations: list[CitationResponse]
     created_at: str
+
+
+class MessageFeedbackResponse(ProductResponse):
+    message_id: str
+    feedback_rating: Literal["LIKE", "DISLIKE"] | None
 
 
 class ConversationListResponse(ProductResponse):

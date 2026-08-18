@@ -22,7 +22,7 @@ FEISHU_OPEN_API_BASE_URL = "https://open.feishu.cn"
 FEISHU_TENANT_TOKEN_PATH = "/open-apis/auth/v3/tenant_access_token/internal"
 DEFAULT_APP_ID_ENV_NAME = "FEISHU_APP_ID"
 DEFAULT_APP_SECRET_ENV_NAME = "FEISHU_APP_SECRET"
-FEISHU_PERMISSION_ERROR_CODES = {99991672}
+FEISHU_PERMISSION_ERROR_CODES = {131006, 99991672, 99991679}
 
 
 class FeishuClientError(RuntimeError):
@@ -72,19 +72,22 @@ class FeishuClient:
         max_retries: int = 3,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        token_provider: Callable[[bool], Awaitable[str]] | None = None,
     ) -> None:
         environment = os.environ if environ is None else environ
         app_id = environment.get(app_id_env_name)
-        if not app_id or not app_id.strip():
-            raise FeishuCredentialError(f"Missing Feishu credential environment variable: {app_id_env_name}")
         app_secret = environment.get(app_secret_env_name)
-        if not app_secret or not app_secret.strip():
-            raise FeishuCredentialError(f"Missing Feishu credential environment variable: {app_secret_env_name}")
+        if token_provider is None:
+            if not app_id or not app_id.strip():
+                raise FeishuCredentialError(f"Missing Feishu credential environment variable: {app_id_env_name}")
+            if not app_secret or not app_secret.strip():
+                raise FeishuCredentialError(f"Missing Feishu credential environment variable: {app_secret_env_name}")
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
 
-        self._app_id = app_id
-        self._app_secret = app_secret
+        self._app_id = app_id or ""
+        self._app_secret = app_secret or ""
+        self._token_provider = token_provider
         self._tenant_token: str | None = None
         self._token_generation = 0
         self._token_refresh_at = 0.0
@@ -105,27 +108,42 @@ class FeishuClient:
         node = self._as_mapping(data.get("node"), "node")
         return self._node_from_payload(node)
 
-    async def list_children(self, parent_node_token: str) -> list[FeishuNode]:
-        parent = await self.get_node(parent_node_token)
-        if not parent.space_id:
-            raise FeishuApiError("Feishu node response did not include a space ID")
+    async def list_nodes(self, space_id: str, parent_node_token: str | None = None) -> list[FeishuNode]:
+        """List nodes in a Wiki space, optionally below one parent node.
 
+        The endpoint is paginated for both top-level nodes and child nodes.  A
+        missing parent token intentionally means "all top-level nodes"; it is
+        not treated as an empty result so permission errors remain visible.
+        """
+        if not isinstance(space_id, str) or not space_id.strip():
+            raise ValueError("space_id must not be blank")
         nodes: list[FeishuNode] = []
         page_token: str | None = None
         seen_page_tokens: set[str] = set()
         while True:
-            params: dict[str, str] = {"parent_node_token": parent_node_token}
+            params: dict[str, str] = {"page_size": "50"}
+            if parent_node_token:
+                params["parent_node_token"] = parent_node_token
             if page_token:
                 params["page_token"] = page_token
-            payload = await self._get(f"/open-apis/wiki/v2/spaces/{parent.space_id}/nodes", params=params)
+            payload = await self._get(f"/open-apis/wiki/v2/spaces/{space_id}/nodes", params=params)
             data = self._as_mapping(payload.get("data"), "data")
             items = data.get("items") or []
             if not isinstance(items, list):
                 raise FeishuApiError("Feishu node list response had invalid items")
-            nodes.extend(self._node_from_payload(self._as_mapping(item, "node item")) for item in items)
+            nodes.extend(
+                self._node_from_payload(self._as_mapping(item, "node item"), fallback_space_id=space_id)
+                for item in items
+            )
             if not data.get("has_more"):
                 return nodes
             page_token = self._next_page_token(data, seen_page_tokens)
+
+    async def list_children(self, parent_node_token: str) -> list[FeishuNode]:
+        parent = await self.get_node(parent_node_token)
+        if not parent.space_id:
+            raise FeishuApiError("Feishu node response did not include a space ID")
+        return await self.list_nodes(parent.space_id, parent_node_token)
 
     async def list_attachments(self, folder_token: str) -> list[FeishuAttachment]:
         attachments: list[FeishuAttachment] = []
@@ -331,11 +349,12 @@ class FeishuClient:
         return payload
 
     async def _get_response(self, path: str, *, params: dict[str, str] | None = None) -> httpx.Response:
-        token, generation = await self._get_tenant_token()
+        token, generation = await self._get_request_token()
         response = await self._get_with_retries(path, params=params, token=token)
         if response.status_code == 401:
-            self._invalidate_tenant_token(token, generation)
-            token, _ = await self._get_tenant_token()
+            if self._token_provider is None:
+                self._invalidate_tenant_token(token, generation)
+            token, _ = await self._get_request_token(force_refresh=True)
             response = await self._get_with_retries(path, params=params, token=token)
             if response.status_code == 401:
                 raise FeishuAuthenticationError(
@@ -374,6 +393,14 @@ class FeishuClient:
                 continue
             return response
         raise FeishuApiError("Feishu request exhausted retries")
+
+    async def _get_request_token(self, *, force_refresh: bool = False) -> tuple[str, int]:
+        if self._token_provider is not None:
+            token = await self._token_provider(force_refresh)
+            if not isinstance(token, str) or not token.strip():
+                raise FeishuAuthenticationError("Feishu user access token provider returned an invalid token")
+            return token, -1
+        return await self._get_tenant_token()
 
     async def _get_tenant_token(self) -> tuple[str, int]:
         if self._token_is_fresh():
@@ -478,12 +505,12 @@ class FeishuClient:
         return page_token
 
     @staticmethod
-    def _node_from_payload(value: Mapping[str, Any]) -> FeishuNode:
+    def _node_from_payload(value: Mapping[str, Any], *, fallback_space_id: str | None = None) -> FeishuNode:
         node_token = value.get("node_token")
         if not isinstance(node_token, str) or not node_token:
             raise FeishuApiError("Feishu node response did not include a node token")
         return FeishuNode(
-            space_id=str(value.get("space_id") or ""),
+            space_id=str(value.get("space_id") or fallback_space_id or ""),
             node_token=node_token,
             obj_token=FeishuClient._optional_text(value.get("obj_token")),
             obj_type=FeishuClient._optional_text(value.get("obj_type")),

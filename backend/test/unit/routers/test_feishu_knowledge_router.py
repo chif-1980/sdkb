@@ -30,6 +30,18 @@ from yuxi.storage.postgres.models_knowledge import (
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def active_feishu_user_oauth(monkeypatch):
+    class FakeOAuthService:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def get_authorization_status(self, source_id):
+            return {"authorized": True, "status": "active", "source_id": source_id}
+
+    monkeypatch.setattr(router_module, "FeishuUserOAuthService", FakeOAuthService)
+
+
 @pytest.fixture
 async def review_fixture():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -200,7 +212,7 @@ async def _prepare_succeeded_scan(monkeypatch, database_path, processing_task):
             return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
         return await processing_task(**kwargs)
 
-    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FakeClient())
     monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
     monkeypatch.setattr(
         router_module.pg_manager,
@@ -663,7 +675,7 @@ async def test_successful_scan_queues_archived_material_processing(monkeypatch):
         return SimpleNamespace(id="task-process")
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
-    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FakeClient())
     monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
     monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
     monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
@@ -707,7 +719,11 @@ async def test_failed_scan_commits_domain_state_before_task_failure(monkeypatch,
     async def unexpected_processing(version_id, *, operator_id):
         processing_calls.append((version_id, operator_id))
 
-    monkeypatch.setattr(router_module, "FeishuClient", _FailingAfterArchiveFeishuClient)
+    monkeypatch.setattr(
+        router_module,
+        "create_user_authorized_feishu_client",
+        lambda _source_id: _FailingAfterArchiveFeishuClient(),
+    )
     monkeypatch.setattr(router_module, "MinioFeishuArchiveAdapter", lambda: _StableArchiveAdapter())
     monkeypatch.setattr(
         router_module.pg_manager,
@@ -804,7 +820,7 @@ async def test_scan_cancellation_after_success_commit_queues_discovered_versions
         captured["processing"].append((kwargs["payload"], kwargs["payload_match"], kwargs["statuses"]))
         return SimpleNamespace(id=f"task-{kwargs['payload']['version_id']}"), True
 
-    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FakeClient())
     monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
     monkeypatch.setattr(
         router_module.pg_manager,
@@ -951,7 +967,7 @@ async def test_scan_cancellation_processing_enqueue_failure_is_recorded_and_othe
             raise RuntimeError("processing queue unavailable")
         return SimpleNamespace(id=f"task-{version_id}"), True
 
-    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FakeClient())
     monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
     monkeypatch.setattr(
         router_module.pg_manager,
@@ -1172,7 +1188,7 @@ async def test_scan_cancellation_before_external_work_fails_run_once_and_propaga
         async def raise_if_cancelled(self):
             raise asyncio.CancelledError("Task was cancelled")
 
-    monkeypatch.setattr(router_module, "FeishuClient", UnexpectedClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: UnexpectedClient())
     monkeypatch.setattr(
         router_module.pg_manager,
         "get_async_session_context",
@@ -1303,7 +1319,11 @@ async def test_scan_domain_commit_failure_uses_fresh_session_to_fail_run(monkeyp
         captured["coroutine"] = kwargs["coroutine"]
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
 
-    monkeypatch.setattr(router_module, "FeishuClient", _FailingAfterArchiveFeishuClient)
+    monkeypatch.setattr(
+        router_module,
+        "create_user_authorized_feishu_client",
+        lambda _source_id: _FailingAfterArchiveFeishuClient(),
+    )
     monkeypatch.setattr(router_module, "MinioFeishuArchiveAdapter", lambda: _StableArchiveAdapter())
     monkeypatch.setattr(
         router_module.pg_manager,
@@ -1392,7 +1412,7 @@ async def test_scan_worker_initialization_failure_marks_run_failed(monkeypatch, 
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
-    monkeypatch.setattr(router_module, "FeishuClient", FailingClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FailingClient())
     monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
     monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
 
@@ -1468,7 +1488,7 @@ async def test_scan_worker_concurrent_claim_failure_marks_queued_run_failed(monk
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
-    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FakeClient())
     monkeypatch.setattr(router_module, "FeishuScanService", FakeScanService)
     monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
     monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
@@ -1543,7 +1563,7 @@ async def test_rejected_queued_scan_worker_persists_failed_run_and_event(monkeyp
         captured["coroutine"] = kwargs["coroutine"]
         return SimpleNamespace(id="task-scan", payload=kwargs["payload"]), True
 
-    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FakeClient())
     monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
     monkeypatch.setattr(router_module.tasker, "enqueue_unique_by_payload", capture_scan)
 
@@ -2126,7 +2146,7 @@ async def test_check_source_uses_read_only_feishu_client(monkeypatch):
             calls.append(("close",))
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
-    monkeypatch.setattr(router_module, "FeishuClient", FakeClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FakeClient())
     result = await router_module.check_source("source-1", db=SimpleNamespace())
     assert result == {"status": "ok", "source_id": "source-1", "root_title": "Root"}
     assert calls == [("init",), ("get", "root"), ("close",)]
@@ -2149,7 +2169,7 @@ async def test_check_source_maps_client_initialization_error_to_422(monkeypatch)
             raise router_module.FeishuClientError("Missing Feishu application credentials")
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
-    monkeypatch.setattr(router_module, "FeishuClient", FailingClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FailingClient())
 
     with pytest.raises(HTTPException) as exc_info:
         await router_module.check_source("source-1", db=SimpleNamespace())
@@ -2185,7 +2205,7 @@ async def test_check_source_maps_read_failure_to_422_and_closes_client(monkeypat
             closed = True
 
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
-    monkeypatch.setattr(router_module, "FeishuClient", FailingClient)
+    monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FailingClient())
 
     with pytest.raises(HTTPException) as exc_info:
         await router_module.check_source("source-1", db=SimpleNamespace())
@@ -2272,6 +2292,7 @@ async def test_query_endpoints_return_sources_runs_materials_and_events(review_f
         "name": "Source",
         "wiki_root_token": "root",
         "wiki_root_url": None,
+        "scan_scope": "root",
         "target_kb_id": "kb-1",
         "enabled": True,
         "created_at": sources["items"][0]["created_at"],

@@ -31,6 +31,13 @@ class FakeProductAuthService:
         assert return_path == "/chat"
         return "https://accounts.feishu.cn/open-apis/authen/v1/authorize?app_id=test-app-id&state=opaque"
 
+    async def create_qr_login_url(self, return_path: str = "/chat") -> str:
+        assert return_path == "/chat"
+        return (
+            "https://passport.feishu.cn/suite/passport/oauth/authorize"
+            "?client_id=test-app-id&state=qr-opaque"
+        )
+
     async def complete_callback(self, code: str | None, state: str | None) -> tuple[User, str]:
         if self.callback_error:
             raise self.callback_error
@@ -107,6 +114,23 @@ async def test_login_redirects_to_feishu_authorize_without_app_secret(api_contex
     assert response.status_code == 307
     assert response.headers["location"].startswith("https://accounts.feishu.cn/open-apis/authen/v1/authorize")
     assert "secret" not in response.headers["location"]
+
+
+async def test_qr_config_returns_embeddable_url_without_sensitive_configuration(api_context):
+    client, _, _, _, _ = api_context
+
+    response = await client.get("/api/auth/feishu/qr-config", params={"return_path": "/chat"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "goto": (
+            "https://passport.feishu.cn/suite/passport/oauth/authorize"
+            "?client_id=test-app-id&state=qr-opaque"
+        ),
+        "expiresIn": 300,
+    }
+    assert response.headers["cache-control"] == "no-store"
+    assert "secret" not in response.text
 
 
 async def test_callback_sets_product_cookie_and_redirects_to_chat(api_context, monkeypatch):

@@ -2,6 +2,7 @@
 
 import { flushPromises, mount } from '@vue/test-utils'
 import { message, Modal } from 'ant-design-vue'
+import QRCode from 'qrcode'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apiAdminGet, apiAdminPost } from '@/apis/base'
@@ -19,6 +20,12 @@ vi.mock('@/apis/base', () => ({
 vi.mock('@/apis/knowledge_api', () => ({
   documentApi: {
     getDocumentContent: vi.fn()
+  }
+}))
+
+vi.mock('qrcode', () => ({
+  default: {
+    toDataURL: vi.fn()
   }
 }))
 
@@ -82,6 +89,13 @@ function mountView() {
         'a-range-picker': { template: '<div />' },
         'a-empty': { template: '<div />' },
         'a-spin': { template: '<div><slot /></div>' },
+        'a-tree': { template: '<div />' },
+        'a-modal': {
+          props: ['open'],
+          emits: ['cancel'],
+          template:
+            '<section v-if="open" data-testid="oauth-qr-modal"><slot /><button data-testid="oauth-qr-close" @click="$emit(\'cancel\')">关闭</button></section>'
+        },
         FeishuSyncRunsTable: true,
         FeishuMaterialTable: true,
         FeishuMaterialDetailDrawer: true
@@ -182,6 +196,8 @@ describe('feishuKnowledgeApi', () => {
     apiAdminPost.mockResolvedValue({})
 
     await feishuKnowledgeApi.listSources()
+    await feishuKnowledgeApi.getOAuthStatus('source/1')
+    await feishuKnowledgeApi.startOAuth('source/1', 'qr')
     await feishuKnowledgeApi.scanSource('source/1', 'incremental')
     await feishuKnowledgeApi.getRun('run/1')
     await feishuKnowledgeApi.listRuns('source/1')
@@ -199,10 +215,16 @@ describe('feishuKnowledgeApi', () => {
     await feishuKnowledgeApi.batchAction('approve', ['version/1', 'version/2'])
 
     expect(apiAdminGet).toHaveBeenNthCalledWith(1, '/api/feishu-knowledge/sources')
-    expect(apiAdminPost).toHaveBeenCalledWith(
-      '/api/feishu-knowledge/sources/source%2F1/scan',
-      { mode: 'incremental' }
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/feishu-knowledge/sources/source%2F1/oauth/status'
     )
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/feishu-knowledge/sources/source%2F1/oauth/authorize',
+      { mode: 'qr' }
+    )
+    expect(apiAdminPost).toHaveBeenCalledWith('/api/feishu-knowledge/sources/source%2F1/scan', {
+      mode: 'incremental'
+    })
     expect(apiAdminGet).toHaveBeenCalledWith('/api/feishu-knowledge/runs/run%2F1')
     expect(apiAdminGet).toHaveBeenCalledWith('/api/feishu-knowledge/sources/source%2F1/runs')
     expect(apiAdminGet).toHaveBeenCalledWith(
@@ -226,7 +248,10 @@ describe('feishuKnowledgeApi', () => {
 
   it('在请求发出前拒绝超过 100 条的批量操作', async () => {
     await expect(
-      feishuKnowledgeApi.batchAction('approve', Array.from({ length: 101 }, (_, i) => `v-${i}`))
+      feishuKnowledgeApi.batchAction(
+        'approve',
+        Array.from({ length: 101 }, (_, i) => `v-${i}`)
+      )
     ).rejects.toThrow('单次批量操作最多选择 100 条素材')
     expect(apiAdminPost).not.toHaveBeenCalled()
   })
@@ -257,10 +282,16 @@ describe('feishuKnowledgeApi', () => {
       )
     ).toBe('仅来源失效的素材可以确认下架')
     expect(
-      feishuKnowledgeApi.getErrorMessage({ response: { data: { detail: 'unknown detail' } } }, '操作失败')
+      feishuKnowledgeApi.getErrorMessage(
+        { response: { data: { detail: 'unknown detail' } } },
+        '操作失败'
+      )
     ).toBe('操作失败')
     expect(
-      feishuKnowledgeApi.getErrorMessage({ response: { data: { detail: '内容已被其他人更新' } } }, '操作失败')
+      feishuKnowledgeApi.getErrorMessage(
+        { response: { data: { detail: '内容已被其他人更新' } } },
+        '操作失败'
+      )
     ).toBe('操作失败：内容已被其他人更新')
   })
 })
@@ -272,7 +303,10 @@ describe('FeishuMaterialTable', () => {
 
     rowSelection.onChange(['version-page'])
     await wrapper.vm.$nextTick()
-    await wrapper.findAll('button').find((button) => button.text() === '审核通过').trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '审核通过')
+      .trigger('click')
 
     expect(wrapper.emitted('batch-action')).toEqual([
       [{ action: 'approve', versionIds: ['version-page'] }]
@@ -283,12 +317,17 @@ describe('FeishuMaterialTable', () => {
     const wrapper = mountMaterialTable({ maxSelection: 1 })
     const rowSelection = wrapper.findComponent({ name: 'ATable' }).props('rowSelection')
 
-    expect(rowSelection.getCheckboxProps({ version_id: 'version-audio', item_type: 'audio' })).toEqual({
+    expect(
+      rowSelection.getCheckboxProps({ version_id: 'version-audio', item_type: 'audio' })
+    ).toEqual({
       disabled: true
     })
     rowSelection.onChange(['version-page', 'version-extra'])
     await wrapper.vm.$nextTick()
-    await wrapper.findAll('button').find((button) => button.text() === '审核通过').trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '审核通过')
+      .trigger('click')
 
     expect(wrapper.emitted('selection-limit')).toEqual([[1]])
     expect(wrapper.emitted('batch-action')).toEqual([
@@ -377,7 +416,7 @@ describe('FeishuMaterialTable', () => {
       materials: [
         makeMaterial('reviewable-1', {
           title: '待审核素材一',
-          processing_status: 'parsed',
+          processing_status: 'parsed'
         }),
         makeMaterial('reviewable-2', { title: '待审核素材二' }),
         makeMaterial('rejectable-without-file', {
@@ -391,7 +430,7 @@ describe('FeishuMaterialTable', () => {
         }),
         makeMaterial('retryable-2', {
           title: '解析失败素材',
-          processing_status: 'parse_failed',
+          processing_status: 'parse_failed'
         }),
         makeMaterial('removable-1', {
           title: '可下架素材一',
@@ -518,8 +557,12 @@ describe('FeishuKnowledgeView', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
+    sessionStorage.clear()
+    QRCode.toDataURL.mockResolvedValue('data:image/png;base64,oauth-qr')
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
       if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
       if (url.includes('/materials')) return Promise.resolve({ items: [] })
       return Promise.resolve({ status: 'succeeded' })
@@ -528,13 +571,66 @@ describe('FeishuKnowledgeView', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    sessionStorage.clear()
+  })
+
+  it('重新进入页面时复用未过期的知识目录缓存', async () => {
+    let treeRequests = 0
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
+      if (url.endsWith('/tree')) {
+        treeRequests += 1
+        return Promise.resolve({
+          nodes: [{ node_token: 'root', title: '产品资料', children: [] }]
+        })
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const firstWrapper = mountView()
+    await flushPromises()
+    firstWrapper.unmount()
+
+    const secondWrapper = mountView()
+    await flushPromises()
+
+    expect(treeRequests).toBe(1)
+    secondWrapper.unmount()
+  })
+
+  it('点击刷新目录时绕过缓存并重新请求飞书目录', async () => {
+    let treeRequests = 0
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
+      if (url.endsWith('/tree')) {
+        treeRequests += 1
+        return Promise.resolve({ nodes: [] })
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    expect(treeRequests).toBe(1)
+
+    await wrapper.get('[aria-label="刷新知识目录"]').trigger('click')
+    await flushPromises()
+
+    expect(treeRequests).toBe(2)
+    wrapper.unmount()
   })
 
   it('扫描提交期间显示 loading，并在活跃批次存在时互斥禁用两个按钮', async () => {
     let resolveScan
-    apiAdminPost.mockImplementation(
-      () => new Promise((resolve) => (resolveScan = resolve))
-    )
+    apiAdminPost.mockImplementation(() => new Promise((resolve) => (resolveScan = resolve)))
     const wrapper = mountView()
     await flushPromises()
 
@@ -551,11 +647,98 @@ describe('FeishuKnowledgeView', () => {
     expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeDefined()
   })
 
+  it('未授权飞书用户时禁止扫描并提供授权入口', async () => {
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status')) {
+        return Promise.resolve({ authorized: false, status: 'not_authorized' })
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({ nodes: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="oauth-qr-authorize"]').text()).toContain('扫码授权')
+    expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('在管理页生成新版 OAuth 二维码，不依赖第三方二维码服务', async () => {
+    apiAdminPost.mockResolvedValue({
+      authorization_url: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?state=qr-state',
+      started_at: '2026-08-17T08:00:00+00:00'
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="oauth-qr-authorize"]').trigger('click')
+    await flushPromises()
+
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/feishu-knowledge/sources/source-1/oauth/authorize',
+      { mode: 'qr' }
+    )
+    expect(QRCode.toDataURL).toHaveBeenCalledWith(
+      expect.stringContaining('https://accounts.feishu.cn/open-apis/authen/v1/authorize'),
+      expect.objectContaining({ width: 232, margin: 1 })
+    )
+    expect(wrapper.get('[data-testid="oauth-qr-image"]').attributes('src')).toBe(
+      'data:image/png;base64,oauth-qr'
+    )
+    expect(wrapper.get('[data-testid="oauth-qr-modal"]').text()).toContain('请使用手机飞书扫码')
+  })
+
+  it('手机完成扫码授权后自动关闭二维码并刷新授权状态和目录', async () => {
+    let statusRequests = 0
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status')) {
+        statusRequests += 1
+        if (statusRequests === 1) {
+          return Promise.resolve({ authorized: false, status: 'not_authorized' })
+        }
+        return Promise.resolve({
+          authorized: true,
+          status: 'active',
+          display_name: '知识库管理员',
+          last_refreshed_at: '2026-08-17T08:00:05+00:00'
+        })
+      }
+      if (url.endsWith('/tree')) return Promise.resolve({ nodes: [] })
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockResolvedValue({
+      authorization_url: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?state=qr-state',
+      started_at: '2026-08-17T08:00:00+00:00'
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="oauth-qr-authorize"]').trigger('click')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(800)
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="oauth-qr-modal"]').exists()).toBe(false)
+    expect(message.success).toHaveBeenCalledWith('飞书用户授权成功，知识目录已刷新')
+    expect(apiAdminGet).toHaveBeenCalledWith('/api/feishu-knowledge/sources/source-1/tree')
+  })
+
   it('轮询批次到终态后刷新来源、批次和素材', async () => {
     apiAdminPost.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
-      if (url.endsWith('/runs/run-1')) return Promise.resolve({ run_id: 'run-1', status: 'succeeded' })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
+      if (url.endsWith('/runs/run-1'))
+        return Promise.resolve({ run_id: 'run-1', status: 'succeeded' })
       if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
       if (url.includes('/materials')) return Promise.resolve({ items: [] })
       return Promise.resolve({})
@@ -568,7 +751,9 @@ describe('FeishuKnowledgeView', () => {
     await flushPromises()
 
     expect(apiAdminGet).toHaveBeenCalledWith('/api/feishu-knowledge/runs/run-1')
-    expect(apiAdminGet.mock.calls.filter(([url]) => url === '/api/feishu-knowledge/sources')).toHaveLength(2)
+    expect(
+      apiAdminGet.mock.calls.filter(([url]) => url === '/api/feishu-knowledge/sources')
+    ).toHaveLength(2)
     expect(message.success).toHaveBeenCalledWith('增量扫描完成')
   })
 
@@ -578,6 +763,8 @@ describe('FeishuKnowledgeView', () => {
     apiAdminPost.mockResolvedValue({ run_id: 'run-retry', status: 'queued' })
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
       if (url.endsWith('/runs/run-retry')) {
         runRequests += 1
         if (runRequests <= 2) return Promise.reject(new Error('temporary network error'))
@@ -622,6 +809,8 @@ describe('FeishuKnowledgeView', () => {
     apiAdminPost.mockResolvedValue({ run_id: 'run-unmount', status: 'queued' })
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
       if (url.endsWith('/runs/run-unmount')) {
         runRequests += 1
         if (runRequests === 1) {
@@ -685,6 +874,8 @@ describe('FeishuKnowledgeView', () => {
   it('打开详情后使用知识库和文件 ID 加载正文及 Chunks', async () => {
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
       if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
       if (url.includes('/sources/source-1/materials')) return Promise.resolve({ items: [] })
       if (url.endsWith('/materials/version-1')) {
@@ -720,10 +911,16 @@ describe('FeishuKnowledgeView', () => {
   it('素材没有知识库文件 ID 时不请求正文', async () => {
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
       if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
       if (url.includes('/sources/source-1/materials')) return Promise.resolve({ items: [] })
       if (url.endsWith('/materials/version-new')) {
-        return Promise.resolve({ version_id: 'version-new', title: '待加工素材', target_kb_id: 'kb-1' })
+        return Promise.resolve({
+          version_id: 'version-new',
+          title: '待加工素材',
+          target_kb_id: 'kb-1'
+        })
       }
       if (url.endsWith('/materials/version-new/events')) return Promise.resolve({ items: [] })
       return Promise.resolve({})
@@ -742,6 +939,8 @@ describe('FeishuKnowledgeView', () => {
   it('正文接口返回失败状态时保留详情并显示中文错误', async () => {
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
       if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
       if (url.includes('/sources/source-1/materials')) return Promise.resolve({ items: [] })
       if (url.endsWith('/materials/version-1')) {
@@ -778,6 +977,8 @@ describe('FeishuKnowledgeView', () => {
     let resolveContent
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
       if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
       if (url.includes('/sources/source-1/materials')) return Promise.resolve({ items: [] })
       if (url.endsWith('/materials/version-1')) {

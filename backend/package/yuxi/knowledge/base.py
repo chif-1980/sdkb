@@ -345,6 +345,10 @@ class KnowledgeBase(ABC):
         # Validate current status - only allow parsing from these states
         allowed_statuses = {
             FileStatus.UPLOADED,
+            # A service restart can leave a previously claimed file in the
+            # parsing state. Reclaim it so queued material processing is
+            # retryable instead of permanently stuck on the old file record.
+            FileStatus.PARSING,
             FileStatus.ERROR_PARSING,
             "failed",  # Legacy status
         }

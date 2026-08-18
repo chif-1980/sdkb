@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select, update
@@ -26,6 +27,16 @@ class ProductChatNotFoundError(Exception):
     """Stable not-found error that does not reveal conversation ownership."""
 
     code = "CONVERSATION_NOT_FOUND"
+    status_code = 404
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class ProductMessageNotFoundError(Exception):
+    """Stable not-found error for messages outside the current user's scope."""
+
+    code = "MESSAGE_NOT_FOUND"
     status_code = 404
 
     def __init__(self) -> None:
@@ -177,6 +188,37 @@ class ProductChatRepository:
             await self.session.rollback()
             raise
 
+    async def set_message_feedback(
+        self,
+        message_id: str,
+        owner_user_id: int,
+        rating: str | None,
+    ) -> ProductMessage:
+        result = await self.session.execute(
+            select(ProductMessage)
+            .join(
+                ProductConversation,
+                ProductMessage.conversation_id == ProductConversation.conversation_id,
+            )
+            .where(
+                ProductMessage.message_id == message_id,
+                ProductMessage.role == MessageRole.ASSISTANT,
+                ProductConversation.owner_user_id == owner_user_id,
+                ProductConversation.status == ConversationStatus.ACTIVE,
+            )
+        )
+        message = result.scalar_one_or_none()
+        if message is None:
+            raise ProductMessageNotFoundError
+        try:
+            message.feedback_rating = rating
+            await self.session.commit()
+            await self.session.refresh(message)
+            return message
+        except Exception:
+            await self.session.rollback()
+            raise
+
     async def append_exchange(
         self,
         conversation: ProductConversation,
@@ -229,7 +271,11 @@ class ProductChatRepository:
                 path_text=citation.path_text,
                 locator=citation.locator,
                 excerpt=citation.excerpt,
-                source_version_at=citation.source_version_at,
+                source_version_at=(
+                    citation.source_version_at.astimezone(UTC).replace(tzinfo=None)
+                    if citation.source_version_at is not None and citation.source_version_at.tzinfo is not None
+                    else citation.source_version_at
+                ),
             )
             for citation in answer.citations
         ]

@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -16,6 +17,55 @@ from yuxi.utils import logger
 from yuxi.agents.backends.sandbox import init_sandbox_provider, shutdown_sandbox_provider
 from yuxi import get_version
 from yuxi.config import config
+
+
+async def _recover_recent_feishu_processing_tasks() -> int:
+    """Requeue Feishu material tasks interrupted by the last API restart.
+
+    Tasker persists task rows, but coroutine callbacks live in process memory.
+    Recover only the recent restart marker so an API restart does not strand a
+    just-submitted scan while leaving older, intentionally failed tasks alone.
+    """
+    from sqlalchemy import select
+
+    from server.routers.feishu_knowledge_router import FeishuReviewService, _enqueue_processing
+    from yuxi.storage.postgres.models_business import TaskRecord
+    from yuxi.utils.datetime_utils import utc_now_naive
+
+    # Task timestamps are stored as UTC-naive values while the UI displays
+    # local time; keep a full day so a morning restart can recover a scan that
+    # was submitted late the previous evening.
+    cutoff = utc_now_naive() - timedelta(hours=24)
+    async with pg_manager.get_async_session_context() as session:
+        result = await session.execute(
+            select(TaskRecord).where(
+                TaskRecord.type == "feishu_process",
+                TaskRecord.status == "failed",
+                TaskRecord.message.in_({"服务重启时任务中断", "服务重启时任务未继续执行"}),
+                TaskRecord.created_at >= cutoff,
+            )
+        )
+        interrupted_tasks = list(result.scalars())
+
+    recovered = 0
+    for task in interrupted_tasks:
+        version_id = (task.payload or {}).get("version_id")
+        if not version_id:
+            continue
+        try:
+            async with pg_manager.get_async_session_context() as session:
+                await FeishuReviewService(session).retry(
+                    version_id,
+                    operator_id="system-recovery",
+                )
+                await session.commit()
+            await _enqueue_processing(version_id, operator_id="system-recovery")
+            recovered += 1
+        except (LookupError, ValueError) as exc:
+            logger.warning("Skipping Feishu task recovery for {}: {}", version_id, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to recover Feishu task {}: {}", version_id, exc)
+    return recovered
 
 
 @asynccontextmanager
@@ -112,6 +162,12 @@ async def lifespan(app: FastAPI):
             await FeishuKnowledgeRepository(session).reconcile_interrupted_work()
     except Exception as e:
         logger.error(f"Failed to reconcile interrupted Feishu work during startup: {e}")
+    try:
+        recovered = await _recover_recent_feishu_processing_tasks()
+        if recovered:
+            logger.info("Recovered {} recent Feishu processing tasks after restart", recovered)
+    except Exception as e:
+        logger.error(f"Failed to recover interrupted Feishu processing tasks during startup: {e}")
     logger.info(f"""
 
 ░██     ░██                       ░██

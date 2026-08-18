@@ -44,6 +44,7 @@ async def test_ensure_knowledge_schema_creates_feishu_tables_and_indexes_idempot
     statements = "\n".join(connection.statements)
     for table in (
         "feishu_sources",
+        "feishu_user_oauth_credentials",
         "feishu_sync_runs",
         "feishu_source_items",
         "feishu_material_versions",

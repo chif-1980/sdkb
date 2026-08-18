@@ -9,7 +9,7 @@
       :custom-row="customRow"
       row-key="run_id"
       size="small"
-      :scroll="{ x: 1050 }"
+      :scroll="{ x: 830 }"
     >
       <template #emptyText>暂无扫描批次</template>
       <template #bodyCell="{ column, record }">
@@ -57,11 +57,11 @@ const props = defineProps({
 const emit = defineEmits(['select'])
 
 const columns = [
-  { title: '类型', key: 'run_type', width: 92 },
+  { title: '类型', key: 'run_type', width: 84 },
+  { title: '处理结果', key: 'counts', width: 300 },
+  { title: '状态', key: 'status', width: 140 },
   { title: '操作者', dataIndex: 'operator_id', key: 'operator_id', width: 120, ellipsis: true },
-  { title: '执行时间', key: 'time', width: 185 },
-  { title: '处理结果', key: 'counts', width: 360 },
-  { title: '状态', key: 'status', width: 180 }
+  { title: '执行时间', key: 'time', width: 185 }
 ]
 
 const runTypes = { full: '全量', incremental: '增量' }

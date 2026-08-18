@@ -39,6 +39,50 @@ def test_app_credential_environment_names_are_exported() -> None:
     assert not hasattr(feishu_client_module, "DEFAULT_CREDENTIAL_ENV_NAME")
 
 
+@pytest.mark.asyncio
+async def test_user_token_provider_does_not_require_app_credentials() -> None:
+    requested_force_refresh: list[bool] = []
+
+    async def token_provider(force_refresh: bool) -> str:
+        requested_force_refresh.append(force_refresh)
+        return "user-access-token"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer user-access-token"
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ={}, token_provider=token_provider)
+
+    await client.get_node("page-token")
+
+    assert requested_force_refresh == [False]
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_user_token_provider_is_forced_to_refresh_after_401() -> None:
+    requested_force_refresh: list[bool] = []
+
+    async def token_provider(force_refresh: bool) -> str:
+        requested_force_refresh.append(force_refresh)
+        return "refreshed-user-token" if force_refresh else "expired-user-token"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers["authorization"] == "Bearer expired-user-token":
+            return httpx.Response(401, json={"code": 99991663, "msg": "token expired"})
+        assert request.headers["authorization"] == "Bearer refreshed-user-token"
+        return httpx.Response(200, json={"code": 0, "data": {"node": {"node_token": "page-token"}}})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FeishuClient(client=http_client, environ={}, token_provider=token_provider)
+
+    await client.get_node("page-token")
+
+    assert requested_force_refresh == [False, True]
+    await http_client.aclose()
+
+
 @pytest.mark.parametrize(
     ("environ", "missing_name"),
     [
@@ -449,6 +493,54 @@ async def test_business_http_400_permission_code_is_normalized_without_response_
 
 
 @pytest.mark.asyncio
+async def test_wiki_space_http_400_permission_code_is_normalized() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            headers={"x-request-id": "wiki-permission-request"},
+            json={
+                "code": 131006,
+                "msg": "permission denied: wiki space permission denied, tenant needs read permission.",
+            },
+        )
+
+    client = _client(handler)
+
+    with pytest.raises(FeishuPermissionError, match="wiki space permission denied") as raised:
+        await client.list_nodes("space-1")
+
+    assert raised.value.status_code == 400
+    assert raised.value.request_id == "wiki-permission-request"
+    assert raised.value.error is not None
+    assert raised.value.error.code == 131006
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_user_reauthorization_permission_code_is_normalized() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            headers={"x-request-id": "user-permission-request"},
+            json={
+                "code": 99991679,
+                "msg": "required user privilege: docx:document:readonly",
+            },
+        )
+
+    client = _client(handler)
+
+    with pytest.raises(FeishuPermissionError, match="docx:document:readonly") as raised:
+        await client.get_node("page-token")
+
+    assert raised.value.status_code == 400
+    assert raised.value.request_id == "user-permission-request"
+    assert raised.value.error is not None
+    assert raised.value.error.code == 99991679
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status_code", [429, 503])
 async def test_business_retryable_status_exhaustion_is_api_error(status_code: int) -> None:
     attempts = 0
@@ -639,6 +731,30 @@ async def test_list_children_follows_page_token() -> None:
 
     assert [node.node_token for node in nodes] == ["child-1", "child-2"]
     assert requested_tokens == [None, "next-page"]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_nodes_lists_top_level_nodes_without_parent_filter() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/open-apis/wiki/v2/spaces/space-1/nodes"
+        assert request.url.params.get("page_size") == "50"
+        assert request.url.params.get("parent_node_token") is None
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "items": [{"node_token": "top-1", "title": "产品手册"}],
+                    "has_more": False,
+                },
+            },
+        )
+
+    client = _client(handler)
+    nodes = await client.list_nodes("space-1")
+
+    assert [(node.node_token, node.space_id) for node in nodes] == [("top-1", "space-1")]
     await client.aclose()
 
 

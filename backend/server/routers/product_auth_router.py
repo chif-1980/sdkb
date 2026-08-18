@@ -7,7 +7,7 @@ import os
 from urllib.parse import urlencode
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,10 +16,15 @@ from server.utils.auth_middleware import get_db, get_product_user
 from yuxi.product_chat.auth_service import (
     COOKIE_NAME,
     SESSION_TTL_SECONDS,
+    STATE_TTL_SECONDS,
     ProductAuthError,
     ProductAuthService,
 )
-from yuxi.product_chat.schemas import ProductUserResponse, SessionResponse
+from yuxi.product_chat.schemas import (
+    FeishuQrLoginConfigResponse,
+    ProductUserResponse,
+    SessionResponse,
+)
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.redis import get_async_redis_client
 
@@ -73,6 +78,27 @@ async def feishu_login(
         error_query = urlencode({"error": exc.code})
         return RedirectResponse(url=f"/login?{error_query}", status_code=303)
     return RedirectResponse(url=login_url, status_code=307)
+
+
+@product_auth.get(
+    "/auth/feishu/qr-config",
+    response_model=FeishuQrLoginConfigResponse,
+)
+async def feishu_qr_config(
+    response: Response,
+    return_path: str = "/chat",
+    service: ProductAuthService = Depends(get_product_auth_service),
+) -> FeishuQrLoginConfigResponse:
+    try:
+        goto = await service.create_qr_login_url(return_path)
+    except ProductAuthError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return FeishuQrLoginConfigResponse(goto=goto, expires_in=STATE_TTL_SECONDS)
 
 
 @product_auth.get("/auth/feishu/callback")

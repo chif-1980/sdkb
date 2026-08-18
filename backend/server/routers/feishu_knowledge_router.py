@@ -15,8 +15,17 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_admin_user, get_db
-from yuxi.integrations.feishu import FeishuClient, FeishuClientError
+from yuxi.integrations.feishu import (
+    FeishuClient,
+    FeishuClientError,
+    FeishuPermissionError,
+    FeishuUserOAuthError,
+    FeishuUserOAuthService,
+    create_user_authorized_feishu_client,
+)
+from yuxi.integrations.feishu.schemas import FeishuNode
 from yuxi.integrations.feishu.service import FeishuScanService
+from yuxi.governance.comparator import CrossDocumentComparisonService
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.feishu_knowledge_repository import (
     FeishuKnowledgeRepository as _BaseRepository,
@@ -327,6 +336,8 @@ class FeishuReviewService:
             version, item, _ = await self._get_material(version_id, lock=True)
             if version.review_status != "pending" or version.processing_status not in self.APPROVABLE_STATUSES:
                 raise ValueError("Only pending parsed material can be approved")
+            if await CrossDocumentComparisonService(self.session).has_open_conflict(version.version_id):
+                raise ValueError("Material has unresolved cross-document conflicts")
             from_status = version.processing_status
             version.review_status = "approved"
             version.reviewer_id = operator_id
@@ -433,6 +444,7 @@ class FeishuReviewService:
                 to_status="awaiting_review",
             )
             await self.session.flush()
+            await CrossDocumentComparisonService(self.session).compare_version(version.version_id)
             return version
 
     async def remember_processing_file(self, version_id: str, *, file_id: str) -> FeishuMaterialVersion:
@@ -813,6 +825,7 @@ class SourceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     wiki_root_token: str = Field(min_length=1, max_length=255)
     wiki_root_url: str | None = Field(default=None, max_length=1024)
+    scan_scope: Literal["root", "space"] = "root"
     target_kb_id: str = Field(min_length=1, max_length=80)
     enabled: bool = True
 
@@ -878,6 +891,7 @@ def _source_dict(source: FeishuSource, summary: FeishuSourceSummary | None = Non
         "name": source.name,
         "wiki_root_token": source.wiki_root_token,
         "wiki_root_url": source.wiki_root_url,
+        "scan_scope": getattr(source, "scan_scope", "root") or "root",
         "target_kb_id": source.target_kb_id,
         "enabled": source.enabled,
         "created_at": _iso(getattr(source, "created_at", None)),
@@ -992,6 +1006,7 @@ async def create_source(
         name=payload.name.strip(),
         wiki_root_token=payload.wiki_root_token.strip(),
         wiki_root_url=payload.wiki_root_url,
+        scan_scope=payload.scan_scope,
         target_kb_id=payload.target_kb_id.strip(),
         credential_env_name=GLOBAL_FEISHU_CREDENTIAL_MARKER,
         enabled=payload.enabled,
@@ -1006,16 +1021,97 @@ async def check_source(source_id: str, db: AsyncSession = Depends(get_db)):
     if source is None:
         raise HTTPException(status_code=404, detail="Feishu source not found")
     try:
-        client = FeishuClient()
-    except FeishuClientError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        client = create_user_authorized_feishu_client(source_id)
+    except (FeishuClientError, FeishuUserOAuthError) as exc:
+        raise HTTPException(status_code=getattr(exc, "status_code", None) or 422, detail=str(exc)) from exc
     try:
         node = await client.get_node(source.wiki_root_token)
+    except FeishuUserOAuthError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except FeishuClientError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         await client.aclose()
     return {"status": "ok", "source_id": source_id, "root_title": node.title}
+
+
+SPACE_PERMISSION_DETAIL = {
+    "code": "FEISHU_SPACE_PERMISSION_DENIED",
+    "message": "当前应用没有读取整个知识空间的权限，请在飞书开放平台开通后重试",
+}
+
+
+def _tree_node_dict(source: FeishuSource, node: FeishuNode, children: list[dict]) -> dict:
+    return {
+        "title": node.title or node.node_token,
+        "node_token": node.node_token,
+        "obj_token": node.obj_token,
+        "obj_type": node.obj_type,
+        "parent_node_token": node.parent_node_token,
+        "has_child": bool(node.has_child),
+        "source_updated_at": node.source_updated_at,
+        "url": FeishuScanService._page_url(source.wiki_root_url, node.node_token),
+        "children": children,
+    }
+
+
+async def _read_node_tree(
+    *,
+    client: FeishuClient,
+    source: FeishuSource,
+    node: FeishuNode,
+    visited: set[str],
+) -> dict | None:
+    if node.node_token in visited:
+        return None
+    visited.add(node.node_token)
+    children: list[dict] = []
+    if node.has_child:
+        for child in await client.list_nodes(node.space_id, node.node_token):
+            child_tree = await _read_node_tree(client=client, source=source, node=child, visited=visited)
+            if child_tree is not None:
+                children.append(child_tree)
+    return _tree_node_dict(source, node, children)
+
+
+@feishu_knowledge.get("/sources/{source_id}/tree")
+async def get_source_tree(source_id: str, db: AsyncSession = Depends(get_db)):
+    source = await FeishuKnowledgeRepository(db).get_source(source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Feishu source not found")
+    client = None
+    try:
+        client = create_user_authorized_feishu_client(source_id)
+        root = await client.get_node(source.wiki_root_token)
+        scan_scope = getattr(source, "scan_scope", "root") or "root"
+        if scan_scope == "space":
+            top_nodes = await client.list_nodes(root.space_id)
+            if not top_nodes:
+                top_nodes = [root]
+        else:
+            top_nodes = [root]
+        nodes = []
+        visited: set[str] = set()
+        for node in top_nodes:
+            tree = await _read_node_tree(client=client, source=source, node=node, visited=visited)
+            if tree is not None:
+                nodes.append(tree)
+        return {"scope": scan_scope, "space_id": root.space_id, "nodes": nodes}
+    except FeishuUserOAuthError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except FeishuPermissionError as exc:
+        raise HTTPException(status_code=424, detail=SPACE_PERMISSION_DETAIL) from exc
+    except FeishuClientError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        if client is not None:
+            await client.aclose()
 
 
 @feishu_knowledge.post("/sources/{source_id}/scan", status_code=202)
@@ -1029,6 +1125,15 @@ async def scan_source(
     source = await repository.get_source(source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Feishu source not found")
+    oauth_status = await FeishuUserOAuthService(db=db).get_authorization_status(source_id)
+    if not oauth_status["authorized"]:
+        raise HTTPException(
+            status_code=424,
+            detail={
+                "code": "FEISHU_USER_AUTHORIZATION_REQUIRED",
+                "message": "请先完成飞书用户授权，再启动知识扫描",
+            },
+        )
     run = await repository.queue_sync_run(
         source_id=source_id,
         run_type=payload.mode,
@@ -1050,7 +1155,7 @@ async def scan_source(
                         worker_source = await worker_repository.get_source(source_id)
                         if worker_source is None:
                             raise LookupError(f"Feishu source not found: {source_id}")
-                        client = FeishuClient()
+                        client = create_user_authorized_feishu_client(source_id)
                         result = await FeishuScanService(
                             repository=worker_repository,
                             client=client,

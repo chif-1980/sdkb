@@ -20,7 +20,17 @@ const ERROR_MESSAGES = {
   'Material removal is no longer pending': '素材下架任务已不再等待处理',
   'Material source must be invalid before removal': '仅来源失效的素材可以确认下架',
   'reason is required for reject': '驳回时必须填写原因',
-  'updated_from must not be later than updated_to': '更新时间起点不能晚于终点'
+  'updated_from must not be later than updated_to': '更新时间起点不能晚于终点',
+  FEISHU_SPACE_PERMISSION_DENIED: '当前应用没有读取整个知识空间的权限，请在飞书开放平台开通后重试',
+  FEISHU_USER_AUTHORIZATION_REQUIRED: '请先授权一名有权限的飞书用户',
+  FEISHU_USER_REAUTHORIZATION_REQUIRED: '飞书用户授权已失效，请重新授权',
+  FEISHU_USER_SOURCE_PERMISSION_DENIED: '当前飞书用户没有读取该知识空间的权限',
+  FEISHU_USER_OAUTH_NOT_CONFIGURED: '飞书用户授权回调尚未配置',
+  FEISHU_USER_QR_OAUTH_NOT_CONFIGURED: '飞书扫码授权回调尚未配置',
+  FEISHU_OAUTH_ENCRYPTION_NOT_CONFIGURED: '飞书用户授权令牌加密尚未配置',
+  FEISHU_OAUTH_STATE_INVALID: '飞书授权请求已过期，请重新发起',
+  FEISHU_USER_OAUTH_FAILED: '飞书用户授权失败，请重新尝试',
+  FEISHU_USER_TOKEN_REFRESH_FAILED: '飞书用户授权已失效，请重新授权'
 }
 
 function encoded(value) {
@@ -41,7 +51,8 @@ function withQuery(url, params = {}) {
 function getErrorDetail(error) {
   const detail = error?.response?.data?.detail
   if (typeof detail === 'string') return detail
-  if (detail && typeof detail === 'object') return detail.message || detail.error || ''
+  if (detail && typeof detail === 'object')
+    return detail.code || detail.message || detail.error || ''
   return error?.message || ''
 }
 
@@ -49,6 +60,14 @@ export const feishuKnowledgeApi = {
   listSources: () => apiAdminGet(`${BASE_URL}/sources`),
 
   checkSource: (sourceId) => apiAdminPost(`${BASE_URL}/sources/${encoded(sourceId)}/check`, {}),
+
+  listTree: (sourceId) => apiAdminGet(`${BASE_URL}/sources/${encoded(sourceId)}/tree`),
+
+  getOAuthStatus: (sourceId) =>
+    apiAdminGet(`${BASE_URL}/sources/${encoded(sourceId)}/oauth/status`),
+
+  startOAuth: (sourceId, mode = 'redirect') =>
+    apiAdminPost(`${BASE_URL}/sources/${encoded(sourceId)}/oauth/authorize`, { mode }),
 
   scanSource: (sourceId, mode) =>
     apiAdminPost(`${BASE_URL}/sources/${encoded(sourceId)}/scan`, { mode }),

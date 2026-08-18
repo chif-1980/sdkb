@@ -8,7 +8,11 @@ from fastapi.responses import JSONResponse, Response
 from server.routers.product_api_route import ProductApiRoute
 from server.utils.auth_middleware import get_product_user
 from yuxi.product_chat.answer_service import AnswerService
-from yuxi.product_chat.repository import ProductChatNotFoundError, ProductChatRepository
+from yuxi.product_chat.repository import (
+    ProductChatNotFoundError,
+    ProductChatRepository,
+    ProductMessageNotFoundError,
+)
 from yuxi.product_chat.schemas import (
     CitationResponse,
     ConversationDetailResponse,
@@ -17,6 +21,8 @@ from yuxi.product_chat.schemas import (
     ConversationSummaryResponse,
     CreateConversationRequest,
     MessageExchangeResponse,
+    MessageFeedbackRequest,
+    MessageFeedbackResponse,
     MessageResponse,
     SendMessageRequest,
 )
@@ -37,6 +43,13 @@ def _not_found() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"code": "CONVERSATION_NOT_FOUND", "message": "会话不存在"},
+    )
+
+
+def _message_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"code": "MESSAGE_NOT_FOUND", "message": "消息不存在"},
     )
 
 
@@ -92,6 +105,7 @@ def _message_response(
         role=message.role,
         content=message.content,
         answer_status=message.answer_status,
+        feedback_rating=message.feedback_rating,
         citations=[_citation_response(citation) for citation in citations],
         created_at=format_utc_datetime(message.created_at) or "",
     )
@@ -187,6 +201,7 @@ async def send_message(
     except Exception as exc:
         return _knowledge_unavailable(conversation_id, exc)
 
+
     if initialization_error is not None:
         return _knowledge_unavailable(conversation_id, initialization_error)
 
@@ -226,6 +241,30 @@ async def send_message(
         raise _not_found() from None
     except Exception as exc:
         return _knowledge_unavailable(conversation_id, exc)
+
+
+@product_chat.put(
+    "/chat/messages/{message_id}/feedback",
+    response_model=MessageFeedbackResponse,
+)
+async def set_message_feedback(
+    message_id: str,
+    request: MessageFeedbackRequest,
+    current_user: User = Depends(get_product_user),
+) -> MessageFeedbackResponse:
+    try:
+        async with pg_manager.get_async_session_context() as db:
+            message = await ProductChatRepository(db).set_message_feedback(
+                message_id,
+                current_user.id,
+                request.rating,
+            )
+            return MessageFeedbackResponse(
+                message_id=message.message_id,
+                feedback_rating=message.feedback_rating,
+            )
+    except ProductMessageNotFoundError:
+        raise _message_not_found() from None
 
 
 @product_chat.post(

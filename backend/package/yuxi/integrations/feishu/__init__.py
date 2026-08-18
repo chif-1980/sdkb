@@ -16,6 +16,13 @@ from yuxi.integrations.feishu.schemas import (
     FeishuNode,
     FeishuPageContent,
 )
+from yuxi.integrations.feishu.user_oauth import (
+    FeishuSourceUserTokenProvider,
+    FeishuTokenCipher,
+    FeishuUserOAuthError,
+    FeishuUserOAuthService,
+    create_user_authorized_feishu_client,
+)
 
 __all__ = [
     "DEFAULT_APP_ID_ENV_NAME",
@@ -32,4 +39,9 @@ __all__ = [
     "FeishuNotFoundError",
     "FeishuPageContent",
     "FeishuPermissionError",
+    "FeishuSourceUserTokenProvider",
+    "FeishuTokenCipher",
+    "FeishuUserOAuthError",
+    "FeishuUserOAuthService",
+    "create_user_authorized_feishu_client",
 ]

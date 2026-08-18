@@ -12,6 +12,8 @@ from yuxi.product_chat.schemas import (
     ConversationSummaryResponse,
     CreateConversationRequest,
     MessageExchangeResponse,
+    MessageFeedbackRequest,
+    MessageFeedbackResponse,
     MessageResponse,
     ProductUserResponse,
     SendMessageRequest,
@@ -95,6 +97,7 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
         "answer_status",
         "model_version",
         "prompt_version",
+        "feedback_rating",
         "created_at",
     }
     assert set(citation.columns.keys()) == {
@@ -182,6 +185,9 @@ def test_product_models_define_stable_enums_and_message_constraints():
     assert "prompt_version IS NULL" in constraints
     assert "role != 'ASSISTANT'" in constraints
     assert "answer_status IS NOT NULL" in constraints
+    assert "feedback_rating IS NULL" in constraints
+    assert "LIKE" in constraints
+    assert "DISLIKE" in constraints
 
 
 def test_product_request_schemas_reject_extra_fields_and_enforce_message_length():
@@ -198,6 +204,11 @@ def test_product_request_schemas_reject_extra_fields_and_enforce_message_length(
     with pytest.raises(ValidationError):
         CreateConversationRequest(title="x" * 81)
 
+    assert MessageFeedbackRequest(rating="LIKE").rating == "LIKE"
+    assert MessageFeedbackRequest(rating=None).rating is None
+    with pytest.raises(ValidationError):
+        MessageFeedbackRequest(rating="OTHER")
+
 
 def test_product_response_contract_uses_literals_and_string_timestamps():
     assert ConversationSummaryResponse.model_fields["status"].annotation == Literal["ACTIVE", "ARCHIVED"]
@@ -205,6 +216,10 @@ def test_product_response_contract_uses_literals_and_string_timestamps():
     assert MessageResponse.model_fields["role"].annotation == Literal["USER", "ASSISTANT"]
     assert MessageResponse.model_fields["answer_status"].annotation == (
         Literal["SUPPORTED", "INSUFFICIENT", "CONFLICTING"] | None
+    )
+    assert MessageResponse.model_fields["feedback_rating"].annotation == (Literal["LIKE", "DISLIKE"] | None)
+    assert MessageFeedbackResponse.model_fields["feedback_rating"].annotation == (
+        Literal["LIKE", "DISLIKE"] | None
     )
     assert ConversationSummaryResponse.model_fields["created_at"].annotation is str
     assert ConversationSummaryResponse.model_fields["updated_at"].annotation is str

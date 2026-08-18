@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import threading
 from importlib import import_module
 from typing import Any
 
@@ -14,6 +15,8 @@ from yuxi.utils import logger
 
 # 处理器实例缓存
 _PROCESSOR_CACHE: dict[str, BaseDocumentProcessor] = {}
+_PROCESSOR_LOCKS: dict[str, threading.Lock] = {}
+_PROCESSOR_CACHE_LOCK = threading.RLock()
 
 
 class DocumentProcessorFactory:
@@ -63,12 +66,17 @@ class DocumentProcessorFactory:
 
         # 使用缓存避免重复创建
         cache_key = cls._build_cache_key(processor_type, kwargs)
-        if cache_key not in _PROCESSOR_CACHE:
-            processor_class = cls._load_processor_class(processor_type)
-            _PROCESSOR_CACHE[cache_key] = processor_class(**kwargs)
-            logger.debug(f"创建文档处理器: {processor_type}")
+        # Factory calls can happen concurrently from the background task workers.
+        # Protect lazy construction so native OCR runtimes are never initialized
+        # twice at the same time.
+        with _PROCESSOR_CACHE_LOCK:
+            if cache_key not in _PROCESSOR_CACHE:
+                processor_class = cls._load_processor_class(processor_type)
+                _PROCESSOR_CACHE[cache_key] = processor_class(**kwargs)
+                _PROCESSOR_LOCKS[cache_key] = threading.Lock()
+                logger.debug(f"创建文档处理器: {processor_type}")
 
-        return _PROCESSOR_CACHE[cache_key]
+            return _PROCESSOR_CACHE[cache_key]
 
     @classmethod
     def process_file(cls, processor_type: str, file_path: str, params: dict | None = None) -> str:
@@ -87,7 +95,13 @@ class DocumentProcessorFactory:
             DocumentProcessorException: 处理失败
         """
         processor = cls.get_processor(processor_type)
-        return processor.process_file(file_path, params)
+        cache_key = cls._build_cache_key(processor_type, {})
+        with _PROCESSOR_CACHE_LOCK:
+            processor_lock = _PROCESSOR_LOCKS[cache_key]
+        # Cached processors may wrap a native runtime that is not thread-safe
+        # (notably RapidOCR/ONNXRuntime). Serialize calls per instance.
+        with processor_lock:
+            return processor.process_file(file_path, params)
 
     @classmethod
     def check_health(cls, processor_type: str) -> dict[str, Any]:
@@ -139,5 +153,7 @@ class DocumentProcessorFactory:
     @classmethod
     def clear_cache(cls):
         """清除处理器缓存"""
-        _PROCESSOR_CACHE.clear()
+        with _PROCESSOR_CACHE_LOCK:
+            _PROCESSOR_CACHE.clear()
+            _PROCESSOR_LOCKS.clear()
         logger.debug("文档处理器缓存已清除")

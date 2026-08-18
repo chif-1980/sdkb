@@ -191,6 +191,7 @@ async def chat_api_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ("POST", "/api/chat/conversations", {}),
         ("GET", "/api/chat/conversations/missing", None),
         ("POST", "/api/chat/conversations/missing/messages", {"content": "问题"}),
+        ("PUT", "/api/chat/messages/missing/feedback", {"rating": "LIKE"}),
         ("POST", "/api/chat/conversations/missing/archive", None),
     ],
 )
@@ -317,6 +318,110 @@ async def test_send_and_detail_return_persisted_exchange_for_each_answer_status(
     assert detail_response.json() == {
         "conversation": exchange["conversation"],
         "messages": [exchange["userMessage"], exchange["assistantMessage"]],
+    }
+
+
+async def test_assistant_feedback_can_be_set_switched_cleared_and_reloaded(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation()
+
+    async def answer_question(*args, **kwargs):
+        return _answer("SUPPORTED")
+
+    monkeypatch.setattr(AnswerService, "answer", answer_question)
+    exchange_response = await context.client.post(
+        f"/api/chat/conversations/{conversation.conversation_id}/messages",
+        headers=context.owner_headers,
+        json={"content": "这条回答有帮助吗？"},
+    )
+    exchange = exchange_response.json()
+    assistant_id = exchange["assistantMessage"]["id"]
+    assert exchange["assistantMessage"]["feedbackRating"] is None
+
+    liked = await context.client.put(
+        f"/api/chat/messages/{assistant_id}/feedback",
+        headers=context.owner_headers,
+        json={"rating": "LIKE"},
+    )
+    detail = await context.client.get(
+        f"/api/chat/conversations/{conversation.conversation_id}",
+        headers=context.owner_headers,
+    )
+    disliked = await context.client.put(
+        f"/api/chat/messages/{assistant_id}/feedback",
+        headers=context.owner_headers,
+        json={"rating": "DISLIKE"},
+    )
+    cleared = await context.client.put(
+        f"/api/chat/messages/{assistant_id}/feedback",
+        headers=context.owner_headers,
+        json={"rating": None},
+    )
+
+    assert liked.status_code == 200
+    assert liked.json() == {"messageId": assistant_id, "feedbackRating": "LIKE"}
+    assert detail.json()["messages"][1]["feedbackRating"] == "LIKE"
+    assert disliked.json() == {"messageId": assistant_id, "feedbackRating": "DISLIKE"}
+    assert cleared.json() == {"messageId": assistant_id, "feedbackRating": None}
+    async with context.factory() as session:
+        stored = await session.scalar(select(ProductMessage).where(ProductMessage.message_id == assistant_id))
+    assert stored.feedback_rating is None
+
+
+async def test_feedback_rejects_user_messages_cross_user_access_and_invalid_ratings(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation()
+
+    async def answer_question(*args, **kwargs):
+        return _answer("SUPPORTED")
+
+    monkeypatch.setattr(AnswerService, "answer", answer_question)
+    exchange = (
+        await context.client.post(
+            f"/api/chat/conversations/{conversation.conversation_id}/messages",
+            headers=context.owner_headers,
+            json={"content": "测试反馈权限"},
+        )
+    ).json()
+    user_id = exchange["userMessage"]["id"]
+    assistant_id = exchange["assistantMessage"]["id"]
+
+    user_message_response = await context.client.put(
+        f"/api/chat/messages/{user_id}/feedback",
+        headers=context.owner_headers,
+        json={"rating": "LIKE"},
+    )
+    cross_user_response = await context.client.put(
+        f"/api/chat/messages/{assistant_id}/feedback",
+        headers=context.other_headers,
+        json={"rating": "DISLIKE"},
+    )
+    invalid_response = await context.client.put(
+        f"/api/chat/messages/{assistant_id}/feedback",
+        headers=context.owner_headers,
+        json={"rating": "OTHER"},
+    )
+
+    for response in (user_message_response, cross_user_response):
+        assert response.status_code == 404
+        assert response.json() == {
+            "error": {
+                "code": "MESSAGE_NOT_FOUND",
+                "message": "消息不存在",
+            }
+        }
+    assert invalid_response.status_code == 422
+    assert invalid_response.json() == {
+        "error": {
+            "code": "REQUEST_VALIDATION_ERROR",
+            "message": "请求参数不合法",
+        }
     }
 
 

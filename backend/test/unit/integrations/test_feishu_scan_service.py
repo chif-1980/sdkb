@@ -45,6 +45,7 @@ class FakeFeishuClient:
         self.not_found_tokens = not_found_tokens or set()
         self.get_calls: list[str] = []
         self.children_calls: list[str] = []
+        self.list_nodes_calls: list[tuple[str, str | None]] = []
         self.attachment_calls: list[str] = []
         self.download_calls: list[tuple[str, str]] = []
         self.page_calls: list[str] = []
@@ -64,6 +65,11 @@ class FakeFeishuClient:
         self.children_calls.append(parent_node_token)
         self._raise_if_requested("children", parent_node_token)
         return self.children.get(parent_node_token, [])
+
+    async def list_nodes(self, space_id: str, parent_node_token: str | None = None) -> list[FeishuNode]:
+        self.list_nodes_calls.append((space_id, parent_node_token))
+        self._raise_if_requested("nodes", parent_node_token or "<top-level>")
+        return self.children.get(parent_node_token or "<top-level>", [])
 
     async def list_attachments(self, folder_token: str) -> list[FeishuAttachment]:
         raise AssertionError("page attachments must be discovered through get_wiki_document")
@@ -91,12 +97,14 @@ def node(
     parent: str | None = None,
     updated_at: str | None = "2026-08-13T00:00:00Z",
     has_child: bool = False,
+    obj_type: str = "docx",
+    obj_token: str | None = None,
 ) -> FeishuNode:
     return FeishuNode(
         space_id="space-1",
         node_token=token,
-        obj_token=f"obj-{token}",
-        obj_type="docx",
+        obj_token=obj_token or f"obj-{token}",
+        obj_type=obj_type,
         title=title,
         parent_node_token=parent,
         has_child=has_child,
@@ -172,6 +180,45 @@ async def test_incremental_scan_requires_a_successful_full_run(repository, sessi
     assert await session.scalar(select(func.count()).select_from(FeishuSyncRun)) == 0
 
 
+async def test_space_scan_recurses_all_top_level_nodes(repository, session):
+    root = node("root", "首页", has_child=True)
+    sibling = node("sibling", "产品手册", has_child=True)
+    child = node("child", "部署文档", parent="sibling")
+    fake = FakeFeishuClient(
+        nodes={item.node_token: item for item in (root, sibling, child)},
+        children={"<top-level>": [root, sibling], "root": [], "sibling": [child], "child": []},
+        page_contents={"obj-root": b"root", "obj-sibling": b"sibling", "obj-child": b"child"},
+    )
+    source = await repository.get_or_create_source(
+        source_id="space-source",
+        name="Entire Wiki",
+        wiki_root_token="root",
+        wiki_root_url="https://example.feishu.cn/wiki/root",
+        target_kb_id="kb-1",
+        credential_env_name="FEISHU_ACCESS_TOKEN",
+        scan_scope="space",
+    )
+
+    result = await FeishuScanService(repository=repository, client=fake).scan(
+        source_id=source.source_id,
+        mode="full",
+    )
+
+    items = list(
+        (
+            await session.execute(
+                select(FeishuSourceItem).where(FeishuSourceItem.source_id == "space-source").order_by(
+                    FeishuSourceItem.path_text
+                )
+            )
+        ).scalars()
+    )
+    assert result.status == "succeeded"
+    assert result.new_count == 3
+    assert [item.path_text for item in items] == ["产品手册", "产品手册 / 部署文档", "首页"]
+    assert fake.list_nodes_calls == [("space-1", None)]
+
+
 async def test_page_body_and_attachments_are_independent_source_items(repository, session):
     root = node("root", "Root")
     attachment = FeishuAttachment(file_token="pdf-1", name="Guide.PDF", revision="7", download_type="media")
@@ -189,6 +236,82 @@ async def test_page_body_and_attachments_are_independent_source_items(repository
     assert {(item.item_type, item.title) for item in items} == {("page", "Root"), ("attachment", "Guide.PDF")}
     assert len({item.item_id for item in items}) == 2
     assert fake.download_calls == [("pdf-1", "media")]
+
+
+async def test_wiki_file_nodes_download_supported_formats_and_skip_media(repository, session):
+    root = node("root", "Root", has_child=True)
+    names = ["guide.pdf", "slides.pptx", "data.xls", "poster.png", "photo.jpg", "demo.mp4"]
+    files = [
+        node(
+            f"file-{index}",
+            name,
+            parent="root",
+            obj_type="file",
+            obj_token=f"drive-file-{index}",
+        )
+        for index, name in enumerate(names)
+    ]
+    fake = FakeFeishuClient(
+        nodes={item.node_token: item for item in [root, *files]},
+        children={"root": files, **{item.node_token: [] for item in files}},
+        page_contents={"obj-root": b"page body"},
+        contents={
+            item.obj_token: item.title.encode()
+            for item in files
+            if item.title != "demo.mp4" and item.obj_token is not None
+        },
+    )
+
+    result = await FeishuScanService(repository=repository, client=fake).scan(
+        source_id="source-1",
+        mode="full",
+    )
+
+    items = await _items(session)
+    assert result.status == "succeeded"
+    assert result.scanned_count == 7
+    assert result.new_count == 6
+    assert result.unsupported_count == 1
+    assert {(item.title, item.item_type) for item in items if item.title != "Root"} == {
+        ("guide.pdf", "attachment"),
+        ("slides.pptx", "attachment"),
+        ("data.xls", "attachment"),
+        ("poster.png", "attachment"),
+        ("photo.jpg", "attachment"),
+        ("demo.mp4", "video"),
+    }
+    assert fake.page_calls == ["obj-root"]
+    assert fake.download_calls == [
+        ("drive-file-0", "file"),
+        ("drive-file-1", "file"),
+        ("drive-file-2", "file"),
+        ("drive-file-3", "file"),
+        ("drive-file-4", "file"),
+    ]
+
+
+async def test_unknown_wiki_node_is_unsupported_but_its_children_are_scanned(repository, session):
+    root = node("root", "Root", has_child=True)
+    sheet = node("sheet", "Native Sheet", parent="root", has_child=True, obj_type="sheet")
+    child = node("child", "Child", parent="sheet")
+    fake = FakeFeishuClient(
+        nodes={item.node_token: item for item in (root, sheet, child)},
+        children={"root": [sheet], "sheet": [child], "child": []},
+        page_contents={"obj-root": b"root", "obj-child": b"child"},
+    )
+
+    result = await FeishuScanService(repository=repository, client=fake).scan(
+        source_id="source-1",
+        mode="full",
+    )
+
+    items = {item.title: item for item in await _items(session)}
+    assert result.status == "succeeded"
+    assert result.scanned_count == 3
+    assert result.new_count == 2
+    assert result.unsupported_count == 1
+    assert items["Native Sheet"].item_type == "unsupported"
+    assert items["Child"].path_text == "Root / Native Sheet / Child"
 
 
 async def test_scan_archives_page_and_attachment_bytes_with_source_metadata(repository, session):
@@ -520,6 +643,98 @@ async def test_not_found_child_page_allows_subtree_invalidation(repository, sess
     assert result.invalidated_count == 2
     assert items["Child"].source_validity == "invalid"
     assert items["child.pdf"].source_validity == "invalid"
+
+
+async def test_child_page_moved_to_drive_allows_subtree_invalidation(repository, session):
+    root = node("root", "Root", has_child=True)
+    child = node("child", "Child", parent="root")
+    attachment = FeishuAttachment(file_token="child-file", name="child.pdf")
+    fake = FakeFeishuClient(
+        nodes={"root": root, "child": child},
+        children={"root": [child]},
+        page_attachments={"obj-child": [attachment]},
+        page_contents={"obj-root": b"root", "obj-child": b"child"},
+        contents={"child-file": b"attachment"},
+    )
+    service = FeishuScanService(repository=repository, client=fake)
+    await service.scan(source_id="source-1", mode="full")
+    fake.children["root"] = []
+    fake.nodes["child"] = replace(child, space_id="", parent_node_token="drive-folder")
+
+    result = await service.scan(source_id="source-1", mode="full")
+    items = {item.title: item for item in await _items(session)}
+
+    assert result.status == "succeeded"
+    assert result.invalidated_count == 2
+    assert items["Child"].source_validity == "invalid"
+    assert items["child.pdf"].source_validity == "invalid"
+
+
+async def test_child_page_moved_outside_configured_root_allows_subtree_invalidation(repository, session):
+    root = node("root", "Root", has_child=True)
+    child = node("child", "Child", parent="root")
+    outside = node("outside", "Outside")
+    fake = FakeFeishuClient(
+        nodes={"root": root, "child": child, "outside": outside},
+        children={"root": [child]},
+        page_contents={"obj-root": b"root", "obj-child": b"child"},
+    )
+    service = FeishuScanService(repository=repository, client=fake)
+    await service.scan(source_id="source-1", mode="full")
+    fake.children["root"] = []
+    fake.nodes["child"] = replace(child, parent_node_token="outside")
+
+    result = await service.scan(source_id="source-1", mode="full")
+    items = {item.title: item for item in await _items(session)}
+
+    assert result.status == "succeeded"
+    assert result.invalidated_count == 1
+    assert items["Child"].source_validity == "invalid"
+
+
+async def test_unreadable_parent_never_invalidates_existing_subtree(repository, session):
+    root = node("root", "Root", has_child=True)
+    child = node("child", "Child", parent="root")
+    outside = node("outside", "Outside")
+    fake = FakeFeishuClient(
+        nodes={"root": root, "child": child, "outside": outside},
+        children={"root": [child]},
+        page_contents={"obj-root": b"root", "obj-child": b"child"},
+    )
+    service = FeishuScanService(repository=repository, client=fake)
+    await service.scan(source_id="source-1", mode="full")
+    fake.children["root"] = []
+    fake.nodes["child"] = replace(child, parent_node_token="outside")
+    fake.error_at = ("get", "outside")
+
+    result = await service.scan(source_id="source-1", mode="full")
+    items = {item.title: item for item in await _items(session)}
+
+    assert result.status == "failed"
+    assert result.invalidated_count == 0
+    assert items["Child"].source_validity == "valid"
+
+
+async def test_parent_cycle_never_invalidates_existing_subtree(repository, session):
+    root = node("root", "Root", has_child=True)
+    child = node("child", "Child", parent="root")
+    outside = node("outside", "Outside", parent="child")
+    fake = FakeFeishuClient(
+        nodes={"root": root, "child": child, "outside": outside},
+        children={"root": [child]},
+        page_contents={"obj-root": b"root", "obj-child": b"child"},
+    )
+    service = FeishuScanService(repository=repository, client=fake)
+    await service.scan(source_id="source-1", mode="full")
+    fake.children["root"] = []
+    fake.nodes["child"] = replace(child, parent_node_token="outside")
+
+    result = await service.scan(source_id="source-1", mode="full")
+    items = {item.title: item for item in await _items(session)}
+
+    assert result.status == "failed"
+    assert result.invalidated_count == 0
+    assert items["Child"].source_validity == "valid"
 
 
 async def test_invalidation_rolls_back_when_successful_run_update_loses_a_race(repository, session, monkeypatch):
