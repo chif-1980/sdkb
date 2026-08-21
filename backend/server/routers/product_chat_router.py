@@ -165,7 +165,7 @@ async def get_conversation(
     try:
         async with pg_manager.get_async_session_context() as db:
             repository = ProductChatRepository(db)
-            conversation = await repository.require_conversation(
+            conversation = await repository.require_viewable_conversation(
                 conversation_id,
                 current_user.id,
             )
@@ -379,6 +379,25 @@ async def archive_conversation(
     try:
         async with pg_manager.get_async_session_context() as db:
             await ProductChatRepository(db).archive_conversation(
+                conversation_id,
+                current_user.id,
+            )
+    except ProductChatNotFoundError:
+        raise _not_found() from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@product_chat.post(
+    "/chat/conversations/{conversation_id}/restore",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def restore_conversation(
+    conversation_id: str,
+    current_user: User = Depends(get_product_user),
+) -> Response:
+    try:
+        async with pg_manager.get_async_session_context() as db:
+            await ProductChatRepository(db).restore_conversation(
                 conversation_id,
                 current_user.id,
             )

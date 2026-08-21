@@ -246,6 +246,14 @@ class _JsonAnswerDeltaParser:
             return ()
         content = self._pending[:limit]
         self._pending = self._pending[limit:]
+        # Models occasionally cite a valid evidence item in the answer before
+        # adding it to citation_ids. Keep the draft readable and use the same
+        # append order as the final validator below; unknown evidence ids stay
+        # visible until the final validation rejects the answer.
+        for match in _INLINE_CITATION_PATTERN.finditer(content):
+            evidence_id = match.group(1)
+            if evidence_id in self._evidence_ids and evidence_id not in self._display_numbers:
+                self._display_numbers[evidence_id] = len(self._display_numbers) + 1
         rendered = _INLINE_CITATION_PATTERN.sub(
             lambda match: (
                 f"[{self._display_numbers[match.group(1)]}]"
@@ -1060,13 +1068,22 @@ class AnswerService:
         normalized_content = content.strip()
         if status == "INSUFFICIENT":
             return fallback
+        inline_ids = set(_INLINE_CITATION_PATTERN.findall(normalized_content))
+        # A model can mention a valid evidence id in the answer while omitting
+        # it from citation_ids. Add those ids in first-appearance order so a
+        # correct, access-checked answer is not discarded as insufficient.
+        for evidence_id in _INLINE_CITATION_PATTERN.findall(normalized_content):
+            if evidence_id not in by_id:
+                return fallback
+            if evidence_id not in seen:
+                seen.add(evidence_id)
+                selected.append(by_id[evidence_id])
+        selected_ids = {citation.evidence_id for citation in selected}
+        if not inline_ids.issubset(selected_ids):
+            return fallback
         if status == "SUPPORTED" and (not normalized_content or not selected):
             return fallback
         if status == "CONFLICTING" and (not normalized_content or len(selected) < 2):
-            return fallback
-        inline_ids = set(_INLINE_CITATION_PATTERN.findall(normalized_content))
-        selected_ids = {citation.evidence_id for citation in selected}
-        if not inline_ids.issubset(selected_ids):
             return fallback
         display_numbers = {citation.evidence_id: index for index, citation in enumerate(selected, start=1)}
         normalized_content = _INLINE_CITATION_PATTERN.sub(

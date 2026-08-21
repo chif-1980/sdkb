@@ -193,7 +193,7 @@ def _add_material(
     return item, version
 
 
-async def test_repository_lists_only_owned_active_conversations_in_recent_order(db_session):
+async def test_repository_lists_owned_conversations_in_recent_order(db_session):
     repository = ProductChatRepository(db_session)
     older = await repository.create_conversation(7, " Older ")
     newer = await repository.create_conversation(7, "Newer")
@@ -211,7 +211,7 @@ async def test_repository_lists_only_owned_active_conversations_in_recent_order(
     assert older.title == "Older"
 
 
-async def test_repository_hides_wrong_owner_and_archived_conversations(db_session):
+async def test_repository_hides_wrong_owner_but_keeps_archived_conversations_viewable(db_session):
     repository = ProductChatRepository(db_session)
     conversation = await repository.create_conversation(7, "Owned")
 
@@ -226,7 +226,15 @@ async def test_repository_hides_wrong_owner_and_archived_conversations(db_sessio
         await repository.require_conversation(conversation.conversation_id, 7)
     with pytest.raises(ProductChatNotFoundError):
         await repository.archive_conversation(conversation.conversation_id, 7)
-    assert await repository.list_conversations(7) == []
+    listed = await repository.list_conversations(7)
+    assert [item.conversation_id for item in listed] == [conversation.conversation_id]
+    assert listed[0].status == ConversationStatus.ARCHIVED
+
+    viewable = await repository.require_viewable_conversation(conversation.conversation_id, 7)
+    assert viewable.status == ConversationStatus.ARCHIVED
+
+    await repository.restore_conversation(conversation.conversation_id, 7)
+    assert (await repository.list_conversations(7))[0].status == ConversationStatus.ACTIVE
 
 
 async def test_append_exchange_stages_messages_citations_title_and_timestamp_for_caller_commit(db_session):

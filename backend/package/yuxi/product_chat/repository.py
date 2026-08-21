@@ -55,10 +55,7 @@ class ProductChatRepository:
     async def list_conversations(self, owner_user_id: int) -> list[ProductConversation]:
         result = await self.session.execute(
             select(ProductConversation)
-            .where(
-                ProductConversation.owner_user_id == owner_user_id,
-                ProductConversation.status == ConversationStatus.ACTIVE,
-            )
+            .where(ProductConversation.owner_user_id == owner_user_id)
             .order_by(ProductConversation.updated_at.desc())
         )
         return list(result.scalars().all())
@@ -84,6 +81,23 @@ class ProductChatRepository:
                 ProductConversation.conversation_id == conversation_id,
                 ProductConversation.owner_user_id == owner_user_id,
                 ProductConversation.status == ConversationStatus.ACTIVE,
+            )
+        )
+        conversation = result.scalar_one_or_none()
+        if conversation is None:
+            raise ProductChatNotFoundError
+        return conversation
+
+    async def require_viewable_conversation(
+        self,
+        conversation_id: str,
+        owner_user_id: int,
+    ) -> ProductConversation:
+        """Load a conversation that the owner may open, including archived history."""
+        result = await self.session.execute(
+            select(ProductConversation).where(
+                ProductConversation.conversation_id == conversation_id,
+                ProductConversation.owner_user_id == owner_user_id,
             )
         )
         conversation = result.scalar_one_or_none()
@@ -212,6 +226,27 @@ class ProductChatRepository:
                     ProductConversation.status == ConversationStatus.ACTIVE,
                 )
                 .values(status=ConversationStatus.ARCHIVED, updated_at=utc_now_naive())
+            )
+            if result.rowcount != 1:
+                await self.session.rollback()
+                raise ProductChatNotFoundError
+            await self.session.commit()
+        except ProductChatNotFoundError:
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    async def restore_conversation(self, conversation_id: str, owner_user_id: int) -> None:
+        try:
+            result = await self.session.execute(
+                update(ProductConversation)
+                .where(
+                    ProductConversation.conversation_id == conversation_id,
+                    ProductConversation.owner_user_id == owner_user_id,
+                    ProductConversation.status == ConversationStatus.ARCHIVED,
+                )
+                .values(status=ConversationStatus.ACTIVE, updated_at=utc_now_naive())
             )
             if result.rowcount != 1:
                 await self.session.rollback()

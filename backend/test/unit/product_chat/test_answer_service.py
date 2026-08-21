@@ -291,6 +291,37 @@ async def test_answer_events_streams_markdown_before_the_validated_result():
 
 
 @pytest.mark.asyncio
+async def test_answer_events_keeps_valid_inline_evidence_omitted_from_citation_ids():
+    payload = json.dumps(
+        {
+            "status": "SUPPORTED",
+            "citation_ids": ["E1"],
+            "answer": "实施方案需要先完成范围确认。[E1]\n再按部署条件准备环境。[E2]",
+        },
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=[
+            {"content": "范围确认。", "metadata": {"file_id": "file-1"}},
+            {"content": "部署条件。", "metadata": {"file_id": "file-2"}},
+        ],
+        published={
+            "file-1": _published_material("file-1", item_id="item-1"),
+            "file-2": _published_material("file-2", item_id="item-2"),
+        },
+        model_content=payload,
+        stream_chunks=[payload],
+    )
+
+    events = [event async for event in service.answer_events("如何制定实施方案？", {"id": 7}, "conversation-1")]
+
+    result = next(event for event in events if isinstance(event, GroundedAnswer))
+    assert result.status == "SUPPORTED"
+    assert result.content == "实施方案需要先完成范围确认。[1]\n再按部署条件准备环境。[2]"
+    assert [citation.evidence_id for citation in result.citations] == ["E1", "E2"]
+
+
+@pytest.mark.asyncio
 async def test_detailed_mode_uses_controlled_multi_step_tools_and_streams_the_grounded_answer():
     class InvestigatingGraph:
         def __init__(self, tools):
@@ -688,6 +719,7 @@ async def test_conflicting_answer_keeps_model_citation_order_and_deduplicates_id
         "not-json",
         '```json\n{"status":"SUPPORTED","answer":"回答","citation_ids":["E1"]}\n```',
         json.dumps({"status": "SUPPORTED", "answer": "回答", "citation_ids": ["E9"]}),
+        json.dumps({"status": "SUPPORTED", "answer": "回答[E9]", "citation_ids": ["E1"]}),
         json.dumps({"status": "SUPPORTED", "answer": "   ", "citation_ids": ["E1"]}),
         json.dumps({"status": "SUPPORTED", "answer": "回答", "citation_ids": []}),
         json.dumps({"status": [], "answer": "回答", "citation_ids": ["E1"]}),
@@ -696,6 +728,7 @@ async def test_conflicting_answer_keeps_model_citation_order_and_deduplicates_id
         "invalid-json",
         "json-fence",
         "unknown-evidence",
+        "unknown-inline-evidence",
         "empty-answer",
         "missing-citation",
         "non-string-status",

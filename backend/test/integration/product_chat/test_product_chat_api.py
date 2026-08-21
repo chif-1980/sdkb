@@ -200,6 +200,7 @@ async def chat_api_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ("POST", "/api/chat/conversations/missing/messages/stream", {"content": "问题"}),
         ("PUT", "/api/chat/messages/missing/feedback", {"rating": "LIKE"}),
         ("POST", "/api/chat/conversations/missing/archive", None),
+        ("POST", "/api/chat/conversations/missing/restore", None),
     ],
 )
 async def test_chat_endpoints_require_product_session(
@@ -226,7 +227,7 @@ async def test_non_product_route_keeps_fastapi_default_error_shape(chat_api_cont
     assert response.json() == {"detail": "非产品接口错误"}
 
 
-async def test_create_and_list_conversations_use_camel_case_owned_active_summaries(
+async def test_create_and_list_conversations_use_camel_case_owned_summaries(
     chat_api_context,
 ):
     context = chat_api_context
@@ -257,7 +258,12 @@ async def test_create_and_list_conversations_use_camel_case_owned_active_summari
     assert created["createdAt"].endswith("Z")
     assert created["updatedAt"].endswith("Z")
     assert list_response.status_code == 200
-    assert list_response.json() == {"conversations": [created]}
+    listed = list_response.json()["conversations"]
+    assert len(listed) == 2
+    assert listed[0] == created
+    assert listed[1]["title"] == "Archived"
+    assert listed[1]["status"] == "ARCHIVED"
+    assert listed[1]["messageCount"] == 0
 
 
 @pytest.mark.parametrize(
@@ -512,7 +518,7 @@ async def test_feedback_rejects_user_messages_cross_user_access_and_invalid_rati
     }
 
 
-@pytest.mark.parametrize("action", ["detail", "send", "archive"])
+@pytest.mark.parametrize("action", ["detail", "send", "archive", "restore"])
 async def test_cross_user_conversation_access_is_hidden_as_not_found(
     chat_api_context,
     monkeypatch: pytest.MonkeyPatch,
@@ -538,6 +544,11 @@ async def test_cross_user_conversation_access_is_hidden_as_not_found(
         "archive": (
             "POST",
             f"/api/chat/conversations/{conversation.conversation_id}/archive",
+            None,
+        ),
+        "restore": (
+            "POST",
+            f"/api/chat/conversations/{conversation.conversation_id}/restore",
             None,
         ),
     }
@@ -584,6 +595,15 @@ async def test_archived_conversation_cannot_send_and_repeated_archive_has_no_sid
         )
         first_updated_at = archived_once.updated_at
 
+    listed_after_archive = await context.client.get(
+        "/api/chat/conversations",
+        headers=context.owner_headers,
+    )
+    detail_after_archive = await context.client.get(
+        f"/api/chat/conversations/{conversation.conversation_id}",
+        headers=context.owner_headers,
+    )
+
     second_archive = await context.client.post(
         f"/api/chat/conversations/{conversation.conversation_id}/archive",
         headers=context.owner_headers,
@@ -594,17 +614,41 @@ async def test_archived_conversation_cannot_send_and_repeated_archive_has_no_sid
         json={"content": "归档后问题"},
     )
 
+    restore_response = await context.client.post(
+        f"/api/chat/conversations/{conversation.conversation_id}/restore",
+        headers=context.owner_headers,
+    )
+    second_restore = await context.client.post(
+        f"/api/chat/conversations/{conversation.conversation_id}/restore",
+        headers=context.owner_headers,
+    )
+
     async with context.factory() as session:
-        archived_twice = await session.scalar(
+        restored = await session.scalar(
             select(ProductConversation).where(ProductConversation.conversation_id == conversation.conversation_id)
         )
         message_count = await session.scalar(select(func.count()).select_from(ProductMessage))
 
     assert first_archive.status_code == 204
+    assert listed_after_archive.status_code == 200
+    assert listed_after_archive.json()["conversations"] == [
+        {
+            "id": conversation.conversation_id,
+            "title": "Archive once",
+            "status": "ARCHIVED",
+            "messageCount": 0,
+            "createdAt": listed_after_archive.json()["conversations"][0]["createdAt"],
+            "updatedAt": listed_after_archive.json()["conversations"][0]["updatedAt"],
+        }
+    ]
+    assert detail_after_archive.status_code == 200
+    assert detail_after_archive.json()["conversation"]["status"] == "ARCHIVED"
     assert second_archive.status_code == 404
     assert send_response.status_code == 404
-    assert archived_twice.status == ConversationStatus.ARCHIVED
-    assert archived_twice.updated_at == first_updated_at
+    assert restore_response.status_code == 204
+    assert second_restore.status_code == 404
+    assert restored.status == ConversationStatus.ACTIVE
+    assert restored.updated_at != first_updated_at
     assert message_count == 0
     assert answer_calls == 0
 
