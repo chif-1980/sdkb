@@ -195,7 +195,11 @@ const TASK_TYPE_LABELS = {
   knowledge_index: '文档入库',
   knowledge_graph_index: '图谱构建',
   dataset_generation: '评估集生成',
-  rag_evaluation: 'RAG 评估'
+  rag_evaluation: 'RAG 评估',
+  feishu_process: '飞书资料解析',
+  feishu_publish: '飞书知识发布',
+  feishu_compare: '跨文档检查',
+  feishu_compare_backfill: '历史资料跨文档回填'
 }
 
 const isActiveStatus = (status) => Boolean(STATUS_CONFIG[status]) && !STATUS_CONFIG[status].terminal

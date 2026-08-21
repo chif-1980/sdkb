@@ -9,6 +9,7 @@ from yuxi.product_chat.auth_service import ProductAuthError
 from yuxi.product_chat.source_policy_service import ProductKnowledgeScope, ProductSourcePolicyService
 from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import (
+    FeishuCrossDocumentRelation,
     FeishuMaterialVersion,
     FeishuSource,
     FeishuSourceItem,
@@ -175,7 +176,36 @@ async def test_resolve_scope_only_returns_current_published_approved_versions(db
         published_at=now,
         yuxi_file_id="file-invalid",
     )
-    db_session.add_all([current_version, old_version, pending_version, failed_version, invalid_version])
+    conflicted_item = add_item("item-conflicted", active_version_id="version-conflicted")
+    conflicted_version = FeishuMaterialVersion(
+        version_id="version-conflicted",
+        item_id=conflicted_item.item_id,
+        revision="1",
+        content_hash="conflicted",
+        processing_status="published",
+        review_status="approved",
+        published_at=now,
+        yuxi_file_id="file-conflicted",
+    )
+    open_conflict = FeishuCrossDocumentRelation(
+        relation_id="relation-open-conflict",
+        comparison_key="version-conflicted:version-pending",
+        source_version_id=conflicted_version.version_id,
+        target_version_id=pending_version.version_id,
+        relation_type="CONFLICT",
+        status="open",
+    )
+    db_session.add_all(
+        [
+            current_version,
+            old_version,
+            pending_version,
+            failed_version,
+            invalid_version,
+            conflicted_version,
+            open_conflict,
+        ]
+    )
     await db_session.commit()
 
     service = ProductSourcePolicyService(db=db_session, knowledge_base=_PolicyManager(True))

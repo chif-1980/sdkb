@@ -7,6 +7,7 @@ import mimetypes
 from pathlib import Path
 from typing import Protocol
 
+from yuxi.governance.content_quality import assess_content
 from yuxi.integrations.feishu.client import FeishuClient, FeishuNotFoundError
 from yuxi.integrations.feishu.schemas import FeishuAttachment, FeishuNode
 from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository
@@ -250,10 +251,18 @@ class FeishuScanService:
         if node.obj_type == "docx":
             node_item_key = f"page:{node.space_id}:{node.node_token}"
             page_content = await self.client.get_wiki_document(node)
+            content_quality = assess_content(
+                content=page_content.content.decode("utf-8", errors="replace"),
+                title=title,
+            )
+            # A Feishu wiki page with children and no body is a navigation
+            # heading, not a knowledge source. Pages with body remain normal
+            # materials even when they also contain child nodes.
+            is_directory = bool(node.has_child and not content_quality["has_body"])
             await self._record_material(
                 source=source,
                 item_key=node_item_key,
-                item_type="page",
+                item_type="directory" if is_directory else "page",
                 title=title,
                 parent_item_key=parent_item_key,
                 path_text=path_text,
@@ -261,7 +270,7 @@ class FeishuScanService:
                 token=node_token,
                 revision=page_content.revision,
                 source_updated_at=node.source_updated_at,
-                supported=True,
+                supported=not is_directory,
                 counts=counts,
                 seen_item_keys=seen_item_keys,
                 seen_at=seen_at,
@@ -404,18 +413,55 @@ class FeishuScanService:
         counts.scanned += 1
         current = await self.repository.find_current_version(item.item_id)
         if not supported:
-            counts.unsupported += 1
+            if item_type != "directory":
+                counts.unsupported += 1
             if self._metadata_matches(current, revision, normalized_updated_at):
+                if item_type == "directory" and current is not None:
+                    current.processing_status = "skipped"
+                    current.review_status = "not_required"
+                    current.review_comment = "目录节点仅用于组织下级内容，无需加工或审核"
+                    current.processing_params = {
+                        **(current.processing_params or {}),
+                        "content_quality": {
+                            "checked": True,
+                            "has_body": False,
+                            "body_length": 0,
+                            "classification": "directory",
+                            "reason": "目录节点仅用于组织下级内容",
+                        },
+                        "skip_reason": "directory",
+                    }
+                    await self.repository.session.flush()
                 return
             content_hash = sha256(f"unsupported:{token}:{revision}:{normalized_updated_at}".encode()).hexdigest()
-            await self.repository.create_material_version(
+            version, _ = await self.repository.create_material_version(
                 item_id=item.item_id,
                 revision=self._version_revision(revision, normalized_updated_at, content_hash),
                 content_hash=content_hash,
-                processing_status="unsupported",
-                processing_params=self._processing_params(normalized_updated_at),
+                processing_status="skipped" if item_type == "directory" else "unsupported",
+                processing_params={
+                    **self._processing_params(normalized_updated_at),
+                    **(
+                        {
+                            "content_quality": {
+                                "checked": True,
+                                "has_body": False,
+                                "body_length": 0,
+                                "classification": "directory",
+                                "reason": "目录节点仅用于组织下级内容",
+                            },
+                            "skip_reason": "directory",
+                        }
+                        if item_type == "directory"
+                        else {}
+                    ),
+                },
                 sync_run_id=run_id,
             )
+            if item_type == "directory":
+                version.review_status = "not_required"
+                version.review_comment = "目录节点仅用于组织下级内容，无需加工或审核"
+                await self.repository.session.flush()
             return
 
         metadata_matches = self._metadata_matches(current, revision, normalized_updated_at)

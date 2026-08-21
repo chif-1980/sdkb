@@ -13,6 +13,7 @@ from yuxi.governance.domain import (
     ReviewDecision,
 )
 from yuxi.governance.comparator import CrossDocumentComparisonService
+from yuxi.governance.content_quality import assess_content
 from yuxi.governance.schemas import ReviewResolveRequest
 from yuxi.governance.service import GovernanceService
 from yuxi.storage.postgres.models_business import Base
@@ -113,6 +114,11 @@ async def test_governance_domain_defines_stable_public_types():
     assert KnowledgeSourceRole.ALIAS.value == "ALIAS"
 
 
+async def test_content_quality_marks_title_only_material_as_missing():
+    assert assess_content(content="# 产品手册", title="产品手册")["has_body"] is False
+    assert assess_content(content="# 产品手册\n\n部署步骤如下。", title="产品手册")["has_body"] is True
+
+
 async def test_review_request_requires_transfer_assignee_comment_and_valid_publish_action():
     with pytest.raises(ValidationError, match="assignee_id is required"):
         ReviewResolveRequest(decision="TRANSFER", action="KEEP_CURRENT")
@@ -134,10 +140,33 @@ async def test_review_list_and_comparison_return_real_persisted_evidence(governa
     assert reviews[0]["problem_tags"] == ["CONFLICT"]
     assert reviews[0]["risk_level"] == "HIGH"
     assert reviews[0]["comparison_count"] == 1
+    assert reviews[0]["target_kb_id"] == "kb-1"
+    assert reviews[0]["yuxi_file_id"] == "file-candidate"
+    assert reviews[0]["chunk_count"] == 0
+    assert reviews[0]["token_count"] == 0
     assert comparisons[0]["relation_type"] == "CONFLICT"
     assert comparisons[0]["source_title"] == "金融行业解决方案"
     assert comparisons[0]["target_title"] == "Q900 部署指南"
     assert comparisons[0]["different_content"][0]["field"] == "GPU 数量"
+
+
+async def test_comparison_status_separates_all_relations_from_actionable_issues(governance_session):
+    governance_session.add(
+        FeishuCrossDocumentRelation(
+            relation_id="relation-overlap",
+            comparison_key="version-current:version-candidate:overlap",
+            source_version_id="version-current",
+            target_version_id="version-candidate",
+            relation_type="OVERLAP",
+            status="open",
+        )
+    )
+    await governance_session.commit()
+
+    status = await GovernanceService(governance_session).get_comparison_status("source-1")
+
+    assert status["relation_count"] == 2
+    assert status["issue_count"] == 1
 
 
 async def test_request_changes_persists_scope_closes_relation_and_removes_pending_review(governance_session):

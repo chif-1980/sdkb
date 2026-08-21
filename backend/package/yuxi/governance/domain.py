@@ -26,6 +26,7 @@ class ProblemTag(StrEnum):
     PARSE_ERROR = "PARSE_ERROR"
     OUTDATED = "OUTDATED"
     MISSING_SCOPE = "MISSING_SCOPE"
+    CONTENT_MISSING = "CONTENT_MISSING"
 
 
 class CrossDocumentRelationType(StrEnum):

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
+
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from server.routers.product_api_route import ProductApiRoute
 from server.utils.auth_middleware import get_product_user
-from yuxi.product_chat.answer_service import AnswerService
+from yuxi.product_chat.answer_service import AnswerDelta, AnswerProgress, AnswerService, GroundedAnswer
 from yuxi.product_chat.repository import (
     ProductChatNotFoundError,
     ProductChatRepository,
@@ -68,6 +71,10 @@ def _knowledge_unavailable(conversation_id: str, error: Exception) -> JSONRespon
             }
         },
     )
+
+
+def _sse_event(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _conversation_response(
@@ -201,7 +208,6 @@ async def send_message(
     except Exception as exc:
         return _knowledge_unavailable(conversation_id, exc)
 
-
     if initialization_error is not None:
         return _knowledge_unavailable(conversation_id, initialization_error)
 
@@ -211,6 +217,7 @@ async def send_message(
             request.content,
             current_user,
             conversation_id,
+            mode=request.mode,
         )
     except Exception as exc:
         return _knowledge_unavailable(conversation_id, exc)
@@ -241,6 +248,100 @@ async def send_message(
         raise _not_found() from None
     except Exception as exc:
         return _knowledge_unavailable(conversation_id, exc)
+
+
+@product_chat.post(
+    "/chat/conversations/{conversation_id}/messages/stream",
+    response_model=None,
+)
+async def stream_message(
+    conversation_id: str,
+    request: SendMessageRequest,
+    current_user: User = Depends(get_product_user),
+) -> StreamingResponse | JSONResponse:
+    try:
+        async with pg_manager.get_async_session_context() as read_db:
+            conversation = await ProductChatRepository(read_db).require_conversation(
+                conversation_id,
+                current_user.id,
+            )
+            answer_service = AnswerService(
+                db=read_db,
+                read_session_factory=pg_manager.AsyncSession,
+            )
+    except ProductChatNotFoundError:
+        raise _not_found() from None
+    except Exception as exc:
+        return _knowledge_unavailable(conversation_id, exc)
+
+    async def event_stream() -> AsyncIterator[str]:
+        answer: GroundedAnswer | None = None
+        try:
+            async for event in answer_service.answer_events(
+                request.content,
+                current_user,
+                conversation_id,
+                mode=request.mode,
+            ):
+                if isinstance(event, AnswerProgress):
+                    yield _sse_event(
+                        "progress",
+                        {"stage": event.stage, "message": event.message},
+                    )
+                elif isinstance(event, AnswerDelta):
+                    yield _sse_event("delta", {"content": event.content})
+                else:
+                    answer = event
+
+            if answer is None:
+                raise RuntimeError("Answer orchestration completed without a result")
+
+            async with pg_manager.get_async_session_context() as write_db:
+                repository = ProductChatRepository(write_db)
+                user_message, assistant_message, assistant_citations = await repository.append_exchange(
+                    conversation,
+                    current_user.id,
+                    request.content,
+                    answer,
+                )
+                stored_conversation = await repository.require_conversation(
+                    conversation_id,
+                    current_user.id,
+                )
+                message_count = (await repository.get_message_counts([conversation_id])).get(conversation_id, 0)
+                response = MessageExchangeResponse(
+                    conversation=_conversation_response(stored_conversation, message_count),
+                    user_message=_message_response(user_message, []),
+                    assistant_message=_message_response(assistant_message, assistant_citations),
+                )
+            yield _sse_event("complete", response.model_dump(mode="json", by_alias=True))
+        except ProductChatNotFoundError:
+            yield _sse_event(
+                "error",
+                {"code": "CONVERSATION_NOT_FOUND", "message": "会话不存在"},
+            )
+        except Exception as exc:
+            logger.error(
+                "product_chat_stream_failed conversation_id={} error_type={}",
+                conversation_id,
+                type(exc).__name__,
+            )
+            yield _sse_event(
+                "error",
+                {
+                    "code": "KNOWLEDGE_SERVICE_UNAVAILABLE",
+                    "message": "知识服务暂时不可用，请稍后重试",
+                },
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @product_chat.put(

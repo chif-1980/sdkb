@@ -5,10 +5,15 @@ from __future__ import annotations
 from datetime import UTC
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion, FeishuSource, FeishuSourceItem
+from yuxi.storage.postgres.models_knowledge import (
+    FeishuCrossDocumentRelation,
+    FeishuMaterialVersion,
+    FeishuSource,
+    FeishuSourceItem,
+)
 from yuxi.storage.postgres.models_product import (
     CitationKind,
     ConversationStatus,
@@ -129,6 +134,36 @@ class ProductChatRepository:
         for citation in citations:
             citations_by_message.setdefault(citation.message_id, []).append(citation)
         return [(message, citations_by_message.get(message.message_id, [])) for message in messages]
+
+    async def list_recent_messages(
+        self,
+        conversation_id: str,
+        owner_user_id: int,
+        *,
+        limit: int,
+    ) -> list[ProductMessage]:
+        messages = list(
+            (
+                await self.session.execute(
+                    select(ProductMessage)
+                    .join(
+                        ProductConversation,
+                        ProductMessage.conversation_id == ProductConversation.conversation_id,
+                    )
+                    .where(
+                        ProductMessage.conversation_id == conversation_id,
+                        ProductConversation.owner_user_id == owner_user_id,
+                        ProductConversation.status == ConversationStatus.ACTIVE,
+                    )
+                    .order_by(ProductMessage.created_at.desc(), ProductMessage.id.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        messages.reverse()
+        return messages
 
     async def get_owned_citation(
         self,
@@ -320,6 +355,14 @@ class ProductChatRepository:
                 FeishuMaterialVersion.published_at.is_not(None),
                 FeishuMaterialVersion.yuxi_file_id.is_not(None),
                 FeishuMaterialVersion.yuxi_file_id.in_(file_ids),
+                ~exists().where(
+                    FeishuCrossDocumentRelation.status == "open",
+                    FeishuCrossDocumentRelation.relation_type == "CONFLICT",
+                    or_(
+                        FeishuCrossDocumentRelation.source_version_id == FeishuMaterialVersion.version_id,
+                        FeishuCrossDocumentRelation.target_version_id == FeishuMaterialVersion.version_id,
+                    ),
+                ),
             )
         )
         published: dict[str, tuple[FeishuSourceItem, FeishuMaterialVersion]] = {}

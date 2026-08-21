@@ -24,6 +24,10 @@ const reviews = [
     review_id: 'review-first',
     version_id: 'version-first',
     title: '第一份资料',
+    target_kb_id: 'kb-1',
+    yuxi_file_id: 'file-first',
+    item_type: 'docx',
+    revision: '1',
     problem_tags: [],
     applicability_scope: {},
     relation_types: [],
@@ -34,6 +38,10 @@ const reviews = [
     review_id: 'review-target',
     version_id: 'version-target',
     title: '目标资料',
+    target_kb_id: 'kb-1',
+    yuxi_file_id: 'file-target',
+    item_type: 'pdf',
+    revision: '2',
     problem_tags: ['CONFLICT'],
     applicability_scope: { industry: '制造业', product: '知识助手' },
     relation_types: ['CONFLICT'],
@@ -56,7 +64,11 @@ function mountWorkspace(props = {}) {
           props: ['value', 'placeholder'],
           template: '<input :value="value" :placeholder="placeholder" />'
         },
-        'a-textarea': { template: '<textarea />' }
+        'a-textarea': { template: '<textarea />' },
+        MarkdownPreview: {
+          props: ['content'],
+          template: '<div class="markdown-stub">{{ content }}</div>'
+        }
       }
     }
   })
@@ -69,6 +81,12 @@ describe('FeishuReviewWorkspace', () => {
       if (url.startsWith('/api/governance/reviews?')) return Promise.resolve({ items: reviews })
       if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
       if (url.endsWith('/comparisons')) return Promise.resolve({ items: [] })
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-target/content') {
+        return Promise.resolve({ content: '# 目标资料正文', lines: [] })
+      }
       return Promise.resolve({})
     })
   })
@@ -80,17 +98,20 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.record-heading h2').text()).toBe('目标资料')
     expect(wrapper.get('input[placeholder="行业"]').element.value).toBe('制造业')
     expect(wrapper.get('input[placeholder="产品"]').element.value).toBe('知识助手')
+    expect(wrapper.get('.markdown-stub').text()).toContain('目标资料正文')
     expect(wrapper.emitted('target-consumed')).toHaveLength(1)
-    expect(apiAdminGet).toHaveBeenCalledWith(
-      '/api/governance/reviews/review-target/comparisons'
-    )
+    expect(apiAdminGet).toHaveBeenCalledWith('/api/governance/reviews/review-target/comparisons')
   })
 
-  it('普通进入时用第一条任务初始化审核表单', async () => {
+  it('普通进入时用第一条任务初始化审核表单并展示解析正文', async () => {
     const wrapper = mountWorkspace()
     await flushPromises()
 
     expect(wrapper.get('.record-heading h2').text()).toBe('第一份资料')
     expect(wrapper.get('input[placeholder="行业"]').element.value).toBe('')
+    expect(wrapper.get('.markdown-stub').text()).toContain('第一份资料正文')
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/knowledge/databases/kb-1/documents/file-first/content'
+    )
   })
 })

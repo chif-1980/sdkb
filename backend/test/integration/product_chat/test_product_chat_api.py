@@ -18,7 +18,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from server.routers import router
 from server.routers import product_chat_router
 from server.utils.auth_middleware import get_db
-from yuxi.product_chat.answer_service import AnswerService, GroundedAnswer, GroundedCitation
+from yuxi.product_chat.answer_service import (
+    AnswerDelta,
+    AnswerProgress,
+    AnswerService,
+    GroundedAnswer,
+    GroundedCitation,
+)
 from yuxi.product_chat.repository import ProductChatRepository
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Base, Department, User
@@ -191,6 +197,7 @@ async def chat_api_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ("POST", "/api/chat/conversations", {}),
         ("GET", "/api/chat/conversations/missing", None),
         ("POST", "/api/chat/conversations/missing/messages", {"content": "问题"}),
+        ("POST", "/api/chat/conversations/missing/messages/stream", {"content": "问题"}),
         ("PUT", "/api/chat/messages/missing/feedback", {"rating": "LIKE"}),
         ("POST", "/api/chat/conversations/missing/archive", None),
     ],
@@ -267,10 +274,11 @@ async def test_send_and_detail_return_persisted_exchange_for_each_answer_status(
     conversation = await context.create_conversation()
     answer = _answer(status)
 
-    async def answer_question(self, question: str, user: User, conversation_id: str):
+    async def answer_question(self, question: str, user: User, conversation_id: str, *, mode: str):
         assert question == "企业版如何部署？"
         assert user.id == context.owner_id
         assert conversation_id == conversation.conversation_id
+        assert mode == "CONCISE"
         return answer
 
     monkeypatch.setattr(AnswerService, "answer", answer_question)
@@ -319,6 +327,85 @@ async def test_send_and_detail_return_persisted_exchange_for_each_answer_status(
         "conversation": exchange["conversation"],
         "messages": [exchange["userMessage"], exchange["assistantMessage"]],
     }
+
+
+async def test_stream_message_emits_real_progress_and_persists_the_exchange(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation()
+
+    async def answer_events(self, question: str, user: User, conversation_id: str, *, mode: str):
+        assert question == "部署前需要准备什么？"
+        assert user.id == context.owner_id
+        assert conversation_id == conversation.conversation_id
+        assert mode == "DETAILED"
+        yield AnswerProgress("UNDERSTANDING", "正在结合当前对话理解问题")
+        yield AnswerProgress("RETRIEVING", "正在检索已审核发布的资料")
+        yield AnswerProgress("VERIFYING", "正在核对原文与适用条件")
+        yield AnswerProgress("COMPOSING", "正在整理结论和可核验来源")
+        yield AnswerDelta("该产品支持")
+        yield AnswerDelta("私有部署。")
+        yield _answer("SUPPORTED")
+
+    monkeypatch.setattr(AnswerService, "answer_events", answer_events)
+
+    response = await context.client.post(
+        f"/api/chat/conversations/{conversation.conversation_id}/messages/stream",
+        headers=context.owner_headers,
+        json={"content": "部署前需要准备什么？", "mode": "DETAILED"},
+    )
+    detail_response = await context.client.get(
+        f"/api/chat/conversations/{conversation.conversation_id}",
+        headers=context.owner_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache, no-transform"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert response.text.count("event: progress") == 4
+    assert '"stage": "VERIFYING"' in response.text
+    assert response.text.count("event: delta") == 2
+    assert response.text.index("event: delta") < response.text.index("event: complete")
+    assert "event: complete" in response.text
+    assert '"messageCount": 2' in response.text
+    assert detail_response.json()["messages"][0]["content"] == "部署前需要准备什么？"
+    assert detail_response.json()["messages"][1]["content"] == "该产品支持私有部署。"
+
+
+async def test_stream_failure_emits_stable_error_without_persisting_half_exchange(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation()
+    secret_error = "provider-secret-stream-detail"
+
+    async def failing_answer_events(*args, **kwargs):
+        yield AnswerProgress("UNDERSTANDING", "正在结合当前对话理解问题")
+        yield AnswerDelta("尚未完成的回答")
+        raise RuntimeError(secret_error)
+
+    monkeypatch.setattr(AnswerService, "answer_events", failing_answer_events)
+
+    response = await context.client.post(
+        f"/api/chat/conversations/{conversation.conversation_id}/messages/stream",
+        headers=context.owner_headers,
+        json={"content": "触发流式回答失败"},
+    )
+
+    async with context.factory() as session:
+        message_count = await session.scalar(select(func.count()).select_from(ProductMessage))
+    assert response.status_code == 200
+    assert "event: progress" in response.text
+    assert "event: delta" in response.text
+    assert "event: error" in response.text
+    assert "event: complete" not in response.text
+    assert "KNOWLEDGE_SERVICE_UNAVAILABLE" in response.text
+    assert secret_error not in response.text
+    assert message_count == 0
 
 
 async def test_assistant_feedback_can_be_set_switched_cleared_and_reloaded(
@@ -575,9 +662,10 @@ async def test_send_releases_auth_and_read_transactions_before_answer_and_uses_n
     context = chat_api_context
     conversation = await context.create_conversation()
 
-    async def answer_question(self, question: str, user: User, conversation_id: str):
+    async def answer_question(self, question: str, user: User, conversation_id: str, *, mode: str):
         assert question == "事务边界问题"
         assert conversation_id == conversation.conversation_id
+        assert mode == "CONCISE"
         assert len(context.auth_sessions) == 1
         assert not context.auth_sessions[0].in_transaction()
         assert inspect(user).detached

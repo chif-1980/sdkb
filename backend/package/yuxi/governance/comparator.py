@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from difflib import SequenceMatcher
+from typing import Awaitable, Callable
 from uuid import uuid4
 
 from sqlalchemy import or_, select
@@ -12,6 +14,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuGovernanceReview,
     FeishuMaterialVersion,
     FeishuSourceItem,
+    KnowledgeChunk,
 )
 
 
@@ -33,14 +36,16 @@ def _facts(version: FeishuMaterialVersion) -> dict[str, str]:
 class CrossDocumentComparisonService:
     """Create deterministic, auditable comparison evidence after parsing.
 
-    The comparison is intentionally conservative. It only compares the current
-    version with the same item's earlier versions and a bounded set of related
-    items. A future LLM comparator can replace ``_classify`` without changing
-    the persisted relation contract.
+    The first stage is deliberately cheap: exact hashes, metadata similarity,
+    and chunk text shingles narrow the candidate set before a later AI judge is
+    introduced. Relations are persisted with a stable pair key so reruns are
+    safe.
     """
 
     CANDIDATE_STATUSES = {"parsed", "awaiting_review", "published"}
-    MAX_CANDIDATES = 30
+    MAX_CANDIDATE_SCAN = 200
+    MAX_CANDIDATES = 20
+    MIN_SIMILARITY = 0.42
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -65,27 +70,92 @@ class CrossDocumentComparisonService:
                     FeishuSourceItem.source_id == current_item.source_id,
                     FeishuMaterialVersion.version_id != version_id,
                     FeishuMaterialVersion.processing_status.in_(self.CANDIDATE_STATUSES),
-                    or_(
-                        FeishuMaterialVersion.item_id == current.item_id,
-                        FeishuSourceItem.title.is_not(None),
-                    ),
                 )
                 .order_by(FeishuMaterialVersion.created_at.desc())
-                .limit(self.MAX_CANDIDATES)
+                .limit(self.MAX_CANDIDATE_SCAN)
             )
         ).all()
+
+        content_by_file_id = await self._load_contents(
+            [current.yuxi_file_id, *(candidate.yuxi_file_id for candidate, _ in candidate_rows)]
+        )
+        ranked_candidates = sorted(
+            candidate_rows,
+            key=lambda row: self._candidate_similarity(
+                current,
+                current_item,
+                row[0],
+                row[1],
+                content_by_file_id.get(current.yuxi_file_id or "", ""),
+                content_by_file_id.get(row[0].yuxi_file_id or "", ""),
+            ),
+            reverse=True,
+        )[: self.MAX_CANDIDATES]
 
         review = await self._ensure_review(current.version_id)
         _ = review
         relations: list[FeishuCrossDocumentRelation] = []
-        for candidate, candidate_item in candidate_rows:
-            evidence = self._classify(current, current_item, candidate, candidate_item)
+        current_content = content_by_file_id.get(current.yuxi_file_id or "", "")
+        for candidate, candidate_item in ranked_candidates:
+            candidate_content = content_by_file_id.get(candidate.yuxi_file_id or "", "")
+            evidence = self._classify(
+                current,
+                current_item,
+                candidate,
+                candidate_item,
+                current_content=current_content,
+                candidate_content=candidate_content,
+            )
             if evidence is None:
                 continue
             relation = await self._upsert_relation(current, candidate, evidence)
             relations.append(relation)
         await self.session.flush()
         return relations
+
+    async def compare_source(
+        self,
+        source_id: str,
+        *,
+        version_ids: list[str] | None = None,
+        progress_callback: Callable[[int, int, int], Awaitable[None]] | None = None,
+    ) -> dict[str, int]:
+        """Compare all eligible versions for a source, reporting batch progress."""
+        statement = (
+            select(FeishuMaterialVersion.version_id)
+            .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+            .where(
+                FeishuSourceItem.source_id == source_id,
+                FeishuMaterialVersion.processing_status.in_(self.CANDIDATE_STATUSES),
+            )
+            .order_by(FeishuMaterialVersion.created_at.asc())
+        )
+        if version_ids:
+            statement = statement.where(FeishuMaterialVersion.version_id.in_(version_ids))
+        ids = list(await self.session.scalars(statement))
+        total = len(ids)
+        compared = 0
+        relation_count = 0
+        for version_id in ids:
+            relation_count += len(await self.compare_version(version_id))
+            compared += 1
+            if progress_callback is not None:
+                await progress_callback(compared, total, relation_count)
+        return {"total": total, "compared": compared, "relations": relation_count}
+
+    async def _load_contents(self, file_ids: list[str | None]) -> dict[str, str]:
+        normalized_ids = list(dict.fromkeys(file_id for file_id in file_ids if file_id))
+        if not normalized_ids:
+            return {}
+        result = await self.session.execute(
+            select(KnowledgeChunk.file_id, KnowledgeChunk.content)
+            .where(KnowledgeChunk.file_id.in_(normalized_ids))
+            .order_by(KnowledgeChunk.file_id.asc(), KnowledgeChunk.chunk_index.asc())
+        )
+        contents: dict[str, list[str]] = {}
+        for file_id, content in result.all():
+            contents.setdefault(str(file_id), []).append(content or "")
+        return {file_id: "\n\n".join(parts) for file_id, parts in contents.items()}
 
     async def has_open_conflict(self, version_id: str) -> bool:
         relation = await self.session.scalar(
@@ -162,24 +232,24 @@ class CrossDocumentComparisonService:
         current_item: FeishuSourceItem,
         candidate: FeishuMaterialVersion,
         candidate_item: FeishuSourceItem,
+        *,
+        current_content: str = "",
+        candidate_content: str = "",
     ) -> dict | None:
         same_item = current.item_id == candidate.item_id
-        title_similarity = SequenceMatcher(
-            None,
-            (current_item.title or "").lower(),
-            (candidate_item.title or "").lower(),
-        ).ratio()
-        path_similarity = SequenceMatcher(
-            None,
-            (current_item.path_text or "").lower(),
-            (candidate_item.path_text or "").lower(),
-        ).ratio()
-        similarity = 1.0 if current.content_hash == candidate.content_hash else max(title_similarity, path_similarity)
+        similarity = CrossDocumentComparisonService._candidate_similarity(
+            current,
+            current_item,
+            candidate,
+            candidate_item,
+            current_content,
+            candidate_content,
+        )
         if current.content_hash == candidate.content_hash:
             relation_type = CrossDocumentRelationType.EXACT_DUPLICATE
         elif same_item:
             relation_type = CrossDocumentRelationType.OVERLAP
-        elif similarity < 0.45:
+        elif similarity < CrossDocumentComparisonService.MIN_SIMILARITY:
             return None
         else:
             relation_type = CrossDocumentRelationType.OVERLAP
@@ -212,6 +282,8 @@ class CrossDocumentComparisonService:
             same_content.append("内容哈希一致")
         if not same_content:
             same_content.append("目录和标题语义相近")
+        if current_content and candidate_content:
+            same_content.append(f"正文特征相似度 {similarity:.0%}")
         if same_item and current.revision != candidate.revision:
             different_content.append(
                 {"field": "revision", "current": current.revision, "candidate": candidate.revision}
@@ -229,3 +301,50 @@ class CrossDocumentComparisonService:
             "scope_difference": scope_difference,
             "reasoning": "相同内容哈希直接判定为重复；其余关系依据同一资料版本、标题/目录相似度和适用范围字段生成。",
         }
+
+    @classmethod
+    def _candidate_similarity(
+        cls,
+        current: FeishuMaterialVersion,
+        current_item: FeishuSourceItem,
+        candidate: FeishuMaterialVersion,
+        candidate_item: FeishuSourceItem,
+        current_content: str,
+        candidate_content: str,
+    ) -> float:
+        if current.content_hash == candidate.content_hash:
+            return 1.0
+        if current.item_id == candidate.item_id:
+            return 0.99
+        title_similarity = SequenceMatcher(
+            None,
+            (current_item.title or "").lower(),
+            (candidate_item.title or "").lower(),
+        ).ratio()
+        path_similarity = SequenceMatcher(
+            None,
+            (current_item.path_text or "").lower(),
+            (candidate_item.path_text or "").lower(),
+        ).ratio()
+        content_similarity = cls._content_similarity(current_content, candidate_content)
+        return max(title_similarity, path_similarity, content_similarity)
+
+    @staticmethod
+    def _content_similarity(current_content: str, candidate_content: str) -> float:
+        if not current_content or not candidate_content:
+            return 0.0
+        current_features = _text_features(current_content)
+        candidate_features = _text_features(candidate_content)
+        if not current_features or not candidate_features:
+            return 0.0
+        return len(current_features & candidate_features) / len(current_features | candidate_features)
+
+
+def _text_features(value: str) -> set[str]:
+    normalized = re.sub(r"\s+", "", value.lower())[:200_000]
+    if not normalized:
+        return set()
+    features: set[str] = set(re.findall(r"[a-z0-9]+", normalized))
+    chinese = "".join(re.findall(r"[\u3400-\u9fff]", normalized))
+    features.update(chinese[index : index + 2] for index in range(max(0, len(chinese) - 1)))
+    return {feature for feature in features if feature}

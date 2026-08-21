@@ -43,7 +43,8 @@
           </template>
           <template v-else-if="column.key === 'item_type'">
             <span>{{ itemTypeLabel(record.item_type) }}</span>
-            <a-tag v-if="isUnsupported(record.item_type)" color="default">暂不支持加工</a-tag>
+            <a-tag v-if="isDirectory(record)" color="blue">仅目录，不加工</a-tag>
+            <a-tag v-else-if="isUnsupported(record.item_type)" color="default">暂不支持加工</a-tag>
           </template>
           <template v-else-if="column.key === 'processing_status'">
             <a-tag :color="processingStatus(record.processing_status).color">
@@ -57,6 +58,9 @@
             <a-tag :color="reviewStatus(record.review_status).color">
               {{ reviewStatus(record.review_status).label }}
             </a-tag>
+            <a-tag v-if="record.is_directory" color="blue">无需审核</a-tag>
+            <a-tag v-else-if="record.content_missing" color="error">正文缺失</a-tag>
+            <a-tag v-else-if="record.content_check_pending && ['parsed', 'awaiting_review'].includes(record.processing_status)" color="warning">正文待确认</a-tag>
           </template>
           <template v-else-if="column.key === 'source_validity'">
             <a-tag :color="record.source_validity === 'valid' ? 'success' : 'warning'">
@@ -142,7 +146,7 @@ const rowSelection = computed(() => ({
     selectedRowKeys.value = nextKeys
   },
   getCheckboxProps: (record) => ({
-    disabled: !record.version_id || isUnsupported(record.item_type)
+    disabled: !record.version_id || isDirectory(record) || isUnsupported(record.item_type)
   })
 }))
 
@@ -156,6 +160,7 @@ watch(
 
 const itemTypes = {
   page: '飞书页面',
+  directory: '目录节点',
   attachment: '附件',
   doc: '文档',
   docx: '文档',
@@ -174,6 +179,7 @@ const processingStatuses = {
   processing_queued: { label: '等待加工', color: 'processing' },
   processing: { label: '加工中', color: 'processing' },
   awaiting_review: { label: '待审核', color: 'warning' },
+  skipped: { label: '已跳过', color: 'default' },
   parse_failed: { label: '解析失败', color: 'error' },
   publish_queued: { label: '等待发布', color: 'processing' },
   publishing: { label: '发布中', color: 'processing' },
@@ -198,14 +204,20 @@ function itemTypeLabel(value) {
 }
 
 function isUnsupported(value) {
-  return value === 'audio' || value === 'video'
+  return ['audio', 'video', 'unsupported'].includes(value)
+}
+
+function isDirectory(material) {
+  return material?.is_directory === true || material?.item_type === 'directory'
 }
 
 function canPerformAction(material, action) {
   const parsedReady =
     material.review_status === 'pending' &&
     ['parsed', 'awaiting_review'].includes(material.processing_status) &&
-    Boolean(material.yuxi_file_id)
+    Boolean(material.yuxi_file_id) &&
+    material.content_quality?.checked === true &&
+    material.content_quality?.has_body === true
 
   if (action === 'approve') return parsedReady
   if (action === 'reject') return material.review_status === 'pending'

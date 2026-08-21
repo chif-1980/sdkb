@@ -29,7 +29,9 @@
         <a-descriptions-item label="来源对象">{{ material.item_id || '-' }}</a-descriptions-item>
         <a-descriptions-item label="版本">{{ material.revision || '-' }}</a-descriptions-item>
         <a-descriptions-item label="内容哈希">{{ material.content_hash || '-' }}</a-descriptions-item>
-        <a-descriptions-item label="知识库文件">{{ material.yuxi_file_id || '尚未发布' }}</a-descriptions-item>
+        <a-descriptions-item label="知识库文件">
+          {{ material.is_directory ? '目录节点不进入知识库' : material.yuxi_file_id || '尚未发布' }}
+        </a-descriptions-item>
         <a-descriptions-item label="分块 / Token">
           {{ material.chunk_count ?? 0 }} / {{ material.token_count ?? 0 }}
         </a-descriptions-item>
@@ -133,10 +135,18 @@ const chunks = computed(() =>
   )
 )
 const emptyContentDescription = computed(() =>
-  props.material?.yuxi_file_id ? '暂无 Markdown 内容' : '尚未生成可预览内容'
+  props.material?.is_directory
+    ? '目录节点仅用于组织下级内容，无需生成正文'
+    : props.material?.yuxi_file_id
+      ? '暂无 Markdown 内容'
+      : '尚未生成可预览内容'
 )
 const emptyChunksDescription = computed(() =>
-  props.material?.yuxi_file_id ? '暂无分块内容' : '尚未生成可预览内容'
+  props.material?.is_directory
+    ? '目录节点不参与知识分块和检索'
+    : props.material?.yuxi_file_id
+      ? '暂无分块内容'
+      : '尚未生成可预览内容'
 )
 
 const eventLabels = {

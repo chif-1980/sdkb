@@ -86,7 +86,7 @@
             待审核 <span class="governance-count">{{ governanceCounts.reviews }}</span>
           </button>
           <button type="button" class="governance-tab" :class="{ active: activeModule === 'relations' }" @click="activeModule = 'relations'">
-            跨文档问题 <span class="governance-count">{{ governanceCounts.relations }}</span>
+            跨文档检查 <span class="governance-count">{{ governanceCounts.relations }}</span>
           </button>
           <button type="button" class="governance-tab" :class="{ active: activeModule === 'formal' }" @click="activeModule = 'formal'">
             正式知识 <span class="governance-count">{{ governanceCounts.formal }}</span>
@@ -108,34 +108,44 @@
                 </div>
               </div>
               <div class="tree-actions">
-                <a-button
-                  data-testid="oauth-qr-authorize"
-                  type="primary"
-                  :loading="qrAuthorizing"
-                  :disabled="!currentSource"
-                  @click="startQrOAuth"
-                >
-                  <QrCode :size="16" />
-                  {{ oauthStatus.authorized ? '重新扫码授权' : '扫码授权' }}
-                </a-button>
-                <a-button
-                  data-testid="oauth-browser-authorize"
-                  :loading="authorizingUser"
-                  :disabled="!currentSource"
-                  @click="startBrowserOAuth"
-                >
-                  <ExternalLink :size="16" />
-                  浏览器授权
-                </a-button>
-                <a-button
-                  aria-label="刷新知识目录"
-                  :loading="loadingTree"
-                  :disabled="!oauthStatus.authorized"
-                  @click="loadTree(true)"
-                >
-                  <RefreshCw :size="16" />
-                  刷新目录
-                </a-button>
+                <a-tooltip :title="oauthStatus.authorized ? '重新扫码授权' : '扫码授权'">
+                  <a-button
+                    data-testid="oauth-qr-authorize"
+                    type="primary"
+                    :aria-label="oauthStatus.authorized ? '重新扫码授权' : '扫码授权'"
+                    :loading="qrAuthorizing"
+                    :disabled="!currentSource"
+                    @click="startQrOAuth"
+                  >
+                    <QrCode :size="16" />
+                    <span class="tree-action-label">{{
+                      oauthStatus.authorized ? '重新扫码授权' : '扫码授权'
+                    }}</span>
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="浏览器授权">
+                  <a-button
+                    data-testid="oauth-browser-authorize"
+                    aria-label="浏览器授权"
+                    :loading="authorizingUser"
+                    :disabled="!currentSource"
+                    @click="startBrowserOAuth"
+                  >
+                    <ExternalLink :size="16" />
+                    <span class="tree-action-label">浏览器授权</span>
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="刷新目录">
+                  <a-button
+                    aria-label="刷新知识目录"
+                    :loading="loadingTree"
+                    :disabled="!oauthStatus.authorized"
+                    @click="loadTree(true)"
+                  >
+                    <RefreshCw :size="16" />
+                    <span class="tree-action-label">刷新目录</span>
+                  </a-button>
+                </a-tooltip>
               </div>
             </div>
             <div class="panel-body tree-body">
@@ -343,6 +353,7 @@ import {
 import QRCode from 'qrcode'
 
 import { feishuKnowledgeApi, MAX_BATCH_SIZE } from '@/apis/feishu_knowledge_api'
+import { governanceApi } from '@/apis/governance_api'
 import { documentApi } from '@/apis/knowledge_api'
 import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetailDrawer.vue'
 import FeishuMaterialTable from '@/components/feishu/FeishuMaterialTable.vue'
@@ -421,6 +432,7 @@ const processingOptions = [
   { label: '等待加工', value: 'processing_queued' },
   { label: '加工中', value: 'processing' },
   { label: '待审核', value: 'awaiting_review' },
+  { label: '已跳过', value: 'skipped' },
   { label: '解析失败', value: 'parse_failed' },
   { label: '等待发布', value: 'publish_queued' },
   { label: '发布中', value: 'publishing' },
@@ -435,7 +447,8 @@ const processingOptions = [
 const reviewOptions = [
   { label: '待审核', value: 'pending' },
   { label: '已通过', value: 'approved' },
-  { label: '已驳回', value: 'rejected' }
+  { label: '已驳回', value: 'rejected' },
+  { label: '无需审核', value: 'not_required' }
 ]
 const validityOptions = [
   { label: '来源有效', value: 'valid' },
@@ -443,6 +456,7 @@ const validityOptions = [
 ]
 const typeOptions = [
   { label: '飞书页面', value: 'page' },
+  { label: '目录节点', value: 'directory' },
   { label: '附件', value: 'attachment' },
   { label: '音频', value: 'audio' },
   { label: '视频', value: 'video' }
@@ -492,6 +506,27 @@ async function loadSources() {
   sources.value = response.items || []
   if (!sources.value.some((item) => item.source_id === currentSourceId.value)) {
     currentSourceId.value = sources.value[0]?.source_id || ''
+  }
+  governanceCounts.reviews = currentSource.value?.awaiting_review_count ?? 0
+}
+
+async function loadReviewCount() {
+  if (!currentSourceId.value) return
+  try {
+    const response = await governanceApi.listReviews(currentSourceId.value)
+    governanceCounts.reviews = response.items?.length ?? 0
+  } catch {
+    governanceCounts.reviews = currentSource.value?.awaiting_review_count ?? 0
+  }
+}
+
+async function loadComparisonIssueCount() {
+  if (!currentSourceId.value) return
+  try {
+    const response = await governanceApi.getComparisonStatus(currentSourceId.value)
+    governanceCounts.relations = response.issue_count ?? 0
+  } catch {
+    governanceCounts.relations = 0
   }
 }
 
@@ -599,7 +634,7 @@ async function refreshAll({ forceTree = false } = {}) {
   await loadSources()
   if (currentSourceId.value) {
     await loadOAuthStatus()
-    await Promise.all([loadRuns(), loadMaterials(), loadTree(forceTree)])
+    await Promise.all([loadRuns(), loadMaterials(), loadTree(forceTree), loadReviewCount(), loadComparisonIssueCount()])
   }
 }
 
@@ -1317,6 +1352,8 @@ onBeforeUnmount(() => {
 }
 
 .tree-section {
+  container-name: knowledge-tree;
+  container-type: inline-size;
   padding-bottom: 14px;
 }
 
@@ -1333,6 +1370,10 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+.section-title h2 {
+  white-space: nowrap;
 }
 
 .section-help {
@@ -1382,6 +1423,20 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+@container knowledge-tree (max-width: 520px) {
+  .tree-actions :deep(.ant-btn) {
+    width: 32px;
+    min-width: 0;
+    flex: 0 0 32px;
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .tree-action-label {
+    display: none;
+  }
 }
 
 .qr-oauth-content {

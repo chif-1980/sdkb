@@ -155,7 +155,11 @@ async def test_scan_recurses_from_configured_root_and_builds_page_paths(reposito
     fake = FakeFeishuClient(
         nodes={item.node_token: item for item in (root, child, grandchild)},
         children={"root": [child], "child": [grandchild]},
-        page_contents={"obj-root": b"root", "obj-child": b"child", "obj-grandchild": b"grandchild"},
+        page_contents={
+            "obj-root": b"Root body",
+            "obj-child": b"Child body",
+            "obj-grandchild": b"Grandchild body",
+        },
     )
 
     result = await FeishuScanService(repository=repository, client=fake).scan(source_id="source-1", mode="full")
@@ -166,6 +170,84 @@ async def test_scan_recurses_from_configured_root_and_builds_page_paths(reposito
     assert fake.get_calls == ["root"]
     assert fake.children_calls == ["root", "child", "grandchild"]
     assert [item.path_text for item in items] == ["Root", "Root / Child", "Root / Child / Grandchild"]
+
+
+async def test_title_only_page_with_children_is_directory_and_skips_review(repository, session):
+    root = node("root", "产品资料", has_child=True)
+    child = node("child", "部署手册", parent="root")
+    fake = FakeFeishuClient(
+        nodes={item.node_token: item for item in (root, child)},
+        children={"root": [child], "child": []},
+        page_contents={
+            "obj-root": "# 产品资料".encode(),
+            "obj-child": "# 部署手册\n\n部署步骤如下。".encode(),
+        },
+    )
+
+    result = await FeishuScanService(repository=repository, client=fake).scan(
+        source_id="source-1",
+        mode="full",
+    )
+
+    rows = (
+        await session.execute(
+            select(FeishuSourceItem, FeishuMaterialVersion)
+            .join(FeishuMaterialVersion, FeishuMaterialVersion.item_id == FeishuSourceItem.item_id)
+            .order_by(FeishuSourceItem.path_text)
+        )
+    ).all()
+    directory_item, directory_version = rows[0]
+    child_item, child_version = rows[1]
+    assert result.status == "succeeded"
+    assert result.unsupported_count == 0
+    assert directory_item.item_type == "directory"
+    assert directory_version.processing_status == "skipped"
+    assert directory_version.review_status == "not_required"
+    assert directory_version.processing_params["skip_reason"] == "directory"
+    assert directory_version.processing_params["content_quality"]["classification"] == "directory"
+    assert child_item.item_type == "page"
+    assert child_version.processing_status == "discovered"
+
+
+async def test_title_only_leaf_page_remains_reviewable_page(repository, session):
+    root = node("root", "销售FAQ")
+    fake = FakeFeishuClient(
+        nodes={"root": root},
+        children={"root": []},
+        page_contents={"obj-root": "# 销售FAQ".encode()},
+    )
+
+    await FeishuScanService(repository=repository, client=fake).scan(source_id="source-1", mode="full")
+
+    item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_key.endswith(":root")))
+    version = await session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.item_id == item.item_id)
+    )
+    assert item.item_type == "page"
+    assert version.processing_status == "discovered"
+    assert version.review_status == "pending"
+
+
+async def test_page_with_children_and_body_remains_reviewable_page(repository, session):
+    root = node("root", "产品资料", has_child=True)
+    child = node("child", "部署手册", parent="root")
+    fake = FakeFeishuClient(
+        nodes={item.node_token: item for item in (root, child)},
+        children={"root": [child], "child": []},
+        page_contents={
+            "obj-root": "# 产品资料\n\n这里是产品资料说明。".encode(),
+            "obj-child": "部署步骤如下。".encode(),
+        },
+    )
+
+    await FeishuScanService(repository=repository, client=fake).scan(source_id="source-1", mode="full")
+
+    root_item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_key.endswith(":root")))
+    root_version = await session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.item_id == root_item.item_id)
+    )
+    assert root_item.item_type == "page"
+    assert root_version.processing_status == "discovered"
 
 
 async def test_incremental_scan_requires_a_successful_full_run(repository, session):
@@ -297,7 +379,7 @@ async def test_unknown_wiki_node_is_unsupported_but_its_children_are_scanned(rep
     fake = FakeFeishuClient(
         nodes={item.node_token: item for item in (root, sheet, child)},
         children={"root": [sheet], "sheet": [child], "child": []},
-        page_contents={"obj-root": b"root", "obj-child": b"child"},
+        page_contents={"obj-root": b"Root body", "obj-child": b"Child body"},
     )
 
     result = await FeishuScanService(repository=repository, client=fake).scan(

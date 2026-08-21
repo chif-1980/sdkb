@@ -16,6 +16,7 @@ from yuxi.product_chat.repository import ProductChatNotFoundError, ProductChatRe
 from yuxi.product_chat.source_policy_service import ProductKnowledgeScope
 from yuxi.storage.postgres.models_business import Base, Department, User
 from yuxi.storage.postgres.models_knowledge import (
+    FeishuCrossDocumentRelation,
     FeishuMaterialVersion,
     FeishuSource,
     FeishuSourceItem,
@@ -521,7 +522,18 @@ async def test_repository_revalidates_only_active_formal_material_versions(db_se
     current = _add_material(db_session, item_id="current", file_id="file-current")
     _add_material(db_session, item_id="inactive", file_id="file-inactive", active=False)
     _add_material(db_session, item_id="invalid", file_id="file-invalid", validity="invalid")
-    _add_material(db_session, item_id="draft", file_id="file-draft", processing_status="parsed")
+    draft = _add_material(db_session, item_id="draft", file_id="file-draft", processing_status="parsed")
+    conflicted = _add_material(db_session, item_id="conflicted", file_id="file-conflicted")
+    db_session.add(
+        FeishuCrossDocumentRelation(
+            relation_id="relation-open-conflict",
+            comparison_key="version-conflicted:version-draft",
+            source_version_id=conflicted[1].version_id,
+            target_version_id=draft[1].version_id,
+            relation_type="CONFLICT",
+            status="open",
+        )
+    )
     _add_material(db_session, item_id="pending", file_id="file-pending", review_status="pending")
     _add_material(db_session, item_id="unpublished", file_id="file-unpublished", published_at=None)
     _add_material(db_session, item_id="other-source", file_id="file-other", source_id="source-2")
@@ -535,6 +547,7 @@ async def test_repository_revalidates_only_active_formal_material_versions(db_se
             "file-inactive",
             "file-invalid",
             "file-draft",
+            "file-conflicted",
             "file-pending",
             "file-unpublished",
             "file-other",
@@ -635,24 +648,29 @@ async def test_answer_service_owns_short_read_transactions_and_preserves_caller_
             return True
 
         async def aquery(self, question, kb_id, **kwargs):
-            assert_read_transactions_released(1)
+            assert_read_transactions_released(2)
             return [{"content": "支持私有部署。", "metadata": {"file_id": "file-1", "chunk_index": 0}}]
 
         async def get_database_info(self, kb_id):
-            assert_read_transactions_released(2)
+            assert_read_transactions_released(3)
             return {"llm_model_spec": "provider:model-1"}
 
     class Model:
         model_name = "model-1"
 
         async def call(self, prompt, stream=False):
-            assert_read_transactions_released(2)
-            return SimpleNamespace(
-                content=json.dumps(
-                    {"status": "SUPPORTED", "answer": "支持私有部署。", "citation_ids": ["E1"]},
-                    ensure_ascii=False,
+            assert stream is True
+            assert_read_transactions_released(3)
+
+            async def chunks():
+                yield SimpleNamespace(
+                    content=json.dumps(
+                        {"status": "SUPPORTED", "answer": "支持私有部署。", "citation_ids": ["E1"]},
+                        ensure_ascii=False,
+                    )
                 )
-            )
+
+            return chunks()
 
     monkeypatch.setenv("PRODUCT_FEISHU_SOURCE_ID", "source-1")
     caller_session = factory()
@@ -719,12 +737,16 @@ async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("model unavailable")
-            return SimpleNamespace(
-                content=json.dumps(
-                    {"status": "SUPPORTED", "answer": "支持私有部署。", "citation_ids": ["E1"]},
-                    ensure_ascii=False,
+
+            async def chunks():
+                yield SimpleNamespace(
+                    content=json.dumps(
+                        {"status": "SUPPORTED", "answer": "支持私有部署。", "citation_ids": ["E1"]},
+                        ensure_ascii=False,
+                    )
                 )
-            )
+
+            return chunks()
 
     model = FlakyModel()
     answer_service = AnswerService(

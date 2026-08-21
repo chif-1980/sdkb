@@ -6,11 +6,15 @@ from types import SimpleNamespace
 import pytest
 
 from yuxi.product_chat.answer_service import (
+    DETAILED_PROMPT_VERSION,
+    DETAILED_SYSTEM_PROMPT,
     INSUFFICIENT_TEXT,
     NO_MODEL_VERSION,
     PROMPT_VERSION,
     SYSTEM_PROMPT,
+    AnswerDelta,
     AnswerService,
+    GroundedAnswer,
 )
 from yuxi.product_chat.source_policy_service import ProductKnowledgeScope
 
@@ -52,11 +56,17 @@ class _PolicyService:
 
 
 class _KnowledgeManager:
-    def __init__(self, chunks, *, error=None):
+    def __init__(self, chunks, *, error=None, file_contents=None, open_windows=None, find_results=None):
         self.chunks = chunks
         self.error = error
+        self.file_contents = file_contents or {}
+        self.open_windows = open_windows or {}
+        self.find_results = find_results or {}
         self.query_calls = []
         self.info_calls = []
+        self.content_calls = []
+        self.open_calls = []
+        self.find_calls = []
 
     async def aquery(self, question, kb_id, **kwargs):
         self.query_calls.append((question, kb_id, kwargs))
@@ -68,28 +78,55 @@ class _KnowledgeManager:
         self.info_calls.append(kb_id)
         return {"llm_model_spec": "provider:model-1"}
 
+    async def get_file_content(self, kb_id, file_id):
+        self.content_calls.append((kb_id, file_id))
+        return self.file_contents.get(file_id, {"lines": []})
+
+    async def open_file_content(self, kb_id, file_id, *, offset, limit):
+        self.open_calls.append((kb_id, file_id, offset, limit))
+        return self.open_windows.get(file_id, {"content": "", "start_line": 0, "end_line": 0})
+
+    async def find_file_content(self, kb_id, file_id, patterns, **kwargs):
+        self.find_calls.append((kb_id, file_id, tuple(patterns), kwargs))
+        return self.find_results.get(file_id, {"windows": []})
+
 
 class _Repository:
-    def __init__(self, published):
+    def __init__(self, published, *, history=()):
         self.published = published
+        self.history = history
         self.calls = []
+        self.history_calls = []
 
     async def get_published_evidence(self, source_id, file_ids):
         self.calls.append((source_id, tuple(file_ids)))
         return self.published
 
+    async def list_recent_messages(self, conversation_id, owner_user_id, *, limit):
+        self.history_calls.append((conversation_id, owner_user_id, limit))
+        return self.history
+
 
 class _Model:
-    def __init__(self, content=None, *, error=None):
+    def __init__(self, content=None, *, error=None, stream_chunks=None):
         self.content = content
         self.error = error
+        self.stream_chunks = stream_chunks if stream_chunks is not None else [content]
         self.model_name = "model-1"
+        self.model = object()
         self.calls = []
 
     async def call(self, message, stream=None):
         self.calls.append((message, stream))
         if self.error is not None:
             raise self.error
+        if stream:
+
+            async def chunks():
+                for content in self.stream_chunks:
+                    yield SimpleNamespace(content=content)
+
+            return chunks()
         return SimpleNamespace(content=self.content)
 
 
@@ -103,11 +140,30 @@ class _ModelSelector:
         return self.model
 
 
-def _service(*, chunks, published, model_content=None, retrieval_error=None, model_error=None):
+def _service(
+    *,
+    chunks,
+    published,
+    model_content=None,
+    retrieval_error=None,
+    model_error=None,
+    stream_chunks=None,
+    history=(),
+    file_contents=None,
+    open_windows=None,
+    find_results=None,
+    agent_factory=None,
+):
     policy = _PolicyService()
-    knowledge = _KnowledgeManager(chunks, error=retrieval_error)
-    repository = _Repository(published)
-    model = _Model(model_content, error=model_error)
+    knowledge = _KnowledgeManager(
+        chunks,
+        error=retrieval_error,
+        file_contents=file_contents,
+        open_windows=open_windows,
+        find_results=find_results,
+    )
+    repository = _Repository(published, history=history)
+    model = _Model(model_content, error=model_error, stream_chunks=stream_chunks)
     selector = _ModelSelector(model)
     service = AnswerService(
         db=object(),
@@ -115,6 +171,7 @@ def _service(*, chunks, published, model_content=None, retrieval_error=None, mod
         policy_service=policy,
         knowledge_base=knowledge,
         model_selector=selector,
+        agent_factory=agent_factory,
     )
     return service, policy, knowledge, repository, model, selector
 
@@ -166,10 +223,14 @@ async def test_supported_answer_uses_only_revalidated_evidence_in_retrieval_orde
                 "search_mode": "hybrid",
                 "allowed_file_ids": ["file-1", "file-2"],
                 "use_graph_retrieval": False,
+                "final_top_k": 12,
+                "recall_top_k": 40,
             },
         )
     ]
     assert repository.calls == [("source-1", ("file-1", "file-stale"))]
+    assert repository.history_calls == [("conversation-1", 7, 6)]
+    assert knowledge.content_calls == [("kb-1", "file-1")]
     assert knowledge.info_calls == ["kb-1"]
     assert selector.calls == ["provider:model-1"]
     assert len(model.calls) == 1
@@ -191,12 +252,177 @@ async def test_supported_answer_uses_only_revalidated_evidence_in_retrieval_orde
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": f"EVIDENCE:\n{expected_evidence}\n\nQUESTION:\n是否支持私有部署？",
+                    "content": (
+                        f"CONVERSATION_HISTORY:\n[]\n\nEVIDENCE:\n{expected_evidence}\n\nQUESTION:\n是否支持私有部署？"
+                    ),
                 },
             ],
-            False,
+            True,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_answer_events_streams_markdown_before_the_validated_result():
+    stream_chunks = [
+        (
+            '{"status":"SUPPORTED","citation_ids":["E1"],'
+            '"answer":"## \u7ed3\u8bba\\n\u652f\u6301\u79c1\u6709\u5316\u90e8\u7f72\u3002[E'
+        ),
+        "1]\\n\u53ef\u7528\u4e8e\u4f01\u4e1a\u73af\u5883\u3002\\uD83D",
+        '\\uDE80"}',
+    ]
+    payload = "".join(stream_chunks)
+    service, *_ = _service(
+        chunks=[{"content": "支持私有化部署。", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": _published_material("file-1")},
+        model_content=payload,
+        stream_chunks=stream_chunks,
+    )
+
+    events = [event async for event in service.answer_events("是否支持私有部署？", {"id": 7}, "conversation-1")]
+
+    deltas = [event.content for event in events if isinstance(event, AnswerDelta)]
+    result = next(event for event in events if isinstance(event, GroundedAnswer))
+    assert deltas
+    assert "".join(deltas) == result.content
+    assert result.content == "## 结论\n支持私有化部署。[1]\n可用于企业环境。🚀"
+    assert events.index(next(event for event in events if isinstance(event, AnswerDelta))) < events.index(result)
+
+
+@pytest.mark.asyncio
+async def test_detailed_mode_uses_controlled_multi_step_tools_and_streams_the_grounded_answer():
+    class InvestigatingGraph:
+        def __init__(self, tools):
+            self.tools = {item.name: item for item in tools}
+            self.config = None
+
+        async def astream(self, input_value, *, config, stream_mode):
+            self.config = config
+            assert stream_mode == "updates"
+            assert "QUESTION:\n标准版如何部署？" in input_value["messages"][0]["content"]
+            yield {
+                "model": {
+                    "messages": [SimpleNamespace(tool_calls=[{"name": "search_enterprise_knowledge"}])]
+                }
+            }
+            await self.tools["search_enterprise_knowledge"].ainvoke({"query": "标准版 部署 条件"})
+            yield {
+                "model": {
+                    "messages": [SimpleNamespace(tool_calls=[{"name": "open_enterprise_source"}])]
+                }
+            }
+            await self.tools["open_enterprise_source"].ainvoke(
+                {"file_id": "file-1", "offset": 0, "window_size": 80}
+            )
+            yield {
+                "model": {
+                    "messages": [SimpleNamespace(tool_calls=[{"name": "open_enterprise_source"}])]
+                }
+            }
+            denied = await self.tools["open_enterprise_source"].ainvoke(
+                {"file_id": "file-stale", "offset": 0, "window_size": 80}
+            )
+            assert "不可访问" in denied
+
+    created_graphs = []
+
+    def agent_factory(**kwargs):
+        assert kwargs["system_prompt"]
+        assert [item.name for item in kwargs["tools"]] == [
+            "search_enterprise_knowledge",
+            "open_enterprise_source",
+            "find_in_enterprise_source",
+        ]
+        graph = InvestigatingGraph(kwargs["tools"])
+        created_graphs.append(graph)
+        return graph
+
+    payload = json.dumps(
+        {
+            "status": "SUPPORTED",
+            "citation_ids": ["E1", "E2"],
+            "answer": "## 部署结论\n\n支持私有化部署。[E1]\n\n部署前需要完成环境检查。[E2]",
+        },
+        ensure_ascii=False,
+    )
+    service, policy, knowledge, repository, model, _selector = _service(
+        chunks=[
+            {"content": "支持私有化部署。", "metadata": {"file_id": "file-1", "chunk_index": 0}},
+            {"content": "未发布内容", "metadata": {"file_id": "file-stale", "chunk_index": 0}},
+        ],
+        published={"file-1": _published_material("file-1")},
+        model_content=payload,
+        agent_factory=agent_factory,
+        open_windows={
+            "file-1": {
+                "content": "1 | 部署前需要完成环境检查。",
+                "start_line": 1,
+                "end_line": 1,
+            }
+        },
+    )
+
+    events = [
+        event
+        async for event in service.answer_events(
+            "标准版如何部署？",
+            {"id": 7},
+            "conversation-1",
+            mode="DETAILED",
+        )
+    ]
+
+    result = next(event for event in events if isinstance(event, GroundedAnswer))
+    progress_messages = [event.message for event in events if hasattr(event, "stage")]
+    assert result.status == "SUPPORTED"
+    assert result.prompt_version == DETAILED_PROMPT_VERSION
+    assert [item.yuxi_file_id for item in result.citations] == ["file-1", "file-1"]
+    assert all(item.yuxi_file_id != "file-stale" for item in result.citations)
+    assert "正在展开候选文档的相关上下文" in progress_messages
+    assert created_graphs[0].config == {"recursion_limit": 16}
+    assert len(knowledge.query_calls) == 1
+    assert knowledge.query_calls[0][2]["allowed_file_ids"] == ["file-1", "file-2"]
+    assert knowledge.open_calls == [("kb-1", "file-1", 0, 80)]
+    assert repository.calls[0] == ("source-1", ("file-1", "file-stale"))
+    assert len(policy.calls) >= 6
+    assert model.calls[0][0][0] == {"role": "system", "content": DETAILED_SYSTEM_PROMPT}
+    assert "未发布内容" not in model.calls[0][0][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_detailed_mode_stops_knowledge_tools_at_the_call_limit():
+    class RepeatingGraph:
+        def __init__(self, search_tool):
+            self.search_tool = search_tool
+
+        async def astream(self, _input_value, *, config, stream_mode):
+            for index in range(8):
+                yield {
+                    "model": {
+                        "messages": [SimpleNamespace(tool_calls=[{"name": "search_enterprise_knowledge"}])]
+                    }
+                }
+                await self.search_tool.ainvoke({"query": f"检索角度 {index}"})
+
+    def agent_factory(**kwargs):
+        return RepeatingGraph(kwargs["tools"][0])
+
+    payload = json.dumps(
+        {"status": "SUPPORTED", "citation_ids": ["E1"], "answer": "支持私有化部署。[E1]"},
+        ensure_ascii=False,
+    )
+    service, _policy, knowledge, *_ = _service(
+        chunks=[{"content": "支持私有化部署。", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": _published_material("file-1")},
+        model_content=payload,
+        agent_factory=agent_factory,
+    )
+
+    result = await service.answer("是否支持私有部署？", {"id": 7}, "conversation-1", mode="DETAILED")
+
+    assert result.status == "SUPPORTED"
+    assert len(knowledge.query_calls) == 6
 
 
 @pytest.mark.asyncio
@@ -357,6 +583,71 @@ async def test_multiple_chunks_from_one_unambiguous_file_remain_usable():
     assert [citation.evidence_id for citation in result.citations] == ["E1", "E2"]
     assert [citation.yuxi_file_id for citation in result.citations] == ["file-1", "file-1"]
     assert [citation.locator for citation in result.citations] == ["第1段", "第2段"]
+
+
+@pytest.mark.asyncio
+async def test_follow_up_query_uses_recent_questions_and_expands_adjacent_source_chunks():
+    history = [
+        SimpleNamespace(role="USER", content="企业版支持什么部署方式？"),
+        SimpleNamespace(role="ASSISTANT", content="支持私有化部署。"),
+    ]
+    payload = json.dumps(
+        {
+            "status": "SUPPORTED",
+            "answer": "部署前需要完成环境检查。[E2]\n\n核心结论仍是支持私有化部署。[E1]",
+            "citation_ids": ["E2", "E1"],
+        },
+        ensure_ascii=False,
+    )
+    service, _policy, knowledge, repository, _model, _selector = _service(
+        chunks=[{"content": "支持私有化部署。", "metadata": {"file_id": "file-1", "chunk_index": 1}}],
+        published={"file-1": _published_material("file-1")},
+        model_content=payload,
+        history=history,
+        file_contents={
+            "file-1": {
+                "lines": [
+                    {"chunk_order_index": 0, "content": "部署前需要完成环境检查。"},
+                    {"chunk_order_index": 1, "content": "支持私有化部署。"},
+                    {"chunk_order_index": 2, "content": "部署后需要进行健康检查。"},
+                ]
+            }
+        },
+    )
+
+    result = await service.answer("那部署前要准备什么？", {"id": 7}, "conversation-1")
+
+    assert knowledge.query_calls[0][0] == ("前文问题：\n企业版支持什么部署方式？\n\n当前问题：\n那部署前要准备什么？")
+    assert repository.history_calls == [("conversation-1", 7, 6)]
+    assert result.content == "部署前需要完成环境检查。[1]\n\n核心结论仍是支持私有化部署。[2]"
+    assert [citation.locator for citation in result.citations] == ["第1段", "第2段"]
+    prompt = _model.calls[0][0][1]["content"]
+    assert '"role": "USER", "content": "企业版支持什么部署方式？"' in prompt
+    assert '"evidence_id": "E3"' in prompt
+
+
+@pytest.mark.asyncio
+async def test_exact_duplicate_chunks_are_sent_to_the_model_once():
+    payload = json.dumps(
+        {"status": "SUPPORTED", "answer": "支持私有化部署。[E1]", "citation_ids": ["E1"]},
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=[
+            {"content": "支持私有化部署。", "metadata": {"file_id": "file-1", "chunk_index": 0}},
+            {"content": "支持私有化部署。", "metadata": {"file_id": "file-2", "chunk_index": 3}},
+        ],
+        published={
+            "file-1": _published_material("file-1", item_id="item-1"),
+            "file-2": _published_material("file-2", item_id="item-2"),
+        },
+        model_content=payload,
+    )
+
+    result = await service.answer("是否支持私有化部署？", object(), "conversation-1")
+
+    assert len(result.citations) == 1
+    assert result.citations[0].item_id == "item-1"
 
 
 @pytest.mark.asyncio

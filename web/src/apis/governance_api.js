@@ -44,6 +44,12 @@ export const governanceApi = {
   listRelations: (sourceId, params = {}) =>
     apiAdminGet(withQuery(`${BASE_URL}/relations`, { source_id: sourceId, ...params })),
 
+  getComparisonStatus: (sourceId) =>
+    apiAdminGet(withQuery(`${BASE_URL}/comparisons/status`, { source_id: sourceId })),
+
+  backfillComparisons: (sourceId) =>
+    apiAdminPost(`${BASE_URL}/comparisons/backfill`, { source_id: sourceId }),
+
   listFormalKnowledge: (sourceId) =>
     apiAdminGet(withQuery(`${BASE_URL}/knowledge`, { source_id: sourceId })),
 

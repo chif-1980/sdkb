@@ -26,6 +26,7 @@ from yuxi.integrations.feishu import (
 from yuxi.integrations.feishu.schemas import FeishuNode
 from yuxi.integrations.feishu.service import FeishuScanService
 from yuxi.governance.comparator import CrossDocumentComparisonService
+from yuxi.governance.content_quality import assess_content
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.feishu_knowledge_repository import (
     FeishuKnowledgeRepository as _BaseRepository,
@@ -336,6 +337,11 @@ class FeishuReviewService:
             version, item, _ = await self._get_material(version_id, lock=True)
             if version.review_status != "pending" or version.processing_status not in self.APPROVABLE_STATUSES:
                 raise ValueError("Only pending parsed material can be approved")
+            quality = (version.processing_params or {}).get("content_quality") or {}
+            if not quality.get("checked"):
+                raise ValueError("正文检查尚未完成，不能发布")
+            if not quality.get("has_body"):
+                raise ValueError("资料只有标题、没有可审核正文，不能发布")
             if await CrossDocumentComparisonService(self.session).has_open_conflict(version.version_id):
                 raise ValueError("Material has unresolved cross-document conflicts")
             from_status = version.processing_status
@@ -443,8 +449,17 @@ class FeishuReviewService:
                 from_status="processing",
                 to_status="awaiting_review",
             )
+            processing_params = dict(version.processing_params or {})
+            processing_params["comparison"] = {
+                **(processing_params.get("comparison") or {}),
+                "status": "queued",
+                "candidate_count": 0,
+                "relation_count": 0,
+                "queued_at": utc_now().isoformat(),
+                "error": None,
+            }
+            version.processing_params = processing_params
             await self.session.flush()
-            await CrossDocumentComparisonService(self.session).compare_version(version.version_id)
             return version
 
     async def remember_processing_file(self, version_id: str, *, file_id: str) -> FeishuMaterialVersion:
@@ -932,6 +947,8 @@ def _run_dict(run: FeishuSyncRun) -> dict:
 
 
 def _material_dict(version: FeishuMaterialVersion, item: FeishuSourceItem, source: FeishuSource) -> dict:
+    content_quality = (version.processing_params or {}).get("content_quality") or {}
+    is_directory = item.item_type == "directory" or content_quality.get("classification") == "directory"
     return {
         "version_id": version.version_id,
         "item_id": item.item_id,
@@ -961,6 +978,12 @@ def _material_dict(version: FeishuMaterialVersion, item: FeishuSourceItem, sourc
         "yuxi_file_id": version.yuxi_file_id,
         "chunk_count": version.chunk_count or 0,
         "token_count": version.token_count or 0,
+        "content_quality": content_quality,
+        "is_directory": is_directory,
+        "content_missing": bool(
+            not is_directory and content_quality.get("checked") and not content_quality.get("has_body")
+        ),
+        "content_check_pending": bool(not is_directory and not content_quality.get("checked")),
         "published_at": _iso(version.published_at),
         "replaced_at": _iso(version.replaced_at),
         "created_at": _iso(version.created_at),
@@ -1682,6 +1705,30 @@ async def _run_processing_worker(
         parsed = await knowledge_base.parse_file(kb_id, existing_file_id, operator_id=operator_id)
         if parsed.get("status") != "parsed":
             raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
+        try:
+            content_info = await knowledge_base.get_file_content(kb_id, existing_file_id)
+            quality = assess_content(
+                content=content_info.get("content") if isinstance(content_info, dict) else None,
+                title=item.title,
+            )
+        except Exception as exc:
+            quality = {
+                "checked": False,
+                "has_body": False,
+                "body_length": 0,
+                "reason": f"无法读取解析正文：{exc}",
+            }
+        async with pg_manager.get_async_session_context() as quality_session:
+            quality_version = await quality_session.scalar(
+                select(FeishuMaterialVersion)
+                .where(FeishuMaterialVersion.version_id == version_id)
+                .with_for_update()
+            )
+            if quality_version is not None:
+                quality_params = dict(quality_version.processing_params or {})
+                quality_params["content_quality"] = quality
+                quality_version.processing_params = quality_params
+                await quality_session.flush()
     except asyncio.CancelledError as exc:
         try:
             async with pg_manager.get_async_session_context() as session:
@@ -1733,7 +1780,146 @@ async def _run_processing_worker(
                 recovery_exc=recovery_exc,
             )
         raise
+    try:
+        await _enqueue_comparison(material.version_id, operator_id=operator_id)
+    except Exception as exc:
+        # 解析结果仍然可供人工审核，比较失败只记录状态，不回滚解析结果。
+        async with pg_manager.get_async_session_context() as session:
+            await _update_comparison_state(session, material.version_id, "failed", error=str(exc))
     return {"version_id": material.version_id, "status": material.processing_status, "file_id": existing_file_id}
+
+
+async def _update_comparison_state(
+    session: AsyncSession,
+    version_id: str,
+    status: str,
+    *,
+    relation_count: int | None = None,
+    candidate_count: int | None = None,
+    error: str | None = None,
+) -> None:
+    version = await session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == version_id).with_for_update()
+    )
+    if version is None:
+        raise LookupError(f"Material version not found: {version_id}")
+    params = dict(version.processing_params or {})
+    comparison = dict(params.get("comparison") or {})
+    comparison["status"] = status
+    if relation_count is not None:
+        comparison["relation_count"] = relation_count
+    if candidate_count is not None:
+        comparison["candidate_count"] = candidate_count
+    if error is not None:
+        comparison["error"] = error
+    elif status != "failed":
+        comparison["error"] = None
+    comparison["updated_at"] = utc_now().isoformat()
+    params["comparison"] = comparison
+    version.processing_params = params
+    await session.flush()
+
+
+async def _run_comparison_worker(
+    version_id: str,
+    *,
+    context: TaskContext | None = None,
+) -> dict:
+    async with pg_manager.get_async_session_context() as session:
+        await _update_comparison_state(session, version_id, "running")
+    try:
+        if context is not None:
+            await context.raise_if_cancelled()
+        async with pg_manager.get_async_session_context() as session:
+            relations = await CrossDocumentComparisonService(session).compare_version(version_id)
+            relation_count = len(relations)
+        async with pg_manager.get_async_session_context() as session:
+            await _update_comparison_state(session, version_id, "completed", relation_count=relation_count)
+        return {"version_id": version_id, "status": "completed", "relation_count": relation_count}
+    except asyncio.CancelledError:
+        async with pg_manager.get_async_session_context() as session:
+            await _update_comparison_state(session, version_id, "queued", error="任务已取消")
+        raise
+    except Exception as exc:
+        async with pg_manager.get_async_session_context() as session:
+            await _update_comparison_state(session, version_id, "failed", error=str(exc))
+        raise
+
+
+async def _enqueue_comparison(version_id: str, *, operator_id: str | None = None):
+    async def run_comparison(context: TaskContext):
+        result = await _run_comparison_worker(version_id, context=context)
+        await context.set_result(result)
+        return result
+
+    task, _ = await tasker.enqueue_unique_by_payload(
+        name=f"Compare Feishu material ({version_id})",
+        task_type="feishu_compare",
+        payload={"version_id": version_id, "operator_id": operator_id},
+        payload_match={"version_id": version_id},
+        statuses={"pending", "running"},
+        coroutine=run_comparison,
+    )
+    return task
+
+
+async def _run_comparison_backfill_worker(
+    source_id: str,
+    *,
+    context: TaskContext,
+) -> dict:
+    async with pg_manager.get_async_session_context() as session:
+        statement = (
+            select(FeishuMaterialVersion.version_id)
+            .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+            .where(
+                FeishuSourceItem.source_id == source_id,
+                FeishuMaterialVersion.processing_status.in_(CrossDocumentComparisonService.CANDIDATE_STATUSES),
+            )
+            .order_by(FeishuMaterialVersion.created_at.asc())
+        )
+        version_ids = list(await session.scalars(statement))
+    total = len(version_ids)
+    compared = 0
+    relations = 0
+    for version_id in version_ids:
+        await context.raise_if_cancelled()
+        async with pg_manager.get_async_session_context() as session:
+            await _update_comparison_state(session, version_id, "running")
+            try:
+                found = await CrossDocumentComparisonService(session).compare_version(version_id)
+                found_count = len(found)
+                await _update_comparison_state(session, version_id, "completed", relation_count=found_count)
+            except asyncio.CancelledError:
+                await _update_comparison_state(session, version_id, "queued", error="任务已取消")
+                raise
+            except Exception as exc:
+                await _update_comparison_state(session, version_id, "failed", error=str(exc))
+                found_count = 0
+        compared += 1
+        relations += found_count
+        await context.set_progress(
+            (compared / total * 100) if total else 100,
+            f"跨文档检查 {compared}/{total}，发现 {relations} 条关系",
+        )
+    return {"source_id": source_id, "total": total, "compared": compared, "relations": relations}
+
+
+async def _enqueue_comparison_backfill(source_id: str, *, operator_id: str):
+    async def run_backfill(context: TaskContext):
+        result = await _run_comparison_backfill_worker(source_id, context=context)
+        await context.set_result(result)
+        return result
+
+    task, created = await tasker.enqueue_unique_by_payload(
+        name=f"Backfill Feishu comparisons ({source_id})",
+        task_type="feishu_compare_backfill",
+        payload={"source_id": source_id, "operator_id": operator_id},
+        payload_match={"source_id": source_id},
+        statuses={"pending", "running"},
+        coroutine=run_backfill,
+    )
+    return task, created
 
 
 async def _enqueue_publish(version_id: str, *, operator_id: str):

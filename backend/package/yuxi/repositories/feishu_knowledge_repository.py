@@ -5,11 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_knowledge import (
+    FeishuCrossDocumentRelation,
     FeishuMaterialVersion,
     FeishuProcessingEvent,
     FeishuSource,
@@ -393,6 +394,14 @@ class FeishuKnowledgeRepository:
                 FeishuMaterialVersion.review_status == "approved",
                 FeishuMaterialVersion.published_at.is_not(None),
                 FeishuMaterialVersion.yuxi_file_id.is_not(None),
+                ~exists().where(
+                    FeishuCrossDocumentRelation.status == "open",
+                    FeishuCrossDocumentRelation.relation_type == "CONFLICT",
+                    or_(
+                        FeishuCrossDocumentRelation.source_version_id == FeishuMaterialVersion.version_id,
+                        FeishuCrossDocumentRelation.target_version_id == FeishuMaterialVersion.version_id,
+                    ),
+                ),
             )
             .distinct()
             .order_by(FeishuMaterialVersion.yuxi_file_id)

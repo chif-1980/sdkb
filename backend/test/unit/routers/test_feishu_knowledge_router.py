@@ -81,6 +81,7 @@ async def review_fixture():
             content_hash="new-hash",
             processing_status="parsed",
             review_status="pending",
+            processing_params={"content_quality": {"checked": True, "has_body": True, "body_length": 32}},
         )
         session.add_all([source, item, old, current])
         await session.commit()
@@ -139,7 +140,7 @@ class _FailingAfterArchiveFeishuClient:
 
     async def get_wiki_document(self, node):
         assert node.node_token == "root"
-        return FeishuPageContent(content=b"# Root", revision="1")
+        return FeishuPageContent(content=b"# Root\n\nRoot body", revision="1")
 
     async def list_children(self, parent_node_token):
         assert parent_node_token == "root"
@@ -2405,6 +2406,10 @@ async def test_material_list_supports_item_type_filter_and_serializes_api_respon
                 "yuxi_file_id": None,
                 "chunk_count": 0,
                 "token_count": 0,
+                "content_quality": {},
+                "is_directory": False,
+                "content_missing": False,
+                "content_check_pending": True,
                 "published_at": None,
                 "replaced_at": None,
                 "created_at": attachment_version.created_at.isoformat(),

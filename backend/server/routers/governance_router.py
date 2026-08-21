@@ -1,11 +1,13 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.routers.feishu_knowledge_router import (
     FeishuReviewService,
+    _enqueue_comparison_backfill,
     _enqueue_publish,
 )
 from server.utils.auth_middleware import get_admin_user, get_db
@@ -13,12 +15,17 @@ from yuxi.governance.domain import ReviewAction, ReviewDecision
 from yuxi.governance.schemas import ReviewResolveRequest
 from yuxi.governance.service import GovernanceService
 from yuxi.storage.postgres.models_business import User
+from yuxi.storage.postgres.models_knowledge import FeishuSource
 
 governance = APIRouter(
     prefix="/governance",
     tags=["knowledge-governance"],
     dependencies=[Depends(get_admin_user)],
 )
+
+
+class ComparisonBackfillRequest(BaseModel):
+    source_id: str = Field(min_length=1, max_length=64)
 
 
 @governance.get("/reviewers")
@@ -73,6 +80,9 @@ async def resolve_review(
         review, version, item = await service.prepare_resolution(review_id, operator_id=current_user.uid)
         publish_task = None
         if payload.decision == ReviewDecision.PUBLISH:
+            block_reason = service.content_publish_block_reason(version)
+            if block_reason:
+                raise ValueError(block_reason)
             has_open_conflict = await service.has_open_conflict(version.version_id)
             if has_open_conflict and payload.action not in {
                 ReviewAction.UPDATE,
@@ -142,6 +152,28 @@ async def list_relations(
         status=status,
     )
     return {"items": items}
+
+
+@governance.get("/comparisons/status")
+async def get_comparison_status(
+    source_id: Annotated[str, Query(min_length=1)],
+    db: AsyncSession = Depends(get_db),
+):
+    if await db.scalar(select(FeishuSource.source_id).where(FeishuSource.source_id == source_id)) is None:
+        raise HTTPException(status_code=404, detail=f"Feishu source not found: {source_id}")
+    return await GovernanceService(db).get_comparison_status(source_id)
+
+
+@governance.post("/comparisons/backfill", status_code=202)
+async def backfill_comparisons(
+    payload: ComparisonBackfillRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    if await db.scalar(select(FeishuSource.source_id).where(FeishuSource.source_id == payload.source_id)) is None:
+        raise HTTPException(status_code=404, detail=f"Feishu source not found: {payload.source_id}")
+    task, created = await _enqueue_comparison_backfill(payload.source_id, operator_id=current_user.uid)
+    return {"task_id": task.id, "status": task.status, "created": created}
 
 
 @governance.get("/knowledge")

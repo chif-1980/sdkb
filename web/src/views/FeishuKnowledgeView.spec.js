@@ -68,6 +68,7 @@ function makeMaterial(versionId, overrides = {}) {
     source_validity: 'valid',
     active: false,
     yuxi_file_id: `file-${versionId}`,
+    content_quality: { checked: true, has_body: true, body_length: 24 },
     ...overrides
   }
 }
@@ -322,6 +323,11 @@ describe('FeishuMaterialTable', () => {
     ).toEqual({
       disabled: true
     })
+    expect(
+      rowSelection.getCheckboxProps({ version_id: 'version-directory', item_type: 'directory' })
+    ).toEqual({
+      disabled: true
+    })
     rowSelection.onChange(['version-page', 'version-extra'])
     await wrapper.vm.$nextTick()
     await wrapper
@@ -551,6 +557,17 @@ describe('FeishuMaterialDetailDrawer', () => {
 
     expect(wrapper.text()).toContain('尚未生成可预览内容')
   })
+
+  it('目录节点明确说明不进入知识库且无需生成正文', () => {
+    const wrapper = mountDetailDrawer({
+      material: { version_id: 'version-directory', title: '产品资料', is_directory: true },
+      content: { content: '', lines: [] }
+    })
+
+    expect(wrapper.text()).toContain('目录节点不进入知识库')
+    expect(wrapper.text()).toContain('目录节点仅用于组织下级内容，无需生成正文')
+    expect(wrapper.text()).toContain('目录节点不参与知识分块和检索')
+  })
 })
 
 describe('FeishuKnowledgeView', () => {
@@ -572,6 +589,51 @@ describe('FeishuKnowledgeView', () => {
   afterEach(() => {
     vi.useRealTimers()
     sessionStorage.clear()
+  })
+
+  it('首次进入知识加工页面时立即显示真实待审核数量', async () => {
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status')) {
+        return Promise.resolve({ authorized: true, status: 'active' })
+      }
+      if (url === '/api/governance/reviews?source_id=source-1') {
+        return Promise.resolve({ items: [{ review_id: 'review-1' }, { review_id: 'review-2' }] })
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({ nodes: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const reviewTab = wrapper.findAll('.governance-tab').find((tab) => tab.text().includes('待审核'))
+    expect(reviewTab.text()).toContain('2')
+    expect(apiAdminGet).toHaveBeenCalledWith('/api/governance/reviews?source_id=source-1')
+    wrapper.unmount()
+  })
+
+  it('首次进入页面时只把冲突和证据不足计入跨文档待处理数', async () => {
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: true, status: 'active' })
+      if (url === '/api/governance/comparisons/status?source_id=source-1') {
+        return Promise.resolve({ relation_count: 838, issue_count: 2 })
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      if (url === '/api/governance/reviews?source_id=source-1') return Promise.resolve({ items: [] })
+      return Promise.resolve({ nodes: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const relationTab = wrapper.findAll('.governance-tab').find((tab) => tab.text().includes('跨文档检查'))
+    expect(relationTab.text()).toContain('2')
+    expect(relationTab.text()).not.toContain('838')
+    wrapper.unmount()
   })
 
   it('重新进入页面时复用未过期的知识目录缓存', async () => {

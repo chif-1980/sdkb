@@ -24,6 +24,7 @@ class CreateConversationRequest(StrictRequest):
 
 class SendMessageRequest(StrictRequest):
     content: str = Field(min_length=1, max_length=20_000)
+    mode: Literal["CONCISE", "DETAILED"] = "CONCISE"
 
 
 class MessageFeedbackRequest(StrictRequest):

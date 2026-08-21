@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from yuxi.governance.comparator import CrossDocumentComparisonService
+from yuxi.governance.content_quality import assess_content
 from yuxi.governance.domain import (
     CrossDocumentRelationType,
     ProblemTag,
@@ -46,6 +47,61 @@ class GovernanceService:
     async def has_open_conflict(self, version_id: str) -> bool:
         return await CrossDocumentComparisonService(self.session).has_open_conflict(version_id)
 
+    @staticmethod
+    def content_publish_block_reason(version: FeishuMaterialVersion) -> str | None:
+        params = version.processing_params or {}
+        if params.get("skip_reason") == "directory":
+            return "目录节点仅用于组织下级内容，无需发布"
+        quality = params.get("content_quality") or {}
+        if not quality.get("checked"):
+            return "正文检查尚未完成，不能发布"
+        if not quality.get("has_body"):
+            return "资料只有标题、没有可审核正文，不能发布"
+        return None
+
+    async def ensure_content_quality(
+        self,
+        version: FeishuMaterialVersion,
+        *,
+        target_kb_id: str,
+        title: str | None = None,
+    ) -> dict:
+        """Backfill content quality for historical parsed materials on first review."""
+
+        params = dict(version.processing_params or {})
+        existing = params.get("content_quality")
+        if isinstance(existing, dict) and existing.get("checked"):
+            return existing
+
+        quality = None
+        if version.yuxi_file_id and target_kb_id:
+            try:
+                from yuxi.knowledge.runtime import knowledge_base
+
+                content_info = await knowledge_base.get_file_content(target_kb_id, version.yuxi_file_id)
+                quality = assess_content(
+                    content=content_info.get("content") if isinstance(content_info, dict) else None,
+                    title=title,
+                )
+            except Exception as exc:  # pragma: no cover - connector failures are handled conservatively
+                quality = {
+                    "checked": False,
+                    "has_body": False,
+                    "body_length": 0,
+                    "reason": f"无法读取解析正文：{exc}",
+                }
+        if quality is None:
+            quality = {
+                "checked": False,
+                "has_body": False,
+                "body_length": 0,
+                "reason": "没有可读取的解析正文",
+            }
+        params["content_quality"] = quality
+        version.processing_params = params
+        await self.session.flush()
+        return quality
+
     async def list_reviews(
         self,
         source_id: str,
@@ -70,6 +126,7 @@ class GovernanceService:
         rows = (await self.session.execute(statement)).all()
         reviews = []
         for version, item, source, review in rows:
+            await self.ensure_content_quality(version, target_kb_id=source.target_kb_id, title=item.title)
             relations = await self._relations_for_version(version.version_id)
             review_data = self._review_dict(version, item, source, review, relations)
             if problem_tag and problem_tag not in review_data["problem_tags"]:
@@ -79,6 +136,7 @@ class GovernanceService:
 
     async def get_review(self, review_id: str) -> dict:
         version, item, source, review = await self._get_review_row(review_id)
+        await self.ensure_content_quality(version, target_kb_id=source.target_kb_id, title=item.title)
         relations = await self._relations_for_version(version.version_id)
         return self._review_dict(version, item, source, review, relations)
 
@@ -116,6 +174,73 @@ class GovernanceService:
             self._relation_row_dict(relation, source_item_record, target_item_record)
             for relation, source_item_record, target_item_record in rows
         ]
+
+    async def get_comparison_status(self, source_id: str) -> dict:
+        rows = (
+            await self.session.execute(
+                select(FeishuMaterialVersion.processing_params)
+                .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+                .where(
+                    FeishuSourceItem.source_id == source_id,
+                    FeishuMaterialVersion.processing_status.in_(CrossDocumentComparisonService.CANDIDATE_STATUSES),
+                )
+            )
+        ).all()
+        counts = {"not_started": 0, "queued": 0, "running": 0, "completed": 0, "failed": 0}
+        for (processing_params,) in rows:
+            comparison = (processing_params or {}).get("comparison") or {}
+            status = comparison.get("status") or "not_started"
+            if status not in counts:
+                status = "not_started"
+            counts[status] += 1
+        source_version = aliased(FeishuMaterialVersion)
+        target_version = aliased(FeishuMaterialVersion)
+        source_item = aliased(FeishuSourceItem)
+        target_item = aliased(FeishuSourceItem)
+        relation_count_statement = (
+            select(func.count(FeishuCrossDocumentRelation.id))
+            .join(source_version, source_version.version_id == FeishuCrossDocumentRelation.source_version_id)
+            .join(source_item, source_item.item_id == source_version.item_id)
+            .join(target_version, target_version.version_id == FeishuCrossDocumentRelation.target_version_id)
+            .join(target_item, target_item.item_id == target_version.item_id)
+            .where(or_(source_item.source_id == source_id, target_item.source_id == source_id))
+        )
+        relation_count = await self.session.scalar(relation_count_statement)
+        issue_count = await self.session.scalar(
+            relation_count_statement.where(
+                FeishuCrossDocumentRelation.status == "open",
+                FeishuCrossDocumentRelation.relation_type.in_(
+                    {
+                        CrossDocumentRelationType.CONFLICT,
+                        CrossDocumentRelationType.INSUFFICIENT,
+                    }
+                ),
+            )
+        )
+        total = len(rows)
+        if counts["running"]:
+            status = "running"
+        elif counts["queued"]:
+            status = "queued"
+        elif counts["failed"] and counts["completed"] == 0:
+            status = "failed"
+        elif counts["not_started"]:
+            status = "not_started"
+        elif counts["failed"]:
+            status = "failed"
+        else:
+            status = "completed" if total else "not_started"
+        return {
+            "status": status,
+            "total": total,
+            "completed": counts["completed"],
+            "queued": counts["queued"],
+            "running": counts["running"],
+            "failed": counts["failed"],
+            "not_started": counts["not_started"],
+            "relation_count": int(relation_count or 0),
+            "issue_count": int(issue_count or 0),
+        }
 
     async def list_formal_knowledge(self, source_id: str) -> list[dict]:
         statement = (
@@ -371,12 +496,21 @@ class GovernanceService:
     ) -> dict:
         relation_types = {relation.relation_type for relation in relations if relation.status == "open"}
         derived_tags = {_relation_problem_tag(relation_type) for relation_type in relation_types}
-        problem_tags = sorted(
-            set(review.problem_tags if review else []) | {str(tag) for tag in derived_tags if tag is not None}
-        )
+        problem_tags = set(review.problem_tags if review else []) | {
+            str(tag) for tag in derived_tags if tag is not None
+        }
         risk_level = "HIGH" if CrossDocumentRelationType.CONFLICT in relation_types else "MEDIUM"
+        quality = (version.processing_params or {}).get("content_quality") or {}
+        is_directory = item.item_type == "directory" or quality.get("classification") == "directory"
+        content_missing = not is_directory and quality.get("checked") and not quality.get("has_body")
+        content_unchecked = not is_directory and not quality.get("checked")
+        if content_missing:
+            problem_tags.add(ProblemTag.CONTENT_MISSING)
+            risk_level = "HIGH"
+        elif content_unchecked:
+            risk_level = "HIGH"
         if not relation_types or relation_types == {CrossDocumentRelationType.EXACT_DUPLICATE}:
-            risk_level = "LOW"
+            risk_level = "HIGH" if content_missing or content_unchecked else "LOW"
         return {
             "review_id": review.review_id if review else version.version_id,
             "version_id": version.version_id,
@@ -391,11 +525,18 @@ class GovernanceService:
             "processing_status": version.processing_status,
             "review_status": version.review_status,
             "status": review.status if review else "pending",
+            "yuxi_file_id": version.yuxi_file_id,
+            "chunk_count": version.chunk_count or 0,
+            "token_count": version.token_count or 0,
+            "content_quality": quality,
+            "is_directory": is_directory,
+            "content_missing": bool(content_missing),
+            "content_check_pending": bool(content_unchecked),
             "assignee_id": review.assignee_id if review else None,
             "last_decision": review.decision if review else None,
             "last_action": review.action if review else None,
             "decision_comment": review.decision_comment if review else version.review_comment,
-            "problem_tags": problem_tags,
+            "problem_tags": sorted(str(tag) for tag in problem_tags),
             "applicability_scope": (
                 review.applicability_scope
                 if review
@@ -403,6 +544,9 @@ class GovernanceService:
             ),
             "relation_types": sorted(relation_types),
             "comparison_count": len(relations),
+            "comparison_status": (
+                ((version.processing_params or {}).get("comparison") or {}).get("status") or "not_started"
+            ),
             "risk_level": risk_level,
             "source_updated_at": _iso(item.source_updated_at),
             "created_at": _iso(version.created_at),
