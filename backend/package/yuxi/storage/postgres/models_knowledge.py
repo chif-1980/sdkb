@@ -467,6 +467,48 @@ class FeishuSourceSegment(Base):
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
 
 
+class FeishuKnowledgeUnit(Base):
+    """Versioned semantic review unit composed from one or more source segments."""
+
+    __tablename__ = "feishu_knowledge_units"
+    __table_args__ = (
+        UniqueConstraint("unit_id", name="uq_feishu_knowledge_units_unit_id"),
+        UniqueConstraint("version_id", "unit_key", name="uq_feishu_knowledge_units_version_key"),
+        Index("ix_feishu_knowledge_units_version_status", "version_id", "status"),
+        Index("ix_feishu_knowledge_units_item_lineage", "item_id", "lineage_key"),
+        Index("ix_feishu_knowledge_units_publication", "version_id", "publication_state"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    unit_id = Column(String(64), nullable=False, unique=True, index=True)
+    unit_key = Column(String(128), nullable=False)
+    lineage_key = Column(String(128), nullable=False, index=True)
+    version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    item_id = Column(
+        String(64), ForeignKey("feishu_source_items.item_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    unit_index = Column(Integer, nullable=False)
+    unit_type = Column(String(32), nullable=False, default="SECTION", index=True)
+    title = Column(String(512), nullable=False)
+    content = Column(Text, nullable=False)
+    content_hash = Column(String(128), nullable=False, index=True)
+    source_segment_ids = Column(JSON_VALUE, nullable=False, default=list)
+    locator_json = Column(JSON_VALUE, nullable=False, default=dict)
+    change_type = Column(String(24), nullable=False, default="NEW", index=True)
+    previous_unit_id = Column(String(64), index=True)
+    matched_logical_knowledge_id = Column(String(64), index=True)
+    recommended_outcome = Column(String(48), nullable=False)
+    recommendation_reason = Column(Text, nullable=False)
+    recommendation_confidence = Column(Float, nullable=False, default=0.0)
+    manual_review_required = Column(Boolean, nullable=False, default=False, index=True)
+    publication_state = Column(String(32), nullable=False, default="PENDING", index=True)
+    status = Column(String(32), nullable=False, default="ACTIVE", index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+
 class FeishuProcessingEvent(Base):
     """追加式素材加工审计事件。"""
 
