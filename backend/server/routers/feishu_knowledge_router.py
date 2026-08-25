@@ -27,6 +27,8 @@ from yuxi.integrations.feishu.schemas import FeishuNode
 from yuxi.integrations.feishu.service import FeishuScanService
 from yuxi.governance.comparator import CrossDocumentComparisonService
 from yuxi.governance.content_quality import assess_content
+from yuxi.governance.review_backfill import backfill_legacy_governance_reviews
+from yuxi.governance.source_segment_service import SourceSegmentService
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.feishu_knowledge_repository import (
     FeishuKnowledgeRepository as _BaseRepository,
@@ -51,6 +53,28 @@ feishu_knowledge = APIRouter(
     dependencies=[Depends(get_admin_user)],
 )
 GLOBAL_FEISHU_CREDENTIAL_MARKER = "GLOBAL_FEISHU_APP"
+
+
+def _parsed_content_loader(kb_id: str):
+    async def load(file_id: str) -> str | None:
+        result = await knowledge_base.get_file_content(kb_id, file_id)
+        if not isinstance(result, dict):
+            return None
+        content = result.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+        lines = result.get("lines") or []
+        if isinstance(lines, list):
+            parts = []
+            for line in lines:
+                if isinstance(line, str):
+                    parts.append(line)
+                elif isinstance(line, dict) and isinstance(line.get("content"), str):
+                    parts.append(line["content"])
+            return "\n".join(parts) or None
+        return None
+
+    return load
 
 
 class RemovalAdapter(Protocol):
@@ -251,6 +275,7 @@ class KnowledgePublishAdapter:
         operator_id: str,
         file_id: str | None = None,
         parse_before_index: bool = False,
+        prepared_chunks: list[dict] | None = None,
     ) -> PublishResult:
         params = self._params(
             object_path=object_path,
@@ -276,12 +301,22 @@ class KnowledgePublishAdapter:
             parsed = await knowledge_base.parse_file(kb_id, file_id, operator_id=operator_id)
             if parsed.get("status") != "parsed":
                 raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
-        indexed = await knowledge_base.index_file(
-            kb_id,
-            file_id,
-            operator_id=operator_id,
-            params=params,
-        )
+        index_kwargs = {"operator_id": operator_id, "params": params}
+        if prepared_chunks is not None:
+            rebound_chunks = []
+            for index, chunk in enumerate(prepared_chunks):
+                chunk_id = f"{file_id}_chunk_{index}"
+                rebound_chunks.append(
+                    {
+                        **chunk,
+                        "id": chunk_id,
+                        "chunk_id": chunk_id,
+                        "file_id": file_id,
+                        "chunk_index": index,
+                    }
+                )
+            index_kwargs["prepared_chunks"] = rebound_chunks
+        indexed = await knowledge_base.index_file(kb_id, file_id, **index_kwargs)
         if indexed.get("status") not in {"indexed", "success"}:
             raise RuntimeError(f"Feishu material indexing did not complete: {indexed.get('status')}")
         return PublishResult(file_id=file_id, chunk_count=int(indexed.get("chunk_count") or 0))
@@ -344,6 +379,10 @@ class FeishuReviewService:
                 raise ValueError("资料只有标题、没有可审核正文，不能发布")
             if await CrossDocumentComparisonService(self.session).has_open_conflict(version.version_id):
                 raise ValueError("Material has unresolved cross-document conflicts")
+            await SourceSegmentService(self.session).transition_pending_publication_state(
+                version.version_id,
+                target_state="INCLUDED",
+            )
             from_status = version.processing_status
             version.review_status = "approved"
             version.reviewer_id = operator_id
@@ -369,6 +408,10 @@ class FeishuReviewService:
             version, item, _ = await self._get_material(version_id, lock=True)
             if version.review_status != "pending":
                 raise ValueError("Only pending material can be rejected")
+            await SourceSegmentService(self.session).transition_pending_publication_state(
+                version.version_id,
+                target_state="EXCLUDED",
+            )
             version.review_status = "rejected"
             version.reviewer_id = operator_id
             version.reviewed_at = utc_now()
@@ -1469,6 +1512,16 @@ async def _run_publish_worker(
                 "file_id": publish_file_id,
                 "parse_before_index": candidate_needs_parse,
             }
+            if hasattr(session, "scalars"):
+                segment_service = SourceSegmentService(session)
+                source_segments = await segment_service.list_active(version.version_id)
+                if source_segments:
+                    chunk_file_id = publish_file_id or version.yuxi_file_id or f"candidate-{version.version_id}"
+                    publish_args["prepared_chunks"] = await segment_service.build_publish_chunks(
+                        version.version_id,
+                        file_id=chunk_file_id,
+                        document_title=item.title or "未命名资料",
+                    )
         if context is not None:
             await context.raise_if_cancelled()
         if shared_active_file:
@@ -1705,10 +1758,13 @@ async def _run_processing_worker(
         parsed = await knowledge_base.parse_file(kb_id, existing_file_id, operator_id=operator_id)
         if parsed.get("status") != "parsed":
             raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
+        parsed_content = ""
         try:
             content_info = await knowledge_base.get_file_content(kb_id, existing_file_id)
+            if isinstance(content_info, dict) and isinstance(content_info.get("content"), str):
+                parsed_content = content_info["content"]
             quality = assess_content(
-                content=content_info.get("content") if isinstance(content_info, dict) else None,
+                content=parsed_content,
                 title=item.title,
             )
         except Exception as exc:
@@ -1720,13 +1776,27 @@ async def _run_processing_worker(
             }
         async with pg_manager.get_async_session_context() as quality_session:
             quality_version = await quality_session.scalar(
-                select(FeishuMaterialVersion)
-                .where(FeishuMaterialVersion.version_id == version_id)
-                .with_for_update()
+                select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == version_id).with_for_update()
             )
             if quality_version is not None:
                 quality_params = dict(quality_version.processing_params or {})
                 quality_params["content_quality"] = quality
+                if parsed_content.strip():
+                    quality_item = await quality_session.scalar(
+                        select(FeishuSourceItem).where(FeishuSourceItem.item_id == quality_version.item_id)
+                    )
+                    if quality_item is not None:
+                        segments = await SourceSegmentService(quality_session).replace_for_version(
+                            quality_version,
+                            quality_item,
+                            yuxi_file_id=existing_file_id,
+                            content=parsed_content,
+                        )
+                        quality_params["source_segments"] = {
+                            "engine_version": "structure_v1",
+                            "count": len(segments),
+                            "token_count": sum(segment.token_count for segment in segments),
+                        }
                 quality_version.processing_params = quality_params
                 await quality_session.flush()
     except asyncio.CancelledError as exc:
@@ -1762,6 +1832,7 @@ async def _run_processing_worker(
                 version_id,
                 file_id=existing_file_id,
             )
+            await backfill_legacy_governance_reviews(session, version_ids=[version_id])
     except asyncio.CancelledError as exc:
         try:
             async with pg_manager.get_async_session_context() as session:
@@ -1831,7 +1902,16 @@ async def _run_comparison_worker(
         if context is not None:
             await context.raise_if_cancelled()
         async with pg_manager.get_async_session_context() as session:
-            relations = await CrossDocumentComparisonService(session).compare_version(version_id)
+            kb_id = await session.scalar(
+                select(FeishuSource.target_kb_id)
+                .join(FeishuSourceItem, FeishuSourceItem.source_id == FeishuSource.source_id)
+                .join(FeishuMaterialVersion, FeishuMaterialVersion.item_id == FeishuSourceItem.item_id)
+                .where(FeishuMaterialVersion.version_id == version_id)
+            )
+            relations = await CrossDocumentComparisonService(
+                session,
+                content_loader=_parsed_content_loader(kb_id) if kb_id else None,
+            ).compare_version(version_id)
             relation_count = len(relations)
         async with pg_manager.get_async_session_context() as session:
             await _update_comparison_state(session, version_id, "completed", relation_count=relation_count)
@@ -1869,6 +1949,7 @@ async def _run_comparison_backfill_worker(
     context: TaskContext,
 ) -> dict:
     async with pg_manager.get_async_session_context() as session:
+        kb_id = await session.scalar(select(FeishuSource.target_kb_id).where(FeishuSource.source_id == source_id))
         statement = (
             select(FeishuMaterialVersion.version_id)
             .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
@@ -1887,7 +1968,10 @@ async def _run_comparison_backfill_worker(
         async with pg_manager.get_async_session_context() as session:
             await _update_comparison_state(session, version_id, "running")
             try:
-                found = await CrossDocumentComparisonService(session).compare_version(version_id)
+                found = await CrossDocumentComparisonService(
+                    session,
+                    content_loader=_parsed_content_loader(kb_id) if kb_id else None,
+                ).compare_version(version_id)
                 found_count = len(found)
                 await _update_comparison_state(session, version_id, "completed", relation_count=found_count)
             except asyncio.CancelledError:

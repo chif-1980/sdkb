@@ -162,13 +162,18 @@ class GovernanceService:
             .join(source_item, source_item.item_id == source_version.item_id)
             .join(target_version, target_version.version_id == FeishuCrossDocumentRelation.target_version_id)
             .join(target_item, target_item.item_id == target_version.item_id)
-            .where(or_(source_item.source_id == source_id, target_item.source_id == source_id))
+            .where(
+                FeishuCrossDocumentRelation.status != "invalidated",
+                or_(source_item.source_id == source_id, target_item.source_id == source_id),
+            )
             .order_by(FeishuCrossDocumentRelation.created_at.desc())
         )
         if relation_type:
             statement = statement.where(FeishuCrossDocumentRelation.relation_type == relation_type)
         if status:
             statement = statement.where(FeishuCrossDocumentRelation.status == status)
+        else:
+            statement = statement.where(FeishuCrossDocumentRelation.status != "invalidated")
         rows = (await self.session.execute(statement)).all()
         return [
             self._relation_row_dict(relation, source_item_record, target_item_record)
@@ -203,7 +208,10 @@ class GovernanceService:
             .join(source_item, source_item.item_id == source_version.item_id)
             .join(target_version, target_version.version_id == FeishuCrossDocumentRelation.target_version_id)
             .join(target_item, target_item.item_id == target_version.item_id)
-            .where(or_(source_item.source_id == source_id, target_item.source_id == source_id))
+            .where(
+                FeishuCrossDocumentRelation.status != "invalidated",
+                or_(source_item.source_id == source_id, target_item.source_id == source_id),
+            )
         )
         relation_count = await self.session.scalar(relation_count_statement)
         issue_count = await self.session.scalar(
@@ -316,10 +324,11 @@ class GovernanceService:
             await self.session.scalars(
                 select(FeishuCrossDocumentRelation)
                 .where(
+                    FeishuCrossDocumentRelation.status != "invalidated",
                     or_(
                         FeishuCrossDocumentRelation.source_version_id.in_(version_ids),
                         FeishuCrossDocumentRelation.target_version_id.in_(version_ids),
-                    )
+                    ),
                 )
                 .order_by(FeishuCrossDocumentRelation.created_at.desc())
             )
@@ -427,10 +436,11 @@ class GovernanceService:
             await self.session.scalars(
                 select(FeishuCrossDocumentRelation)
                 .where(
+                    FeishuCrossDocumentRelation.status != "invalidated",
                     or_(
                         FeishuCrossDocumentRelation.source_version_id == version_id,
                         FeishuCrossDocumentRelation.target_version_id == version_id,
-                    )
+                    ),
                 )
                 .order_by(FeishuCrossDocumentRelation.created_at.desc())
             )

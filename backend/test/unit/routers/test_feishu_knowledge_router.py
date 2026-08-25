@@ -24,6 +24,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuProcessingEvent,
     FeishuSource,
     FeishuSourceItem,
+    FeishuSourceSegment,
     FeishuSyncRun,
 )
 
@@ -447,6 +448,41 @@ async def test_scan_only_accepts_full_or_incremental():
 
 
 async def test_approve_queues_publish_without_replacing_active(review_fixture):
+    review_fixture.add_all(
+        [
+            FeishuSourceSegment(
+                segment_id="segment-pending",
+                segment_key="pending",
+                version_id="version-new",
+                item_id="item-1",
+                yuxi_file_id="file-new",
+                segment_index=0,
+                segment_type="paragraph",
+                title_path=[],
+                locator_json={},
+                content="待审核内容",
+                content_hash="segment-pending-hash",
+                publication_state="PENDING",
+                status="ACTIVE",
+            ),
+            FeishuSourceSegment(
+                segment_id="segment-alias",
+                segment_key="alias",
+                version_id="version-new",
+                item_id="item-1",
+                yuxi_file_id="file-new",
+                segment_index=1,
+                segment_type="paragraph",
+                title_path=[],
+                locator_json={},
+                content="重复来源内容",
+                content_hash="segment-alias-hash",
+                publication_state="ALIAS",
+                status="ACTIVE",
+            ),
+        ]
+    )
+    await review_fixture.flush()
     service = FeishuReviewService(review_fixture)
 
     material = await service.approve("version-new", operator_id="admin")
@@ -455,6 +491,12 @@ async def test_approve_queues_publish_without_replacing_active(review_fixture):
     assert material.review_status == "approved"
     assert material.processing_status == "publish_queued"
     assert item.active_version_id == "version-old"
+    segment_states = list(
+        await review_fixture.scalars(
+            select(FeishuSourceSegment.publication_state).order_by(FeishuSourceSegment.segment_index)
+        )
+    )
+    assert segment_states == ["INCLUDED", "ALIAS"]
 
 
 async def test_publish_success_switches_active_and_replaces_old_version(review_fixture):
@@ -1736,6 +1778,48 @@ async def test_publish_adapter_passes_feishu_citation_metadata(monkeypatch):
     assert calls[0][5]["path"] == "minio://knowledgebases/feishu/source/version/page.md"
 
 
+async def test_publish_adapter_rebinds_governed_chunks_to_candidate_file(monkeypatch):
+    captured = {}
+
+    class FakeKnowledgeBase:
+        async def add_file_record(self, kb_id, object_path, *, params, operator_id):
+            return {"file_id": "file-candidate", "status": "uploaded"}
+
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            return {"status": "parsed"}
+
+        async def index_file(self, kb_id, file_id, *, operator_id, params, prepared_chunks):
+            captured["chunks"] = prepared_chunks
+            return {"status": "indexed", "chunk_count": len(prepared_chunks)}
+
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+    result = await router_module.KnowledgePublishAdapter().publish(
+        kb_id="kb-1",
+        object_path="minio://knowledgebases/feishu/source/version/page.md",
+        source_url="https://feishu.example/wiki/node",
+        wiki_path="Root / Page",
+        version_id="version-new",
+        page_info={"item_type": "page", "title": "Page"},
+        operator_id="admin",
+        content_hash="sha256-value",
+        prepared_chunks=[
+            {
+                "id": "file-old_chunk_0",
+                "chunk_id": "file-old_chunk_0",
+                "file_id": "file-old",
+                "chunk_index": 0,
+                "content": "审核通过的片段",
+                "tags": {"source_segment_ids": ["seg-1"]},
+            }
+        ],
+    )
+
+    assert result.chunk_count == 1
+    assert captured["chunks"][0]["file_id"] == "file-candidate"
+    assert captured["chunks"][0]["chunk_id"] == "file-candidate_chunk_0"
+    assert captured["chunks"][0]["tags"] == {"source_segment_ids": ["seg-1"]}
+
+
 async def test_publish_activation_failure_with_shared_file_deletes_only_new_file(monkeypatch, tmp_path):
     engine, session_factory, session_context = await _publish_activation_failure_database(
         tmp_path / "publish-shared-activation.db",
@@ -2543,6 +2627,41 @@ async def test_reject_endpoint_maps_missing_and_state_conflict(review_fixture):
 
 
 async def test_reject_endpoint_persists_reason_and_does_not_publish(review_fixture):
+    review_fixture.add_all(
+        [
+            FeishuSourceSegment(
+                segment_id="segment-reject-pending",
+                segment_key="reject-pending",
+                version_id="version-new",
+                item_id="item-1",
+                yuxi_file_id="file-new",
+                segment_index=0,
+                segment_type="paragraph",
+                title_path=[],
+                locator_json={},
+                content="不纳入的候选内容",
+                content_hash="segment-reject-pending-hash",
+                publication_state="PENDING",
+                status="ACTIVE",
+            ),
+            FeishuSourceSegment(
+                segment_id="segment-reject-alias",
+                segment_key="reject-alias",
+                version_id="version-new",
+                item_id="item-1",
+                yuxi_file_id="file-new",
+                segment_index=1,
+                segment_type="paragraph",
+                title_path=[],
+                locator_json={},
+                content="已经归并的来源内容",
+                content_hash="segment-reject-alias-hash",
+                publication_state="ALIAS",
+                status="ACTIVE",
+            ),
+        ]
+    )
+    await review_fixture.flush()
     result = await router_module.reject_material(
         "version-new",
         router_module.RejectRequest(reason="Not approved for production"),
@@ -2554,6 +2673,12 @@ async def test_reject_endpoint_persists_reason_and_does_not_publish(review_fixtu
     assert result == {"version_id": "version-new", "status": "rejected"}
     assert material.review_comment == "Not approved for production"
     assert item.active_version_id == "version-old"
+    segment_states = list(
+        await review_fixture.scalars(
+            select(FeishuSourceSegment.publication_state).order_by(FeishuSourceSegment.segment_index)
+        )
+    )
+    assert segment_states == ["EXCLUDED", "ALIAS"]
 
 
 async def test_retry_endpoint_increments_and_queues_processing_task(monkeypatch):

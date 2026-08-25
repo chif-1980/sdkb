@@ -910,7 +910,14 @@ class KnowledgeBase(ABC):
         )
 
     @abstractmethod
-    async def index_file(self, kb_id: str, file_id: str, operator_id: str | None = None) -> dict:
+    async def index_file(
+        self,
+        kb_id: str,
+        file_id: str,
+        operator_id: str | None = None,
+        params: dict | None = None,
+        prepared_chunks: list[dict] | None = None,
+    ) -> dict:
         """
         Index parsed file (Status: INDEXING -> INDEXED/ERROR_INDEXING)
 
@@ -918,6 +925,8 @@ class KnowledgeBase(ABC):
             kb_id: Database ID
             file_id: File ID
             operator_id: ID of the user performing the operation
+            params: Optional processing parameter overrides
+            prepared_chunks: Governed chunks that have already been built from approved source segments
 
         Returns:
             Updated file metadata

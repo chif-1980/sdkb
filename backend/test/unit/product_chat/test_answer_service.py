@@ -92,9 +92,10 @@ class _KnowledgeManager:
 
 
 class _Repository:
-    def __init__(self, published, *, history=()):
+    def __init__(self, published, *, history=(), governance=None):
         self.published = published
         self.history = history
+        self.governance = governance or {}
         self.calls = []
         self.history_calls = []
 
@@ -105,6 +106,9 @@ class _Repository:
     async def list_recent_messages(self, conversation_id, owner_user_id, *, limit):
         self.history_calls.append((conversation_id, owner_user_id, limit))
         return self.history
+
+    async def get_chunk_governance(self, chunk_ids):
+        return {chunk_id: self.governance[chunk_id] for chunk_id in chunk_ids if chunk_id in self.governance}
 
 
 class _Model:
@@ -153,6 +157,7 @@ def _service(
     open_windows=None,
     find_results=None,
     agent_factory=None,
+    governance=None,
 ):
     policy = _PolicyService()
     knowledge = _KnowledgeManager(
@@ -162,7 +167,7 @@ def _service(
         open_windows=open_windows,
         find_results=find_results,
     )
-    repository = _Repository(published, history=history)
+    repository = _Repository(published, history=history, governance=governance)
     model = _Model(model_content, error=model_error, stream_chunks=stream_chunks)
     selector = _ModelSelector(model)
     service = AnswerService(
@@ -260,6 +265,51 @@ async def test_supported_answer_uses_only_revalidated_evidence_in_retrieval_orde
             True,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_groups_one_logical_knowledge_and_prefers_primary_source():
+    chunks = [
+        {
+            "content": "公司简介的重复来源内容。",
+            "metadata": {"file_id": "file-alias", "chunk_id": "chunk-alias", "chunk_index": 0},
+        },
+        {
+            "content": "公司简介的规范来源内容。",
+            "metadata": {"file_id": "file-primary", "chunk_id": "chunk-primary", "chunk_index": 2},
+        },
+    ]
+    payload = json.dumps(
+        {"status": "SUPPORTED", "answer": "公司简介以规范来源为准。[E1]", "citation_ids": ["E1"]},
+        ensure_ascii=False,
+    )
+    service, *_ = _service(
+        chunks=chunks,
+        published={
+            "file-alias": _published_material("file-alias", item_id="alias", title="产品介绍"),
+            "file-primary": _published_material("file-primary", item_id="primary", title="公司简介"),
+        },
+        model_content=payload,
+        governance={
+            "chunk-alias": {
+                "logical_knowledge_ids": ("knowledge-company",),
+                "source_role": "ALIAS",
+                "locator": {"slide": 3},
+            },
+            "chunk-primary": {
+                "logical_knowledge_ids": ("knowledge-company",),
+                "source_role": "PRIMARY",
+                "locator": {"page": 2},
+            },
+        },
+    )
+
+    result = await service.answer("公司简介是什么？", {"id": 7}, "conversation-1")
+
+    assert len(result.citations) == 1
+    assert result.citations[0].yuxi_file_id == "file-primary"
+    assert result.citations[0].locator == "第2页"
+    assert result.citations[0].excerpt == "公司简介的规范来源内容。"
 
 
 @pytest.mark.asyncio

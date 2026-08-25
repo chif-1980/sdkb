@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
+    FeishuKnowledgeSourceFragment,
     FeishuMaterialVersion,
     FeishuSource,
     FeishuSourceItem,
+    KnowledgeChunk,
 )
 from yuxi.storage.postgres.models_product import (
     CitationKind,
@@ -412,3 +414,64 @@ class ProductChatRepository:
                 continue
             published[file_id] = (item, version)
         return published
+
+    async def get_chunk_governance(self, chunk_ids: list[str] | tuple[str, ...]) -> dict[str, dict]:
+        """Resolve retrieval chunks to governed logical knowledge without exposing draft content."""
+        normalized_ids = list(dict.fromkeys(chunk_id for chunk_id in chunk_ids if chunk_id))
+        if not normalized_ids:
+            return {}
+        chunks = list(
+            await self.session.scalars(select(KnowledgeChunk).where(KnowledgeChunk.chunk_id.in_(normalized_ids)))
+        )
+        segment_ids_by_chunk: dict[str, tuple[str, ...]] = {}
+        all_segment_ids: set[str] = set()
+        for chunk in chunks:
+            tags = chunk.tags if isinstance(chunk.tags, dict) else {}
+            raw_segment_ids = tags.get("source_segment_ids")
+            segment_ids = tuple(
+                str(segment_id)
+                for segment_id in (raw_segment_ids if isinstance(raw_segment_ids, list) else [])
+                if isinstance(segment_id, str) and segment_id
+            )
+            segment_ids_by_chunk[chunk.chunk_id] = segment_ids
+            all_segment_ids.update(segment_ids)
+
+        reference_filter = FeishuKnowledgeSourceFragment.chunk_id.in_(normalized_ids)
+        if all_segment_ids:
+            reference_filter = or_(
+                reference_filter,
+                FeishuKnowledgeSourceFragment.segment_id.in_(all_segment_ids),
+            )
+        references = list(
+            await self.session.scalars(
+                select(FeishuKnowledgeSourceFragment).where(
+                    FeishuKnowledgeSourceFragment.status == "ACTIVE",
+                    reference_filter,
+                )
+            )
+        )
+        by_segment: dict[str, list[FeishuKnowledgeSourceFragment]] = {}
+        by_chunk: dict[str, list[FeishuKnowledgeSourceFragment]] = {}
+        for reference in references:
+            by_chunk.setdefault(reference.chunk_id, []).append(reference)
+            if reference.segment_id:
+                by_segment.setdefault(reference.segment_id, []).append(reference)
+
+        result: dict[str, dict] = {}
+        for chunk in chunks:
+            chunk_references = list(by_chunk.get(chunk.chunk_id, []))
+            for segment_id in segment_ids_by_chunk.get(chunk.chunk_id, ()):
+                chunk_references.extend(by_segment.get(segment_id, []))
+            logical_ids = tuple(
+                dict.fromkeys(reference.logical_knowledge_id for reference in chunk_references)
+            )
+            roles = {str(reference.source_role) for reference in chunk_references}
+            role = "PRIMARY" if "PRIMARY" in roles else "ALIAS" if "ALIAS" in roles else None
+            tags = chunk.tags if isinstance(chunk.tags, dict) else {}
+            result[chunk.chunk_id] = {
+                "logical_knowledge_ids": logical_ids,
+                "source_role": role,
+                "locator": dict(tags.get("locator") or {}) if isinstance(tags.get("locator"), dict) else {},
+                "title_path": list(tags.get("title_path") or []) if isinstance(tags.get("title_path"), list) else [],
+            }
+        return result

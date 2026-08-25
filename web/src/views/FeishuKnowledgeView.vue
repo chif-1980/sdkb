@@ -79,189 +79,216 @@
         </section>
 
         <nav class="governance-tabs" aria-label="知识加工模块">
-          <button type="button" class="governance-tab" :class="{ active: activeModule === 'materials' }" @click="activeModule = 'materials'">
+          <button
+            type="button"
+            class="governance-tab"
+            :class="{ active: activeModule === 'materials' }"
+            @click="activeModule = 'materials'"
+          >
             资料与扫描
           </button>
-          <button type="button" class="governance-tab" :class="{ active: activeModule === 'reviews' }" @click="activeModule = 'reviews'">
+          <button
+            type="button"
+            class="governance-tab"
+            :class="{ active: activeModule === 'reviews' }"
+            @click="activeModule = 'reviews'"
+          >
             待审核 <span class="governance-count">{{ governanceCounts.reviews }}</span>
           </button>
-          <button type="button" class="governance-tab" :class="{ active: activeModule === 'relations' }" @click="activeModule = 'relations'">
+          <button
+            type="button"
+            class="governance-tab"
+            :class="{ active: activeModule === 'relations' }"
+            @click="activeModule = 'relations'"
+          >
             跨文档检查 <span class="governance-count">{{ governanceCounts.relations }}</span>
           </button>
-          <button type="button" class="governance-tab" :class="{ active: activeModule === 'formal' }" @click="activeModule = 'formal'">
+          <button
+            type="button"
+            class="governance-tab"
+            :class="{ active: activeModule === 'formal' }"
+            @click="activeModule = 'formal'"
+          >
             正式知识 <span class="governance-count">{{ governanceCounts.formal }}</span>
           </button>
         </nav>
 
         <section v-if="activeModule === 'materials'" aria-label="资料与扫描">
-        <div class="workspace-grid">
-          <section class="workspace-section tree-section" aria-label="飞书知识目录">
-            <div class="section-heading">
-              <div>
-                <div class="section-title">
-                  <h2>知识目录</h2>
-                  <a-tooltip title="列出当前知识空间的全部顶层节点及下级内容，仅读取目录元数据">
-                    <span class="section-help" aria-label="知识目录说明" role="img">
-                      <CircleHelp :size="14" />
-                    </span>
+          <div class="workspace-grid">
+            <section class="workspace-section tree-section" aria-label="飞书知识目录">
+              <div class="section-heading">
+                <div>
+                  <div class="section-title">
+                    <h2>知识目录</h2>
+                    <a-tooltip title="列出当前知识空间的全部顶层节点及下级内容，仅读取目录元数据">
+                      <span class="section-help" aria-label="知识目录说明" role="img">
+                        <CircleHelp :size="14" />
+                      </span>
+                    </a-tooltip>
+                  </div>
+                </div>
+                <div class="tree-actions">
+                  <a-tooltip :title="oauthStatus.authorized ? '重新扫码授权' : '扫码授权'">
+                    <a-button
+                      data-testid="oauth-qr-authorize"
+                      type="primary"
+                      :aria-label="oauthStatus.authorized ? '重新扫码授权' : '扫码授权'"
+                      :loading="qrAuthorizing"
+                      :disabled="!currentSource"
+                      @click="startQrOAuth"
+                    >
+                      <QrCode :size="16" />
+                      <span class="tree-action-label">{{
+                        oauthStatus.authorized ? '重新扫码授权' : '扫码授权'
+                      }}</span>
+                    </a-button>
+                  </a-tooltip>
+                  <a-tooltip title="浏览器授权">
+                    <a-button
+                      data-testid="oauth-browser-authorize"
+                      aria-label="浏览器授权"
+                      :loading="authorizingUser"
+                      :disabled="!currentSource"
+                      @click="startBrowserOAuth"
+                    >
+                      <ExternalLink :size="16" />
+                      <span class="tree-action-label">浏览器授权</span>
+                    </a-button>
+                  </a-tooltip>
+                  <a-tooltip title="刷新目录">
+                    <a-button
+                      aria-label="刷新知识目录"
+                      :loading="loadingTree"
+                      :disabled="!oauthStatus.authorized"
+                      @click="loadTree(true)"
+                    >
+                      <RefreshCw :size="16" />
+                      <span class="tree-action-label">刷新目录</span>
+                    </a-button>
                   </a-tooltip>
                 </div>
               </div>
-              <div class="tree-actions">
-                <a-tooltip :title="oauthStatus.authorized ? '重新扫码授权' : '扫码授权'">
-                  <a-button
-                    data-testid="oauth-qr-authorize"
-                    type="primary"
-                    :aria-label="oauthStatus.authorized ? '重新扫码授权' : '扫码授权'"
-                    :loading="qrAuthorizing"
-                    :disabled="!currentSource"
-                    @click="startQrOAuth"
+              <div class="panel-body tree-body">
+                <a-alert
+                  v-if="treeError"
+                  class="tree-alert"
+                  type="warning"
+                  show-icon
+                  :message="treeError"
+                />
+                <a-spin :spinning="loadingTree">
+                  <a-tree
+                    v-if="treeData.length && !treeError"
+                    :tree-data="treeData"
+                    :default-expand-all="false"
+                    block-node
+                    show-line
                   >
-                    <QrCode :size="16" />
-                    <span class="tree-action-label">{{
-                      oauthStatus.authorized ? '重新扫码授权' : '扫码授权'
-                    }}</span>
-                  </a-button>
-                </a-tooltip>
-                <a-tooltip title="浏览器授权">
-                  <a-button
-                    data-testid="oauth-browser-authorize"
-                    aria-label="浏览器授权"
-                    :loading="authorizingUser"
-                    :disabled="!currentSource"
-                    @click="startBrowserOAuth"
-                  >
-                    <ExternalLink :size="16" />
-                    <span class="tree-action-label">浏览器授权</span>
-                  </a-button>
-                </a-tooltip>
-                <a-tooltip title="刷新目录">
-                  <a-button
-                    aria-label="刷新知识目录"
-                    :loading="loadingTree"
-                    :disabled="!oauthStatus.authorized"
-                    @click="loadTree(true)"
-                  >
-                    <RefreshCw :size="16" />
-                    <span class="tree-action-label">刷新目录</span>
-                  </a-button>
-                </a-tooltip>
+                    <template #title="{ data }">
+                      <a
+                        v-if="data.url"
+                        :href="data.url"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        >{{ data.title }}</a
+                      >
+                      <span v-else>{{ data.title }}</span>
+                    </template>
+                  </a-tree>
+                  <a-empty
+                    v-else-if="!treeError && !loadingTree"
+                    description="暂未读取到知识目录"
+                  />
+                </a-spin>
               </div>
-            </div>
-            <div class="panel-body tree-body">
-              <a-alert
-                v-if="treeError"
-                class="tree-alert"
-                type="warning"
-                show-icon
-                :message="treeError"
-              />
-              <a-spin :spinning="loadingTree">
-                <a-tree
-                  v-if="treeData.length && !treeError"
-                  :tree-data="treeData"
-                  :default-expand-all="false"
-                  block-node
-                  show-line
+            </section>
+
+            <section class="workspace-section runs-section">
+              <div class="section-heading">
+                <div>
+                  <div class="section-title">
+                    <h2>扫描批次</h2>
+                    <a-tooltip title="选择批次查看该次扫描产生或变更的素材">
+                      <span class="section-help" aria-label="扫描批次说明" role="img">
+                        <CircleHelp :size="14" />
+                      </span>
+                    </a-tooltip>
+                  </div>
+                </div>
+                <button
+                  v-if="selectedRunId"
+                  type="button"
+                  class="clear-filter"
+                  @click="selectRun('')"
                 >
-                  <template #title="{ data }">
-                    <a v-if="data.url" :href="data.url" target="_blank" rel="noopener noreferrer">{{
-                      data.title
-                    }}</a>
-                    <span v-else>{{ data.title }}</span>
-                  </template>
-                </a-tree>
-                <a-empty v-else-if="!treeError && !loadingTree" description="暂未读取到知识目录" />
-              </a-spin>
-            </div>
-          </section>
-
-          <section class="workspace-section runs-section">
-            <div class="section-heading">
-              <div>
-                <div class="section-title">
-                  <h2>扫描批次</h2>
-                  <a-tooltip title="选择批次查看该次扫描产生或变更的素材">
-                    <span class="section-help" aria-label="扫描批次说明" role="img">
-                      <CircleHelp :size="14" />
-                    </span>
-                  </a-tooltip>
-                </div>
+                  清除筛选
+                </button>
               </div>
-              <button
-                v-if="selectedRunId"
-                type="button"
-                class="clear-filter"
-                @click="selectRun('')"
-              >
-                清除筛选
-              </button>
-            </div>
-            <div class="panel-body runs-body">
-              <FeishuSyncRunsTable
-                :runs="runs"
-                :loading="loadingRuns"
-                :selected-run-id="selectedRunId"
-                @select="selectRun"
-              />
-            </div>
-          </section>
-        </div>
-
-        <section class="workspace-section material-section">
-          <div class="section-heading material-heading">
-            <div>
-              <h2>素材队列</h2>
-              <p>{{ selectedRunId ? '正在查看所选批次素材' : '显示当前数据源的全部素材版本' }}</p>
-            </div>
-            <a-button aria-label="刷新素材" @click="loadMaterials">
-              <RefreshCw :size="16" />
-              刷新
-            </a-button>
+              <div class="panel-body runs-body">
+                <FeishuSyncRunsTable
+                  :runs="runs"
+                  :loading="loadingRuns"
+                  :selected-run-id="selectedRunId"
+                  @select="selectRun"
+                />
+              </div>
+            </section>
           </div>
 
-          <form class="filter-bar" @submit.prevent="loadMaterials">
-            <a-select
-              v-model:value="filters.processing_status"
-              allow-clear
-              placeholder="加工状态"
-              :options="processingOptions"
-            />
-            <a-select
-              v-model:value="filters.review_status"
-              allow-clear
-              placeholder="审核状态"
-              :options="reviewOptions"
-            />
-            <a-select
-              v-model:value="filters.source_validity"
-              allow-clear
-              placeholder="来源状态"
-              :options="validityOptions"
-            />
-            <a-select
-              v-model:value="filters.item_type"
-              allow-clear
-              placeholder="素材类型"
-              :options="typeOptions"
-            />
-            <a-input v-model:value="filters.directory" allow-clear placeholder="飞书目录路径" />
-            <a-range-picker v-model:value="updatedRange" show-time />
-            <a-button html-type="submit" type="primary">筛选</a-button>
-            <a-button @click="resetFilters">重置</a-button>
-          </form>
+          <section class="workspace-section material-section">
+            <div class="section-heading material-heading">
+              <div>
+                <h2>素材队列</h2>
+                <p>{{ selectedRunId ? '正在查看所选批次素材' : '显示当前数据源的全部素材版本' }}</p>
+              </div>
+              <a-button aria-label="刷新素材" @click="loadMaterials">
+                <RefreshCw :size="16" />
+                刷新
+              </a-button>
+            </div>
 
-          <FeishuMaterialTable
-            ref="materialTableRef"
-            :materials="materials"
-            :loading="loadingMaterials"
-            :max-selection="MAX_BATCH_SIZE"
-            @open-detail="openMaterialDetail"
-            @action="handleMaterialAction"
-            @batch-action="handleBatchAction"
-            @selection-limit="(limit) => message.warning(`单次批量操作最多选择 ${limit} 条素材`)"
-          />
-        </section>
+            <form class="filter-bar" @submit.prevent="loadMaterials">
+              <a-select
+                v-model:value="filters.processing_status"
+                allow-clear
+                placeholder="加工状态"
+                :options="processingOptions"
+              />
+              <a-select
+                v-model:value="filters.review_status"
+                allow-clear
+                placeholder="审核状态"
+                :options="reviewOptions"
+              />
+              <a-select
+                v-model:value="filters.source_validity"
+                allow-clear
+                placeholder="来源状态"
+                :options="validityOptions"
+              />
+              <a-select
+                v-model:value="filters.item_type"
+                allow-clear
+                placeholder="素材类型"
+                :options="typeOptions"
+              />
+              <a-input v-model:value="filters.directory" allow-clear placeholder="飞书目录路径" />
+              <a-range-picker v-model:value="updatedRange" show-time />
+              <a-button html-type="submit" type="primary">筛选</a-button>
+              <a-button @click="resetFilters">重置</a-button>
+            </form>
+
+            <FeishuMaterialTable
+              ref="materialTableRef"
+              :materials="materials"
+              :loading="loadingMaterials"
+              :max-selection="MAX_BATCH_SIZE"
+              @open-detail="openMaterialDetail"
+              @action="handleMaterialAction"
+              @batch-action="handleBatchAction"
+              @selection-limit="(limit) => message.warning(`单次批量操作最多选择 ${limit} 条素材`)"
+            />
+          </section>
         </section>
 
         <FeishuReviewWorkspace
@@ -269,7 +296,7 @@
           :source-id="currentSourceId"
           :target-review-id="governanceReviewTarget"
           @count-change="governanceCounts.reviews = $event"
-          @target-consumed="governanceReviewTarget = ''"
+          @target-consumed="governanceReviewTarget = null"
         />
         <FeishuRelationsPanel
           v-else-if="activeModule === 'relations'"
@@ -401,7 +428,7 @@ const updatedRange = ref([])
 const materialTableRef = ref(null)
 const activeModule = ref('materials')
 const governanceCounts = reactive({ reviews: 0, relations: 0, formal: 0 })
-const governanceReviewTarget = ref('')
+const governanceReviewTarget = ref(null)
 let pollTimer = null
 let qrPollTimer = null
 let qrRequestSeq = 0
@@ -413,7 +440,11 @@ function emptyDetailContent() {
 }
 
 function openGovernanceReview(relation) {
-  governanceReviewTarget.value = relation.source_version_id || relation.target_version_id || ''
+  governanceReviewTarget.value = {
+    relationId: relation.relation_id || '',
+    sourceVersionId: relation.source_version_id || '',
+    targetVersionId: relation.target_version_id || ''
+  }
   activeModule.value = 'reviews'
 }
 
@@ -513,20 +544,30 @@ async function loadSources() {
 async function loadReviewCount() {
   if (!currentSourceId.value) return
   try {
-    const response = await governanceApi.listReviews(currentSourceId.value)
-    governanceCounts.reviews = response.items?.length ?? 0
+    const response = await governanceApi.listReviewPackages(currentSourceId.value, { view: 'mine' })
+    governanceCounts.reviews = response.counts?.mine ?? response.total ?? 0
   } catch {
     governanceCounts.reviews = currentSource.value?.awaiting_review_count ?? 0
   }
 }
 
-async function loadComparisonIssueCount() {
+async function loadRelationCount() {
   if (!currentSourceId.value) return
   try {
     const response = await governanceApi.getComparisonStatus(currentSourceId.value)
-    governanceCounts.relations = response.issue_count ?? 0
+    governanceCounts.relations = response.relation_count ?? 0
   } catch {
     governanceCounts.relations = 0
+  }
+}
+
+async function loadFormalKnowledgeCount() {
+  if (!currentSourceId.value) return
+  try {
+    const response = await governanceApi.listFormalKnowledge(currentSourceId.value)
+    governanceCounts.formal = response.items?.length ?? 0
+  } catch {
+    governanceCounts.formal = 0
   }
 }
 
@@ -634,7 +675,14 @@ async function refreshAll({ forceTree = false } = {}) {
   await loadSources()
   if (currentSourceId.value) {
     await loadOAuthStatus()
-    await Promise.all([loadRuns(), loadMaterials(), loadTree(forceTree), loadReviewCount(), loadComparisonIssueCount()])
+    await Promise.all([
+      loadRuns(),
+      loadMaterials(),
+      loadTree(forceTree),
+      loadReviewCount(),
+      loadRelationCount(),
+      loadFormalKnowledgeCount()
+    ])
   }
 }
 
@@ -1560,10 +1608,9 @@ onBeforeUnmount(() => {
 
 .filter-bar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(112px, 0.7fr)) minmax(160px, 1fr) minmax(
-      260px,
-      1.4fr
-    ) auto auto;
+  grid-template-columns:
+    repeat(4, minmax(112px, 0.7fr)) minmax(160px, 1fr) minmax(260px, 1.4fr)
+    auto auto;
   gap: 8px;
   margin-bottom: 12px;
   padding: 10px;

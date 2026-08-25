@@ -414,6 +414,37 @@ async def test_index_file_persists_chunk_stats(monkeypatch):
     assert refreshed_kbs == ["db"]
 
 
+async def test_index_file_uses_governed_prepared_chunks_without_resplitting(monkeypatch):
+    kb = MilvusKB.__new__(MilvusKB)
+    kb.databases_meta = {"db": {"embedding_model_spec": "test-provider:test-embedding", "metadata": {}}}
+    file_repo = FakeKnowledgeFileRepository({"file-1": make_file_record()})
+    patch_file_repository(monkeypatch, file_repo)
+    prepared = [
+        {
+            **make_chunk(0, content="审核通过的正式知识片段"),
+            "file_id": "file-1",
+            "tags": {"source_segment_ids": ["seg-1"]},
+        }
+    ]
+    stored = []
+
+    async def embed_and_store_chunks(kb_id, file_id, collection, chunks, embedding_function):
+        stored.extend(chunks)
+
+    kb._get_milvus_collection = lambda kb_id: asyncio.sleep(0, result=FakeCollection())
+    kb._read_markdown_from_minio = lambda path: asyncio.sleep(0, result="# 未使用的解析正文")
+    kb._split_text_into_chunks = lambda *args: pytest.fail("prepared chunks must not be split again")
+    kb._get_embedding_function = lambda embedding_model_spec: None
+    kb.delete_file_chunks_only = lambda kb_id, file_id: asyncio.sleep(0)
+    kb._embed_and_store_chunks = embed_and_store_chunks
+    kb.refresh_database_stats = lambda kb_id: asyncio.sleep(0, result={})
+
+    result = await kb.index_file("db", "file-1", prepared_chunks=prepared)
+
+    assert result["chunk_count"] == 1
+    assert stored[0]["tags"]["source_segment_ids"] == ["seg-1"]
+
+
 async def test_parse_file_cancellation_marks_file_retryable(monkeypatch):
     kb = MilvusKB.__new__(MilvusKB)
     kb.databases_meta = {"db": {"metadata": {}}}

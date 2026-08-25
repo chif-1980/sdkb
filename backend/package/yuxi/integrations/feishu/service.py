@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from yuxi.governance.content_quality import assess_content
+from yuxi.governance.source_change_service import SourceChangeService
 from yuxi.integrations.feishu.client import FeishuClient, FeishuNotFoundError
 from yuxi.integrations.feishu.schemas import FeishuAttachment, FeishuNode
 from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository
@@ -516,6 +517,8 @@ class FeishuScanService:
                 "download_type": download_type,
             }
             await self.repository.session.flush()
+        if version_created:
+            await SourceChangeService(self.repository.session).register_new_material_version(version.version_id)
         if not version_created:
             counts.unchanged += 1
         elif item_created:

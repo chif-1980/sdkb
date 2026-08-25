@@ -326,6 +326,11 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "ALTER TABLE IF EXISTS knowledge_chunks ADD COLUMN IF NOT EXISTS extraction_result JSONB",
+            "ALTER TABLE IF EXISTS feishu_knowledge_source_fragments ADD COLUMN IF NOT EXISTS segment_id VARCHAR(64)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_knowledge_source_fragments_version_segment "
+                "ON feishu_knowledge_source_fragments(version_id, segment_id)"
+            ),
             """
             CREATE TABLE IF NOT EXISTS knowledge_graph_entities (
                 id SERIAL PRIMARY KEY,
@@ -505,9 +510,11 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS sync_run_id VARCHAR(64)",
-            "ALTER TABLE IF EXISTS feishu_sources ADD COLUMN IF NOT EXISTS scan_scope VARCHAR(16) NOT NULL DEFAULT 'root'",
+            "ALTER TABLE IF EXISTS feishu_sources ADD COLUMN IF NOT EXISTS "
+            "scan_scope VARCHAR(16) NOT NULL DEFAULT 'root'",
             "ALTER TABLE IF EXISTS feishu_sources ALTER COLUMN scan_scope SET DEFAULT 'root'",
-            "UPDATE feishu_sources SET scan_scope = 'root' WHERE scan_scope IS NULL OR scan_scope NOT IN ('root', 'space')",
+            "UPDATE feishu_sources SET scan_scope = 'root' "
+            "WHERE scan_scope IS NULL OR scan_scope NOT IN ('root', 'space')",
             """
             DO $$
             BEGIN

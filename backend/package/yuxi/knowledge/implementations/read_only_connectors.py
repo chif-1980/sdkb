@@ -51,6 +51,7 @@ class ReadOnlyConnectors(KnowledgeBase):
         file_id: str,
         operator_id: str | None = None,
         params: dict | None = None,
+        prepared_chunks: list[dict] | None = None,
     ) -> dict:
         raise self._readonly_error()
 

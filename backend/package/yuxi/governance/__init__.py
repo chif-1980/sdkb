@@ -2,6 +2,7 @@
 
 from .domain import (
     CrossDocumentRelationType,
+    DuplicateResolutionStrategy,
     KnowledgeSourceRole,
     ProblemTag,
     ReviewAction,
@@ -10,6 +11,7 @@ from .domain import (
 
 __all__ = [
     "CrossDocumentRelationType",
+    "DuplicateResolutionStrategy",
     "KnowledgeSourceRole",
     "ProblemTag",
     "ReviewAction",

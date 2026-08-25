@@ -1,4 +1,4 @@
-import { apiAdminGet, apiAdminPost } from './base'
+import { apiAdminGet, apiAdminPatch, apiAdminPost } from './base'
 
 const BASE_URL = '/api/governance'
 
@@ -21,6 +21,10 @@ function errorMessage(error, fallback) {
   const messages = {
     'Review task is already completed': '该审核任务已经完成',
     'Review task is assigned to another reviewer': '该任务已转交给其他审核人',
+    'Review package is assigned to another reviewer': '该审核包已转交给其他审核人',
+    'Review package is already completed or invalidated': '该审核包已经完成或失效',
+    'Only open or newly received source-change requests can be cancelled':
+      '该资料修改任务已结束，不能重复取消',
     'Assignee is not an active knowledge administrator': '请选择有效的知识管理员',
     'publish requires CREATE, UPDATE or SPLIT_BY_SCOPE action': '当前处理方式不能直接发布'
   }
@@ -29,6 +33,46 @@ function errorMessage(error, fallback) {
 
 export const governanceApi = {
   listReviewers: () => apiAdminGet(`${BASE_URL}/reviewers`),
+
+  listReviewPackages: (sourceId, params = {}) =>
+    apiAdminGet(withQuery(`${BASE_URL}/review-packages`, { source_id: sourceId, ...params })),
+
+  getReviewPackage: (packageId) => apiAdminGet(`${BASE_URL}/review-packages/${encoded(packageId)}`),
+
+  listReviewPackageSegments: (packageId) =>
+    apiAdminGet(`${BASE_URL}/review-packages/${encoded(packageId)}/segments`),
+
+  getReviewPackagePresentation: (packageId) =>
+    apiAdminGet(`${BASE_URL}/review-packages/${encoded(packageId)}/presentation`),
+
+  getReviewPackageSlidePreview: (packageId, slideNumber) =>
+    apiAdminGet(
+      `${BASE_URL}/review-packages/${encoded(packageId)}/presentation/slides/${encoded(slideNumber)}`,
+      {},
+      'blob'
+    ),
+
+  saveReviewPackageDraft: (packageId, payload) =>
+    apiAdminPatch(`${BASE_URL}/review-packages/${encoded(packageId)}/draft`, payload),
+
+  resolveReviewPackage: (packageId, payload) =>
+    apiAdminPost(`${BASE_URL}/review-packages/${encoded(packageId)}/resolve`, payload),
+
+  transferReviewPackage: (packageId, payload) =>
+    apiAdminPost(`${BASE_URL}/review-packages/${encoded(packageId)}/transfer`, payload),
+
+  listSourceChangeRequests: (sourceId, params = {}) =>
+    apiAdminGet(
+      withQuery(`${BASE_URL}/source-change-requests`, { source_id: sourceId, ...params })
+    ),
+
+  getSourceChangeRequest: (changeRequestId) =>
+    apiAdminGet(`${BASE_URL}/source-change-requests/${encoded(changeRequestId)}`),
+
+  cancelSourceChangeRequest: (changeRequestId, reason) =>
+    apiAdminPost(`${BASE_URL}/source-change-requests/${encoded(changeRequestId)}/cancel`, {
+      reason
+    }),
 
   listReviews: (sourceId, params = {}) =>
     apiAdminGet(withQuery(`${BASE_URL}/reviews`, { source_id: sourceId, ...params })),
@@ -43,6 +87,12 @@ export const governanceApi = {
 
   listRelations: (sourceId, params = {}) =>
     apiAdminGet(withQuery(`${BASE_URL}/relations`, { source_id: sourceId, ...params })),
+
+  getDuplicateCandidates: (relationId) =>
+    apiAdminGet(`${BASE_URL}/relations/${encoded(relationId)}/duplicate-candidates`),
+
+  resolveDuplicateRelation: (relationId, payload) =>
+    apiAdminPost(`${BASE_URL}/relations/${encoded(relationId)}/resolve-duplicate`, payload),
 
   getComparisonStatus: (sourceId) =>
     apiAdminGet(withQuery(`${BASE_URL}/comparisons/status`, { source_id: sourceId })),

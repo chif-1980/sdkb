@@ -2,7 +2,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from yuxi.governance.domain import ProblemTag, ReviewAction, ReviewDecision
+from yuxi.governance.domain import (
+    DuplicateResolutionStrategy,
+    ProblemTag,
+    ReviewAction,
+    ReviewDecision,
+    ReviewOutcome,
+)
 
 
 class ApplicabilityScope(BaseModel):
@@ -59,3 +65,103 @@ class ReviewResolveRequest(BaseModel):
         }:
             raise ValueError("publish requires CREATE, UPDATE or SPLIT_BY_SCOPE action")
         return self
+
+
+class ReviewPackageDraftRequest(BaseModel):
+    lock_version: int = Field(ge=1)
+    draft: dict = Field(default_factory=dict)
+
+
+class ReviewItemDecisionRequest(BaseModel):
+    review_item_id: str = Field(min_length=1, max_length=64)
+    outcome: ReviewOutcome
+    problem_tags: list[ProblemTag] = Field(default_factory=list, max_length=20)
+    decision_comment: str | None = Field(default=None, max_length=4000)
+    applicability_scope: ApplicabilityScope = Field(default_factory=ApplicabilityScope)
+    responsible_user_id: str | None = Field(default=None, max_length=128)
+    responsible_user_name: str | None = Field(default=None, max_length=255)
+
+    @field_validator("review_item_id")
+    @classmethod
+    def normalize_review_item_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("review_item_id is required")
+        return normalized
+
+    @field_validator("decision_comment", "responsible_user_id", "responsible_user_name")
+    @classmethod
+    def normalize_decision_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class ReviewPackageResolveRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    lock_version: int = Field(ge=1)
+    decisions: list[ReviewItemDecisionRequest] = Field(min_length=1, max_length=100)
+
+    @field_validator("request_id")
+    @classmethod
+    def normalize_request_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("request_id is required")
+        return normalized
+
+    @model_validator(mode="after")
+    def decisions_must_be_unique(self):
+        item_ids = [decision.review_item_id for decision in self.decisions]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("review_item_id must be unique within one request")
+        return self
+
+
+class ReviewPackageTransferRequest(BaseModel):
+    lock_version: int = Field(ge=1)
+    assignee_id: str = Field(min_length=1, max_length=64)
+    comment: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("assignee_id", "comment")
+    @classmethod
+    def normalize_transfer_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value is required")
+        return normalized
+
+
+class SourceChangeRequestCancelRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("reason is required")
+        return normalized
+
+
+class DuplicateRelationResolutionRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    strategy: DuplicateResolutionStrategy
+    comment: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("request_id")
+    @classmethod
+    def normalize_duplicate_request_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("request_id is required")
+        return normalized
+
+    @field_validator("comment")
+    @classmethod
+    def normalize_duplicate_comment(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None

@@ -196,6 +196,24 @@ export function apiSuperAdminPost(url, data = {}, options = {}, responseType = '
   return apiPost(url, data, options, true, responseType)
 }
 
+export function apiPatch(url, data = {}, options = {}, requiresAuth = true, responseType = 'json') {
+  return apiRequest(
+    url,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+      ...options
+    },
+    requiresAuth,
+    responseType
+  )
+}
+
+export function apiAdminPatch(url, data = {}, options = {}, responseType = 'json') {
+  checkAdminPermission()
+  return apiPatch(url, data, options, true, responseType)
+}
+
 /**
  * 发送PUT请求
  * @param {string} url - API端点

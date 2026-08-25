@@ -5,7 +5,7 @@ import { message, Modal } from 'ant-design-vue'
 import QRCode from 'qrcode'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { apiAdminGet, apiAdminPost } from '@/apis/base'
+import { apiAdminGet, apiAdminPatch, apiAdminPost } from '@/apis/base'
 import { feishuKnowledgeApi } from '@/apis/feishu_knowledge_api'
 import { documentApi } from '@/apis/knowledge_api'
 import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetailDrawer.vue'
@@ -14,6 +14,7 @@ import FeishuKnowledgeView from './FeishuKnowledgeView.vue'
 
 vi.mock('@/apis/base', () => ({
   apiAdminGet: vi.fn(),
+  apiAdminPatch: vi.fn(),
   apiAdminPost: vi.fn()
 }))
 
@@ -194,6 +195,7 @@ describe('feishuKnowledgeApi', () => {
 
   it('映射管理员 API，并编码路径和筛选参数', async () => {
     apiAdminGet.mockResolvedValue({ items: [] })
+    apiAdminPatch.mockResolvedValue({})
     apiAdminPost.mockResolvedValue({})
 
     await feishuKnowledgeApi.listSources()
@@ -597,8 +599,8 @@ describe('FeishuKnowledgeView', () => {
       if (url.endsWith('/oauth/status')) {
         return Promise.resolve({ authorized: true, status: 'active' })
       }
-      if (url === '/api/governance/reviews?source_id=source-1') {
-        return Promise.resolve({ items: [{ review_id: 'review-1' }, { review_id: 'review-2' }] })
+      if (url === '/api/governance/review-packages?source_id=source-1&view=mine') {
+        return Promise.resolve({ items: [], total: 2, counts: { mine: 2 } })
       }
       if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
       if (url.includes('/materials')) return Promise.resolve({ items: [] })
@@ -608,31 +610,48 @@ describe('FeishuKnowledgeView', () => {
     const wrapper = mountView()
     await flushPromises()
 
-    const reviewTab = wrapper.findAll('.governance-tab').find((tab) => tab.text().includes('待审核'))
+    const reviewTab = wrapper
+      .findAll('.governance-tab')
+      .find((tab) => tab.text().includes('待审核'))
     expect(reviewTab.text()).toContain('2')
-    expect(apiAdminGet).toHaveBeenCalledWith('/api/governance/reviews?source_id=source-1')
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/review-packages?source_id=source-1&view=mine'
+    )
     wrapper.unmount()
   })
 
-  it('首次进入页面时只把冲突和证据不足计入跨文档待处理数', async () => {
+  it('首次进入页面时立即显示跨文档关系总数和正式知识数', async () => {
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
-      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: true, status: 'active' })
+      if (url.endsWith('/oauth/status'))
+        return Promise.resolve({ authorized: true, status: 'active' })
       if (url === '/api/governance/comparisons/status?source_id=source-1') {
         return Promise.resolve({ relation_count: 838, issue_count: 2 })
       }
+      if (url === '/api/governance/knowledge?source_id=source-1') {
+        return Promise.resolve({
+          items: [{ knowledge_id: 'knowledge-1' }, { knowledge_id: 'knowledge-2' }]
+        })
+      }
       if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
       if (url.includes('/materials')) return Promise.resolve({ items: [] })
-      if (url === '/api/governance/reviews?source_id=source-1') return Promise.resolve({ items: [] })
+      if (url === '/api/governance/review-packages?source_id=source-1&view=mine')
+        return Promise.resolve({ items: [], total: 0, counts: { mine: 0 } })
       return Promise.resolve({ nodes: [] })
     })
 
     const wrapper = mountView()
     await flushPromises()
 
-    const relationTab = wrapper.findAll('.governance-tab').find((tab) => tab.text().includes('跨文档检查'))
-    expect(relationTab.text()).toContain('2')
-    expect(relationTab.text()).not.toContain('838')
+    const relationTab = wrapper
+      .findAll('.governance-tab')
+      .find((tab) => tab.text().includes('跨文档检查'))
+    const formalTab = wrapper
+      .findAll('.governance-tab')
+      .find((tab) => tab.text().includes('正式知识'))
+    expect(relationTab.text()).toContain('838')
+    expect(formalTab.text()).toContain('2')
+    expect(apiAdminGet).toHaveBeenCalledWith('/api/governance/knowledge?source_id=source-1')
     wrapper.unmount()
   })
 

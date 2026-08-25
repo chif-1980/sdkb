@@ -431,6 +431,42 @@ class FeishuMaterialVersion(Base):
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
 
+class FeishuSourceSegment(Base):
+    """Stable, versioned source segment produced from one parsed Feishu material."""
+
+    __tablename__ = "feishu_source_segments"
+    __table_args__ = (
+        UniqueConstraint("segment_id", name="uq_feishu_source_segments_segment_id"),
+        UniqueConstraint("version_id", "segment_key", name="uq_feishu_source_segments_version_key"),
+        Index("ix_feishu_source_segments_version_status", "version_id", "status"),
+        Index("ix_feishu_source_segments_file_index", "yuxi_file_id", "segment_index"),
+        Index("ix_feishu_source_segments_hash", "content_hash"),
+        Index("ix_feishu_source_segments_publication", "version_id", "publication_state"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    segment_id = Column(String(64), nullable=False, unique=True, index=True)
+    segment_key = Column(String(128), nullable=False)
+    version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    item_id = Column(
+        String(64), ForeignKey("feishu_source_items.item_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    yuxi_file_id = Column(String(64), nullable=False, index=True)
+    segment_index = Column(Integer, nullable=False)
+    segment_type = Column(String(32), nullable=False, default="paragraph", index=True)
+    title_path = Column(JSON_VALUE, nullable=False, default=list)
+    locator_json = Column(JSON_VALUE, nullable=False, default=dict)
+    content = Column(Text, nullable=False)
+    content_hash = Column(String(128), nullable=False, index=True)
+    token_count = Column(Integer, nullable=False, default=0)
+    publication_state = Column(String(32), nullable=False, default="PENDING", index=True)
+    status = Column(String(32), nullable=False, default="ACTIVE", index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+
 class FeishuProcessingEvent(Base):
     """追加式素材加工审计事件。"""
 
@@ -514,3 +550,225 @@ class FeishuCrossDocumentRelation(Base):
     resolved_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+
+class FeishuLogicalKnowledge(Base):
+    """One governed knowledge fact shared by one primary and multiple duplicate sources."""
+
+    __tablename__ = "feishu_logical_knowledge"
+    __table_args__ = (
+        UniqueConstraint("logical_knowledge_id", name="uq_feishu_logical_knowledge_id"),
+        Index("ix_feishu_logical_knowledge_source_status", "source_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    logical_knowledge_id = Column(String(64), nullable=False, unique=True, index=True)
+    source_id = Column(
+        String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title = Column(String(512), nullable=False)
+    status = Column(String(32), nullable=False, default="ACTIVE", index=True)
+    primary_source_ref_id = Column(String(64), index=True)
+    merged_into_id = Column(String(64), index=True)
+    created_by = Column(String(64))
+    updated_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+
+class FeishuKnowledgeSourceFragment(Base):
+    """A chunk-level source for governed logical knowledge."""
+
+    __tablename__ = "feishu_knowledge_source_fragments"
+    __table_args__ = (
+        UniqueConstraint("source_ref_id", name="uq_feishu_knowledge_source_fragments_ref"),
+        UniqueConstraint(
+            "logical_knowledge_id",
+            "version_id",
+            "chunk_id",
+            name="uq_feishu_knowledge_source_fragments_identity",
+        ),
+        Index("ix_feishu_knowledge_source_fragments_logical_role", "logical_knowledge_id", "source_role"),
+        Index("ix_feishu_knowledge_source_fragments_version_chunk", "version_id", "chunk_id"),
+        Index("ix_feishu_knowledge_source_fragments_version_segment", "version_id", "segment_id"),
+        Index("ix_feishu_knowledge_source_fragments_relation", "relation_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_ref_id = Column(String(64), nullable=False, unique=True, index=True)
+    logical_knowledge_id = Column(
+        String(64),
+        ForeignKey("feishu_logical_knowledge.logical_knowledge_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    relation_id = Column(
+        String(64),
+        ForeignKey("feishu_cross_document_relations.relation_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    yuxi_file_id = Column(String(64), nullable=False, index=True)
+    chunk_id = Column(String(128), nullable=False, index=True)
+    segment_id = Column(String(64), index=True)
+    chunk_index = Column(Integer, nullable=False)
+    content_hash = Column(String(128), nullable=False, index=True)
+    content_snapshot = Column(Text, nullable=False)
+    locator_json = Column(JSON_VALUE, nullable=False, default=dict)
+    source_role = Column(String(32), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="ACTIVE", index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+
+class FeishuDuplicateRelationDecision(Base):
+    """Idempotent adjudication that links one duplicate relation to logical knowledge groups."""
+
+    __tablename__ = "feishu_duplicate_relation_decisions"
+    __table_args__ = (
+        UniqueConstraint("decision_id", name="uq_feishu_duplicate_relation_decisions_id"),
+        UniqueConstraint("relation_id", name="uq_feishu_duplicate_relation_decisions_relation"),
+        UniqueConstraint("request_id", name="uq_feishu_duplicate_relation_decisions_request"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    decision_id = Column(String(64), nullable=False, unique=True, index=True)
+    relation_id = Column(
+        String(64),
+        ForeignKey("feishu_cross_document_relations.relation_id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    request_id = Column(String(64), nullable=False, unique=True, index=True)
+    strategy = Column(String(32), nullable=False)
+    primary_version_id = Column(String(64), index=True)
+    logical_knowledge_ids = Column(JSON_VALUE, nullable=False, default=list)
+    fragment_match_ids = Column(JSON_VALUE, nullable=False, default=list)
+    comment = Column(Text)
+    decided_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+
+
+class FeishuReviewPackage(Base):
+    """Business-facing review container for one source version or lifecycle trigger."""
+
+    __tablename__ = "feishu_review_packages"
+    __table_args__ = (
+        UniqueConstraint("package_id", name="uq_feishu_review_packages_package_id"),
+        UniqueConstraint("package_key", name="uq_feishu_review_packages_package_key"),
+        Index("ix_feishu_review_packages_source_status_assignee", "source_id", "workflow_status", "assignee_id"),
+        Index("ix_feishu_review_packages_source_item", "source_item_id"),
+        Index("ix_feishu_review_packages_source_version", "source_version_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    package_id = Column(String(64), nullable=False, unique=True, index=True)
+    package_key = Column(String(256), nullable=False, unique=True)
+    source_id = Column(
+        String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_item_id = Column(
+        String(64), ForeignKey("feishu_source_items.item_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    trigger_type = Column(String(32), nullable=False, default="SOURCE_VERSION", index=True)
+    title_snapshot = Column(String(512))
+    path_snapshot = Column(String(2048))
+    source_url_snapshot = Column(String(2048))
+    workflow_status = Column(String(40), nullable=False, default="OPEN", index=True)
+    assignee_id = Column(String(64), index=True)
+    risk_level = Column(String(16), nullable=False, default="MEDIUM")
+    draft_json = Column(JSON_VALUE, nullable=False, default=dict)
+    lock_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+    completed_at = Column(DateTime(timezone=True))
+
+
+class FeishuReviewItem(Base):
+    """One independently decidable item inside a review package."""
+
+    __tablename__ = "feishu_review_items"
+    __table_args__ = (
+        UniqueConstraint("review_item_id", name="uq_feishu_review_items_review_item_id"),
+        UniqueConstraint("package_id", "candidate_key", name="uq_feishu_review_items_package_candidate"),
+        Index("ix_feishu_review_items_package_status", "package_id", "item_status"),
+        Index("ix_feishu_review_items_type_status", "review_type", "item_status"),
+        Index("ix_feishu_review_items_subject", "subject_type", "subject_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    review_item_id = Column(String(64), nullable=False, unique=True, index=True)
+    package_id = Column(
+        String(64), ForeignKey("feishu_review_packages.package_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    candidate_key = Column(String(256), nullable=False)
+    review_type = Column(String(24), nullable=False, index=True)
+    subject_type = Column(String(32), nullable=False)
+    subject_id = Column(String(64), nullable=False)
+    title = Column(String(512))
+    summary = Column(Text)
+    subject_locator_json = Column(JSON_VALUE, nullable=False, default=dict)
+    evidence_json = Column(JSON_VALUE, nullable=False, default=dict)
+    relation_ids = Column(JSON_VALUE, nullable=False, default=list)
+    problem_tags = Column(JSON_VALUE, nullable=False, default=list)
+    applicability_scope = Column(JSON_VALUE, nullable=False, default=dict)
+    item_status = Column(String(40), nullable=False, default="PENDING", index=True)
+    outcome = Column(String(48))
+    internal_action = Column(String(32))
+    decision_comment = Column(Text)
+    decision_payload = Column(JSON_VALUE, nullable=False, default=dict)
+    decided_by = Column(String(64))
+    decided_at = Column(DateTime(timezone=True))
+    reopened_from_item_id = Column(
+        String(64), ForeignKey("feishu_review_items.review_item_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+
+class FeishuSourceChangeRequest(Base):
+    """Request for the source owner to correct the read-only Feishu original."""
+
+    __tablename__ = "feishu_source_change_requests"
+    __table_args__ = (
+        UniqueConstraint("change_request_id", name="uq_feishu_source_change_requests_request_id"),
+        UniqueConstraint(
+            "review_item_id",
+            "round_number",
+            name="uq_feishu_source_change_requests_item_round",
+        ),
+        Index("ix_feishu_change_requests_status_source_item", "status", "source_item_id"),
+        Index("ix_feishu_change_requests_review_status", "review_item_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    change_request_id = Column(String(64), nullable=False, unique=True, index=True)
+    review_item_id = Column(
+        String(64), ForeignKey("feishu_review_items.review_item_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_item_id = Column(
+        String(64), ForeignKey("feishu_source_items.item_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    requested_version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_url = Column(String(2048))
+    status = Column(String(40), nullable=False, default="OPEN", index=True)
+    request_text = Column(Text, nullable=False)
+    responsible_user_id = Column(String(128))
+    responsible_user_name = Column(String(255))
+    round_number = Column(Integer, nullable=False, default=1)
+    received_version_id = Column(
+        String(64), ForeignKey("feishu_material_versions.version_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_by = Column(String(64))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+    resolved_at = Column(DateTime(timezone=True))

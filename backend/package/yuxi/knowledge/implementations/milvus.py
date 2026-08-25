@@ -680,7 +680,12 @@ class MilvusKB(KnowledgeBase):
         return f"file_id in [{', '.join(quoted_ids)}]"
 
     async def index_file(
-        self, kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None
+        self,
+        kb_id: str,
+        file_id: str,
+        operator_id: str | None = None,
+        params: dict | None = None,
+        prepared_chunks: list[dict] | None = None,
     ) -> dict:
         """
         Index parsed file (Status: INDEXING -> INDEXED/ERROR_INDEXING)
@@ -690,6 +695,7 @@ class MilvusKB(KnowledgeBase):
             file_id: File ID
             operator_id: ID of the user performing the operation
             params: Override processing params to apply during indexing (merged on top of stored params)
+            prepared_chunks: Optional governed chunks built from approved source segments
 
         Returns:
             Updated file metadata
@@ -752,8 +758,15 @@ class MilvusKB(KnowledgeBase):
             markdown_content = await self._read_markdown_from_minio(file_meta["markdown_file"])
             filename = file_meta.get("filename")
 
-            # Split
-            chunks = self._split_text_into_chunks(markdown_content, file_id, filename, params)
+            # Governed Feishu publishing supplies approved chunks. Other paths
+            # continue to use the configured Yuxi chunking strategy.
+            chunks = (
+                [dict(chunk) for chunk in prepared_chunks]
+                if prepared_chunks is not None
+                else self._split_text_into_chunks(markdown_content, file_id, filename, params)
+            )
+            if any(chunk.get("file_id") != file_id for chunk in chunks):
+                raise ValueError("Prepared chunk file_id does not match the indexed file")
             logger.info(
                 f"Split {filename} into {len(chunks)} chunks with params: "
                 f"chunk_preset_id={params.get('chunk_preset_id')}, "

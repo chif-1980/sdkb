@@ -100,6 +100,7 @@ class GroundedCitation:
     excerpt: str
     source_version_at: datetime | None
     chunk_index: int | None = None
+    chunk_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -769,7 +770,6 @@ class AnswerService:
             [item.yuxi_file_id for item in evidence if item.yuxi_file_id in allowed_file_ids],
         )
         validated: list[GroundedCitation] = []
-        seen_content: set[str] = set()
         for item in evidence:
             material = current.get(item.yuxi_file_id)
             if material is None:
@@ -779,9 +779,8 @@ class AnswerService:
                 continue
             source_url = self._openable_source_url(current_item.source_url)
             content_key = " ".join(item.excerpt.split())
-            if source_url is None or not content_key or content_key in seen_content:
+            if source_url is None or not content_key:
                 continue
-            seen_content.add(content_key)
             validated.append(
                 replace(
                     item,
@@ -798,7 +797,7 @@ class AnswerService:
             )
             if len(validated) >= MAX_EVIDENCE:
                 break
-        return tuple(validated)
+        return await self._deduplicate_governed_evidence(tuple(validated))
 
     async def _revalidate_evidence(self, source_id: str, chunks: Any) -> tuple[GroundedCitation, ...]:
         usable_chunks: list[tuple[dict[str, Any], str]] = []
@@ -818,8 +817,13 @@ class AnswerService:
                 file_ids.append(file_id)
 
         published = await self._get_published_map(source_id, file_ids)
+        chunk_ids = [
+            str(chunk["metadata"].get("chunk_id"))
+            for chunk, _file_id in usable_chunks
+            if isinstance(chunk["metadata"].get("chunk_id"), str) and chunk["metadata"].get("chunk_id")
+        ]
+        governance = await self._get_chunk_governance(chunk_ids)
         evidence: list[GroundedCitation] = []
-        seen_content: set[str] = set()
         for chunk, file_id in usable_chunks:
             material = published.get(file_id)
             if material is None:
@@ -837,10 +841,11 @@ class AnswerService:
             )
             excerpt = self._trim_excerpt(chunk["content"])
             content_key = " ".join(excerpt.split())
-            if not content_key or content_key in seen_content:
+            if not content_key:
                 continue
-            seen_content.add(content_key)
-            locator = f"第{normalized_chunk_index + 1}段" if normalized_chunk_index is not None else "文档正文"
+            chunk_id = metadata.get("chunk_id") if isinstance(metadata.get("chunk_id"), str) else None
+            details = governance.get(chunk_id or "", {})
+            locator = self._governed_locator(details, normalized_chunk_index)
             evidence.append(
                 GroundedCitation(
                     evidence_id=f"E{len(evidence) + 1}",
@@ -857,11 +862,83 @@ class AnswerService:
                     excerpt=excerpt,
                     source_version_at=version.published_at,
                     chunk_index=normalized_chunk_index,
+                    chunk_id=chunk_id,
                 )
             )
             if len(evidence) >= MAX_EVIDENCE:
                 break
-        return tuple(evidence)
+        return await self._deduplicate_governed_evidence(tuple(evidence), governance=governance)
+
+    async def _get_chunk_governance(self, chunk_ids: list[str] | tuple[str, ...]) -> dict[str, dict]:
+        if not chunk_ids:
+            return {}
+        if self._repository is not None:
+            resolver = getattr(self._repository, "get_chunk_governance", None)
+            return await resolver(chunk_ids) if callable(resolver) else {}
+        if self._read_session_factory is None:
+            raise RuntimeError("Read session factory is required")
+        async with self._read_session_factory() as session:
+            return await ProductChatRepository(session).get_chunk_governance(chunk_ids)
+
+    async def _deduplicate_governed_evidence(
+        self,
+        evidence: tuple[GroundedCitation, ...],
+        *,
+        governance: dict[str, dict] | None = None,
+    ) -> tuple[GroundedCitation, ...]:
+        if not evidence:
+            return ()
+        if governance is None:
+            governance = await self._get_chunk_governance(
+                [item.chunk_id for item in evidence if isinstance(item.chunk_id, str) and item.chunk_id]
+            )
+        selected: dict[str, tuple[GroundedCitation, int]] = {}
+        order: list[str] = []
+        content_owner: dict[str, str] = {}
+        for item in evidence:
+            details = governance.get(item.chunk_id or "", {})
+            logical_ids = details.get("logical_knowledge_ids")
+            logical_id = (
+                next((str(value) for value in logical_ids if value), None)
+                if isinstance(logical_ids, (list, tuple))
+                else None
+            )
+            content_key = " ".join(item.excerpt.split())
+            key = f"logical:{logical_id}" if logical_id else f"content:{content_key}"
+            key = content_owner.get(content_key, key)
+            role = details.get("source_role")
+            priority = 2 if role == "PRIMARY" else 1 if role == "ALIAS" else 0
+            if key not in selected:
+                selected[key] = (item, priority)
+                order.append(key)
+                content_owner[content_key] = key
+            elif priority > selected[key][1]:
+                selected[key] = (item, priority)
+            if len(order) >= MAX_EVIDENCE:
+                break
+        return tuple(
+            replace(selected[key][0], evidence_id=f"E{index}")
+            for index, key in enumerate(order, start=1)
+        )
+
+    @staticmethod
+    def _governed_locator(details: dict, chunk_index: int | None) -> str:
+        locator = details.get("locator") if isinstance(details, dict) else None
+        if isinstance(locator, dict):
+            if locator.get("page"):
+                return f"第{locator['page']}页"
+            if locator.get("slide"):
+                return f"第{locator['slide']}页幻灯片"
+            if locator.get("sheet"):
+                row_start = locator.get("row_start")
+                row_end = locator.get("row_end")
+                if row_start and row_end:
+                    return f"工作表 {locator['sheet']} · 第{row_start}-{row_end}行"
+                return f"工作表 {locator['sheet']}"
+        title_path = details.get("title_path") if isinstance(details, dict) else None
+        if isinstance(title_path, list) and title_path:
+            return f"章节：{' > '.join(str(value) for value in title_path if value)}"
+        return f"第{chunk_index + 1}段" if chunk_index is not None else "文档正文"
 
     async def _get_published_map(
         self,
@@ -934,6 +1011,7 @@ class AnswerService:
                             locator=f"第{neighbor_index + 1}段",
                             excerpt=excerpt,
                             chunk_index=neighbor_index,
+                            chunk_id=f"{file_id}_chunk_{neighbor_index}",
                         )
                     )
                     if len(expanded) >= MAX_EVIDENCE:
@@ -941,7 +1019,7 @@ class AnswerService:
                 if len(expanded) >= MAX_EVIDENCE:
                     break
 
-        return tuple(replace(item, evidence_id=f"E{index}") for index, item in enumerate(expanded, start=1))
+        return await self._deduplicate_governed_evidence(tuple(expanded))
 
     @staticmethod
     def _trim_excerpt(content: str) -> str:

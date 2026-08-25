@@ -14,6 +14,7 @@ from yuxi.governance.domain import (
 )
 from yuxi.governance.comparator import CrossDocumentComparisonService
 from yuxi.governance.content_quality import assess_content
+from yuxi.governance.review_backfill import invalidate_unsubstantiated_text_relations
 from yuxi.governance.schemas import ReviewResolveRequest
 from yuxi.governance.service import GovernanceService
 from yuxi.storage.postgres.models_business import Base
@@ -169,6 +170,49 @@ async def test_comparison_status_separates_all_relations_from_actionable_issues(
     assert status["issue_count"] == 1
 
 
+async def test_metadata_only_overlap_is_invalidated(governance_session):
+    relation = FeishuCrossDocumentRelation(
+        relation_id="relation-metadata-only",
+        comparison_key="version-current:version-candidate:metadata-only",
+        source_version_id="version-current",
+        target_version_id="version-candidate",
+        relation_type="OVERLAP",
+        same_content=["目录和标题语义相近"],
+        reasoning="标题和目录相似",
+        status="open",
+    )
+    governance_session.add(relation)
+    await governance_session.commit()
+
+    invalidated = await invalidate_unsubstantiated_text_relations(governance_session)
+    await governance_session.commit()
+
+    assert invalidated == 1
+    assert relation.status == "invalidated"
+    assert relation.human_decision == "NO_TEXT_EVIDENCE"
+
+
+async def test_exact_duplicate_with_body_evidence_remains_open(governance_session):
+    relation = FeishuCrossDocumentRelation(
+        relation_id="relation-body-duplicate",
+        comparison_key="version-current:version-candidate:body-duplicate",
+        source_version_id="version-current",
+        target_version_id="version-candidate",
+        relation_type="EXACT_DUPLICATE",
+        same_content=["内容哈希一致", "正文局部相似度 100%"],
+        reasoning="两边已解析正文完全一致",
+        status="open",
+    )
+    governance_session.add(relation)
+    await governance_session.commit()
+
+    invalidated = await invalidate_unsubstantiated_text_relations(governance_session)
+    await governance_session.commit()
+
+    assert invalidated == 0
+    assert relation.status == "open"
+
+
 async def test_request_changes_persists_scope_closes_relation_and_removes_pending_review(governance_session):
     service = GovernanceService(governance_session)
     review, version, item = await service.prepare_resolution("version-candidate", operator_id="reviewer-a")
@@ -240,11 +284,21 @@ async def test_comparison_is_idempotent_and_ensures_review_task(governance_sessi
         content_hash="current-hash",
         processing_status="awaiting_review",
         review_status="pending",
+        yuxi_file_id="file-new",
     )
     governance_session.add_all([current_item, current])
     await governance_session.commit()
 
-    service = CrossDocumentComparisonService(governance_session)
+    async def content_loader(file_id: str) -> str:
+        if file_id == "file-candidate":
+            return "金融行业解决方案\n本方案用于银行业务流程管理和风险控制。"
+        assert file_id in {"file-current", "file-new"}
+        return "公司简介\n善达信息专注企业数字化服务，为客户提供知识管理和智能助手产品。"
+
+    service = CrossDocumentComparisonService(
+        governance_session,
+        content_loader=content_loader,
+    )
     first = await service.compare_version("version-new")
     second = await service.compare_version("version-new")
     await governance_session.commit()
@@ -252,14 +306,80 @@ async def test_comparison_is_idempotent_and_ensures_review_task(governance_sessi
     assert len(first) == 1
     assert len(second) == 1
     assert first[0].relation_id == second[0].relation_id
-    assert await governance_session.scalar(
-        select(FeishuGovernanceReview).where(FeishuGovernanceReview.version_id == "version-new")
-    ) is not None
-    assert await governance_session.scalar(
-        select(func.count()).select_from(FeishuCrossDocumentRelation).where(
-            FeishuCrossDocumentRelation.comparison_key == "version-current:version-new"
+    assert (
+        await governance_session.scalar(
+            select(FeishuGovernanceReview).where(FeishuGovernanceReview.version_id == "version-new")
         )
-    ) == 1
+        is not None
+    )
+    assert (
+        await governance_session.scalar(
+            select(func.count())
+            .select_from(FeishuCrossDocumentRelation)
+            .where(FeishuCrossDocumentRelation.comparison_key == "version-current:version-new")
+        )
+        == 1
+    )
+
+
+async def test_comparison_does_not_treat_title_or_path_similarity_as_content_overlap(
+    governance_session,
+):
+    current = await governance_session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-current")
+    )
+    candidate = await governance_session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-candidate")
+    )
+    current_item = await governance_session.scalar(
+        select(FeishuSourceItem).where(FeishuSourceItem.item_id == current.item_id)
+    )
+    candidate_item = await governance_session.scalar(
+        select(FeishuSourceItem).where(FeishuSourceItem.item_id == candidate.item_id)
+    )
+    candidate_item.title = "Q900 部署指南副本"
+    candidate_item.path_text = "产品资料 / Q900 / 副本"
+
+    evidence = CrossDocumentComparisonService._classify(
+        current,
+        current_item,
+        candidate,
+        candidate_item,
+        current_content="",
+        candidate_content="",
+    )
+
+    assert evidence is None
+
+
+async def test_comparison_uses_matching_body_passages_as_overlap_evidence(governance_session):
+    current = await governance_session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-current")
+    )
+    candidate = await governance_session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-candidate")
+    )
+    current_item = await governance_session.scalar(
+        select(FeishuSourceItem).where(FeishuSourceItem.item_id == current.item_id)
+    )
+    candidate_item = await governance_session.scalar(
+        select(FeishuSourceItem).where(FeishuSourceItem.item_id == candidate.item_id)
+    )
+    shared = "善达信息专注企业数字化服务，为客户提供知识管理、智能助手和持续运营服务。"
+
+    evidence = CrossDocumentComparisonService._classify(
+        current,
+        current_item,
+        candidate,
+        candidate_item,
+        current_content=f"产品手册\n{shared}\n部署要求另见附件。",
+        candidate_content=f"解决方案\n{shared}\n本方案适用于制造行业。",
+    )
+
+    assert evidence is not None
+    assert evidence["relation_type"] == "OVERLAP"
+    assert evidence["similarity"] == 1.0
+    assert "正文局部相似度 100%" in evidence["same_content"]
 
 
 async def test_open_conflict_is_detected_for_publish_guard(governance_session):
