@@ -1,178 +1,57 @@
-# 快速开始指南
+# 快速开始
 
-欢迎使用 Yuxi（语析），这是一个智能知识库和知识图谱 Agent 开发平台。
-本指南将帮助你在几分钟内启动并运行系统，使你能够利用 LangGraph、RAG 技术和知识图谱构建 AI 驱动的知识应用。
+本页帮助知识管理员完成第一次资料扫描、审核和问答验证。系统部署与环境配置请参阅[生产部署](/advanced/deployment)。
 
-![系统架构图](https://xerrors.oss-cn-shanghai.aliyuncs.com/github/arch.png)
+## 1. 登录管理端
 
+使用组织管理员账号登录善达知枢。首次使用前，确认账号具有以下权限：
 
-::: tip 提示
-除了此文档网站外，你还可以访问 [Zread](https://zread.ai/xerrors/Yuxi) 或 [DeepWiki](https://deepwiki.com/xerrors/Yuxi) 查看自动生成的详细项目文档。
-:::
+- 查看“知识加工”菜单
+- 访问飞书企业知识源
+- 处理审核任务
+- 查看正式知识
 
-## 环境要求
+## 2. 检查知识源
 
-项目采用微服务架构设计，默认服务无需 GPU 支持。如果需要使用 OCR 功能，可以通过环境变量配置外部服务。
+进入“知识加工”，选择“检查连接”。连接正常后再执行扫描；如果检查失败，先确认飞书凭证和知识库访问权限。
 
-## 快速安装
+## 3. 执行第一次扫描
 
-### 步骤一：获取项目代码
+首次接入选择“全量扫描”。日常更新使用“增量扫描”，只处理新增或变化的材料。
 
-```bash
-# 克隆最新版本
-git clone --branch v0.7.1 --depth 1 https://github.com/xerrors/Yuxi.git
-cd Yuxi
-```
+扫描期间可以在“资料与扫描”查看批次进度和失败原因。材料完成解析后，会出现在“待审核”。
 
-`--depth 1` 标志会创建一个浅克隆，仅包含最新的提交，从而显著减少下载时间和磁盘使用量。下表提供了版本选择的指导。
+## 4. 审核知识单元
 
-| 版本 | 适用场景 |
-|------|----------|
-| v0.7.1 | 当前稳定版本，推荐生产使用 |
-| main | 开发版本，包含最新特性（可能不稳定） |
+打开一项审核任务，按以下顺序操作：
 
-### 步骤二：配置环境变量
+1. 在版式视图中核对原文。
+2. 选择当前知识单元并查看对应内容块。
+3. 有跨文档证据时，核对高亮文字和来源位置。
+4. 选择纳入知识库、不纳入知识库或退回飞书修改。
+5. 处理完全部知识单元后提交审核结果。
 
-**方式一：使用初始化脚本（推荐）**
+内容整体可靠且不需要逐项判断时，可以使用整篇批量审核；整篇无需入库或需要修改时，分别使用批量不纳入或批量退回。
 
-我们提供了自动化脚本，帮你完成环境配置和 Docker 镜像拉取：
+## 5. 核对正式知识
 
-```bash
-# Linux/macOS
-./scripts/init.sh
+提交完成后进入“正式知识”。确认已经纳入的知识单元可见，并检查标题、来源和发布时间。
 
-# Windows PowerShell
-.\scripts\init.ps1
-```
+如果任务已从待处理消失但正式知识中没有内容，先检查该材料是否全部选择了“不纳入知识库”，再查看发布失败信息。
 
-脚本会引导你完成以下配置：
-- 创建 `.env` 配置文件
-- 设置 `SILICONFLOW_API_KEY`（必需，用于调用大模型）
-- 设置 `TAVILY_API_KEY`（可选，用于搜索服务）
-- 自动拉取必需的 Docker 镜像
+## 6. 在知识助手中验证
 
-::: tip API Key 获取
-- **硅基流动**：访问 [cloud.siliconflow.cn](https://cloud.siliconflow.cn/i/Eo5yTHGJ)，注册认证即送 16 元额度
-- **Tavily**：访问 [app.tavily.com](https://app.tavily.com/) 获取搜索 API Key（可选）
-:::
+打开企业知识助手，使用刚发布内容中的明确关键词提问。核对回答是否引用正确来源，再分别测试简洁和详细回答模式。
 
-**方式二：手动配置**
+## 日常操作建议
 
-如果偏好手动配置：
-
-```bash
-# 复制环境变量模板
-cp .env.template .env
-
-# 编辑 .env 文件，填入你的 API Key
-```
-
-### 步骤三：启动服务
-
-```bash
-# 构建并启动所有服务
-docker compose up --build -d
-```
-
-服务首次启动需要等待镜像拉取和编译，请耐心等待 2-3 分钟。
-
-::: tip 轻量模式（Lite Mode）
-如果你不需要知识库和知识图谱功能，可以使用轻量模式启动，跳过 Milvus、Neo4j、etcd 等服务，节省系统资源：
-
-```bash
-make up-lite  # macOS or Linux
-```
-
-轻量模式仅启动核心服务（前端、后端、PostgreSQL、Redis、MinIO），前端侧边栏会自动隐藏知识库和图谱入口。切换回完整模式只需运行 `make up`。
-:::
-
-### 步骤四：访问系统
-
-服务启动后，访问以下地址：
-
-| 服务 | 地址 |
-|------|------|
-| Web 界面 | http://localhost:5173 |
-| API 文档 | http://localhost:5050/docs |
-
-首次访问时，系统会要求你设置超级管理员账号和密码，请妥善保存。
-
-## 故障排除
-
-### 查看服务状态
-
-```bash
-# 查看所有容器状态
-docker ps
-
-# 实时查看后端日志
-docker logs api-dev -f
-
-# 实时查看前端日志
-docker logs web-dev -f
-```
-
-### 部署故障排查
-
-<details>
-<summary><strong>Docker 镜像拉取失败</strong></summary>
-
-如果网络原因导致镜像拉取失败，可以尝试：
-
-```bash
-# 手动拉取基础镜像
-bash scripts/pull_image.sh python:3.13-slim
-```
-
-**离线环境部署方案**：
-
-```bash
-# 在有网络的环境导出镜像，注意检查镜像列表，不一定是最新的。
-bash docker/save_docker_images.sh
-
-# 传输到目标机器
-scp docker_images_xxx.tar user@host:/path/
-
-# 导入镜像
-docker load -i docker_images_xxx.tar
-```
-</details>
-
-<details>
-<summary><strong>构建失败</strong></summary>
-
-多数构建失败是由于网络问题。尝试配置代理：
-
-```bash
-# Linux/macOS
-export HTTP_PROXY=http://IP:PORT
-export HTTPS_PROXY=http://IP:PORT
-
-# Windows PowerShell
-$env:HTTP_PROXY="http://IP:PORT"
-$env:HTTPS_PROXY="http://IP:PORT"
-```
-
-如果配置代理后反而失败，尝试移除代理后重试。
-</details>
-
-<details>
-<summary><strong>Milvus 服务启动失败</strong></summary>
-
-```bash
-# 重启 Milvus 服务
-docker compose up milvus -d
-docker restart api-dev
-```
-</details>
-
-::: tip 调试面板
-前端提供了调试面板（在头像菜单中可找到），可以查看详细的请求和响应信息。生产环境建议关闭此特性。
-:::
+- 日常优先执行增量扫描，减少无变化材料的重复处理。
+- 重复内容只保留一份可信来源，其他材料中的相同知识单元标记为不纳入。
+- 小范围变化按知识单元更新，大范围重写再考虑整篇替换。
+- 高风险内容必须核对来源原文，不只依赖自动生成的摘要。
 
 ## 下一步
 
-- 了解如何配置模型：阅读 [模型配置](./model-config.md)
-- 探索知识库功能：阅读 [知识库与知识图谱](./knowledge-base.md)
-- 学习智能体开发：阅读 [智能体开发](../agents/agents-config.md)
-- 深入了解配置系统：阅读 [配置系统详解](../advanced/configuration.md)
+- [知识加工](/guide/knowledge-processing)
+- [审核与发布](/guide/review-and-publish)
+- [知识助手](/guide/knowledge-assistant)

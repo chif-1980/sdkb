@@ -1,44 +1,156 @@
-/* 导入项目的颜色变量 */
-@import url('../../../web/src/assets/css/base.css');
-@import url('../../../web/src/assets/css/base.dark.css');
-
-/* VitePress 主题色覆盖 */
 :root {
-  /* 覆盖 VitePress 的主题色，使用项目中定义的 main-color */
-  --vp-c-brand-1: var(--main-color);
-  --vp-c-brand-2: var(--main-bright);
-  --vp-c-brand-3: var(--main-700);
-  --vp-c-brand-4: var(--main-800);
-  --vp-c-brand-5: var(--main-900);
-  --vp-c-brand-6: var(--main-1000);
-
-  /* 浅色模式下的文本颜色 */
-  --vp-c-brand-light: var(--main-color);
-  --vp-c-brand-lighter: var(--main-bright);
-  --vp-c-brand-lightest: var(--main-400);
-
-  /* 深色模式下的文本颜色 */
-  --vp-c-brand-dark: var(--main-300);
-  --vp-c-brand-darker: var(--main-200);
-  --vp-c-brand-darkest: var(--main-100);
+  --vp-c-brand-1: #087f96;
+  --vp-c-brand-2: #096d82;
+  --vp-c-brand-3: #075d70;
+  --vp-c-brand-soft: rgb(8 127 150 / 12%);
+  --vp-c-tip-1: #087f96;
+  --vp-c-tip-2: #096d82;
+  --vp-c-tip-3: #075d70;
+  --vp-c-tip-soft: rgb(8 127 150 / 10%);
+  --vp-font-family-base: Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --vp-home-hero-name-color: #087f96;
 }
 
-/* 深色模式覆盖 */
 .dark {
-  --vp-c-brand-1: var(--main-color);
-  --vp-c-brand-2: var(--main-bright);
-  --vp-c-brand-3: var(--main-700);
-  --vp-c-brand-4: var(--main-800);
-  --vp-c-brand-5: var(--main-900);
-  --vp-c-brand-6: var(--main-1000);
+  --vp-c-brand-1: #5bc3d5;
+  --vp-c-brand-2: #75cfdd;
+  --vp-c-brand-3: #8edbe6;
+  --vp-c-brand-soft: rgb(91 195 213 / 14%);
+  --vp-home-hero-name-color: #75cfdd;
+}
 
-  /* 浅色模式下的文本颜色 */
-  --vp-c-brand-light: var(--main-color);
-  --vp-c-brand-lighter: var(--main-bright);
-  --vp-c-brand-lightest: var(--main-400);
+.VPNavBarTitle .logo {
+  width: 22px;
+  height: 32px;
+  object-fit: contain;
+}
 
-  /* 深色模式下的文本颜色 */
-  --vp-c-brand-dark: var(--main-300);
-  --vp-c-brand-darker: var(--main-200);
-  --vp-c-brand-darkest: var(--main-100);
+.VPNavBarTitle .title {
+  gap: 10px;
+  letter-spacing: 0;
+}
+
+.VPHero .name,
+.VPHero .text {
+  letter-spacing: 0;
+}
+
+.VPHero .name {
+  font-size: 44px;
+  line-height: 52px;
+}
+
+.VPHero .text {
+  max-width: 720px;
+  font-size: 40px;
+  line-height: 50px;
+}
+
+.VPHero .image {
+  margin: -72px -24px 28px;
+}
+
+.VPHero .image-container {
+  width: 300px;
+  height: 112px;
+}
+
+.VPHero .image-src {
+  max-width: 250px;
+  max-height: 96px;
+  object-fit: contain;
+}
+
+.VPFeature {
+  border-radius: 8px;
+}
+
+.VPButton {
+  border-radius: 6px !important;
+}
+
+.home-path {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  max-width: 1080px;
+  margin: 8px auto 0;
+  padding: 18px 24px;
+  color: var(--vp-c-text-2);
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.home-path strong {
+  color: var(--vp-c-text-1);
+}
+
+.home-path i {
+  color: #c07a1b;
+  font-style: normal;
+}
+
+@media (min-width: 960px) {
+  .VPHero.has-image .main {
+    max-width: 660px;
+  }
+
+  .VPHero .text {
+    max-width: 660px;
+    font-size: 42px;
+    line-height: 52px;
+  }
+
+  .VPHero .image {
+    margin: 0;
+  }
+
+  .VPHero .image-container {
+    width: 300px;
+    height: 160px;
+  }
+
+  .VPHero .image-src {
+    max-width: 260px;
+    max-height: 104px;
+  }
+}
+
+@media (max-width: 640px) {
+  .VPHero .name {
+    font-size: 36px;
+    line-height: 44px;
+  }
+
+  .VPHero .text {
+    max-width: 360px;
+    font-size: 30px;
+    line-height: 40px;
+  }
+
+  .VPHero .image {
+    margin: -52px -24px 20px;
+  }
+
+  .VPHero .image-container {
+    width: min(260px, 80vw);
+    height: 96px;
+  }
+
+  .VPHero .image-src {
+    max-width: min(220px, 72vw);
+    max-height: 86px;
+  }
+
+  .home-path {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 8px;
+    margin-inline: 24px;
+    padding-inline: 0;
+  }
+
+  .home-path strong {
+    flex-basis: 100%;
+  }
 }
