@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
+import os
 import re
 from collections import OrderedDict
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -64,17 +66,22 @@ class ComparisonBackfillRequest(BaseModel):
 
 
 _PRESENTATION_SOURCE_CACHE: OrderedDict[str, bytes] = OrderedDict()
-_PRESENTATION_PDF_CACHE: OrderedDict[str, bytes] = OrderedDict()
 _PRESENTATION_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
 _PRESENTATION_SLIDE_CACHE: OrderedDict[tuple[str, int], bytes] = OrderedDict()
-_PRESENTATION_CONVERSION_LOCK = asyncio.Lock()
 _DOCUMENT_SOURCE_CACHE: OrderedDict[str, bytes] = OrderedDict()
-_DOCUMENT_PDF_CACHE: OrderedDict[str, bytes] = OrderedDict()
 _DOCUMENT_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
 _DOCUMENT_PAGE_CACHE: OrderedDict[tuple[str, int], tuple[bytes, str]] = OrderedDict()
-_DOCUMENT_CONVERSION_LOCK = asyncio.Lock()
 _RELATION_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
 _RELATION_PAGE_CACHE: OrderedDict[tuple[str, str, int], tuple[bytes, str]] = OrderedDict()
+_OFFICE_PDF_CACHE: OrderedDict[str, bytes] = OrderedDict()
+_OFFICE_PDF_LOCKS: dict[str, asyncio.Lock] = {}
+_PREVIEW_PDF_CACHE_DIR = Path(
+    os.getenv("YUXI_GOVERNANCE_PREVIEW_CACHE_DIR", "saves/cache/governance-preview-pdf")
+)
+_PREVIEW_PDF_DISK_LIMIT = 32
+_PREVIEW_PDF_DISK_MAX_BYTES = 4 * 1024**3
+_OFFICE_PDF_MEMORY_LIMIT = 16
+_OFFICE_PDF_MEMORY_MAX_BYTES = 1536 * 1024**2
 
 
 def _remember(cache: OrderedDict, key, value, *, limit: int) -> None:
@@ -82,6 +89,102 @@ def _remember(cache: OrderedDict, key, value, *, limit: int) -> None:
     cache.move_to_end(key)
     while len(cache) > limit:
         cache.popitem(last=False)
+
+
+def _remember_bytes(
+    cache: OrderedDict[str, bytes],
+    key: str,
+    value: bytes,
+    *,
+    limit: int,
+    max_bytes: int,
+) -> None:
+    cache[key] = value
+    cache.move_to_end(key)
+    total_bytes = sum(len(item) for item in cache.values())
+    while len(cache) > limit or (total_bytes > max_bytes and len(cache) > 1):
+        _expired_key, expired = cache.popitem(last=False)
+        total_bytes -= len(expired)
+
+
+def _preview_pdf_cache_path(cache_key: str) -> Path:
+    digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+    return _PREVIEW_PDF_CACHE_DIR / f"{digest}.pdf"
+
+
+def _read_preview_pdf(cache_key: str) -> bytes | None:
+    path = _preview_pdf_cache_path(cache_key)
+    try:
+        content = path.read_bytes()
+        if not content.startswith(b"%PDF-"):
+            path.unlink(missing_ok=True)
+            return None
+        path.touch(exist_ok=True)
+        return content
+    except OSError:
+        return None
+
+
+def _write_preview_pdf(cache_key: str, content: bytes) -> None:
+    if not content.startswith(b"%PDF-"):
+        return
+    path = _preview_pdf_cache_path(cache_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    try:
+        cached_files = sorted(path.parent.glob("*.pdf"), key=lambda item: item.stat().st_mtime)
+        total_bytes = sum(item.stat().st_size for item in cached_files)
+        while len(cached_files) > _PREVIEW_PDF_DISK_LIMIT or (
+            total_bytes > _PREVIEW_PDF_DISK_MAX_BYTES and len(cached_files) > 1
+        ):
+            expired = cached_files.pop(0)
+            expired_size = expired.stat().st_size
+            expired.unlink(missing_ok=True)
+            total_bytes -= expired_size
+    except OSError:
+        pass
+
+
+async def _cached_office_pdf(cache_key: str, filename: str, content: bytes) -> bytes:
+    cached = _OFFICE_PDF_CACHE.get(cache_key)
+    if cached is not None:
+        _OFFICE_PDF_CACHE.move_to_end(cache_key)
+        return cached
+
+    cached = await asyncio.to_thread(_read_preview_pdf, cache_key)
+    if cached is not None:
+        _remember_bytes(
+            _OFFICE_PDF_CACHE,
+            cache_key,
+            cached,
+            limit=_OFFICE_PDF_MEMORY_LIMIT,
+            max_bytes=_OFFICE_PDF_MEMORY_MAX_BYTES,
+        )
+        return cached
+
+    lock = _OFFICE_PDF_LOCKS.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        cached = _OFFICE_PDF_CACHE.get(cache_key)
+        if cached is not None:
+            _OFFICE_PDF_CACHE.move_to_end(cache_key)
+            return cached
+        cached = await asyncio.to_thread(_read_preview_pdf, cache_key)
+        if cached is None:
+            cached = await convert_office_to_pdf(filename, content)
+            await asyncio.to_thread(_write_preview_pdf, cache_key, cached)
+        _remember_bytes(
+            _OFFICE_PDF_CACHE,
+            cache_key,
+            cached,
+            limit=_OFFICE_PDF_MEMORY_LIMIT,
+            max_bytes=_OFFICE_PDF_MEMORY_MAX_BYTES,
+        )
+        return cached
 
 
 async def _version_source(
@@ -298,13 +401,7 @@ async def get_review_package_slide_preview(
     image = _PRESENTATION_SLIDE_CACHE.get(cache_key)
     if image is None:
         try:
-            pdf_content = _PRESENTATION_PDF_CACHE.get(pdf_cache_key)
-            if pdf_content is None:
-                async with _PRESENTATION_CONVERSION_LOCK:
-                    pdf_content = _PRESENTATION_PDF_CACHE.get(pdf_cache_key)
-                    if pdf_content is None:
-                        pdf_content = await convert_office_to_pdf(filename, content)
-                        _remember(_PRESENTATION_PDF_CACHE, pdf_cache_key, pdf_content, limit=8)
+            pdf_content = await _cached_office_pdf(pdf_cache_key, filename, content)
             image = await render_pptx_slide(
                 content,
                 filename=filename,
@@ -318,8 +415,8 @@ async def get_review_package_slide_preview(
         _remember(_PRESENTATION_SLIDE_CACHE, cache_key, image, limit=48)
     return Response(
         content=image,
-        media_type="image/png",
-        headers={"Cache-Control": "private, max-age=3600"},
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
     )
 
 
@@ -365,14 +462,8 @@ async def get_review_package_layout_page(
             # Excel is rendered as an editable worksheet grid in the layout
             # response, so it does not need an Office-to-PDF conversion here.
             if suffix in {".docx", ".pptx"}:
-                pdf_key = cache_key[0]
-                pdf_content = _DOCUMENT_PDF_CACHE.get(pdf_key)
-                if pdf_content is None:
-                    async with _DOCUMENT_CONVERSION_LOCK:
-                        pdf_content = _DOCUMENT_PDF_CACHE.get(pdf_key)
-                        if pdf_content is None:
-                            pdf_content = await convert_office_to_pdf(filename, content)
-                            _remember(_DOCUMENT_PDF_CACHE, pdf_key, pdf_content, limit=8)
+                pdf_key = f"{version_id}:{content_hash}"
+                pdf_content = await _cached_office_pdf(pdf_key, filename, content)
             cached = await render_document_page(
                 filename,
                 content,
@@ -387,7 +478,7 @@ async def get_review_package_layout_page(
     else:
         _DOCUMENT_PAGE_CACHE.move_to_end(cache_key)
     image, media_type = cached
-    return Response(content=image, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+    return Response(content=image, media_type=media_type, headers={"Cache-Control": "private, max-age=86400"})
 
 
 @governance.patch("/review-packages/{package_id}/layout/edits")
@@ -724,25 +815,41 @@ def _comparison_page_number(locator: dict | None) -> int | None:
     return None
 
 
+def _comparison_text(value: object) -> str:
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", str(value or "").lower())
+
+
 def _comparison_block_ids(layout: dict, match: dict, side: str) -> tuple[int | None, list[str]]:
     locator = match.get(f"{side}_locator") or {}
     page_number = _comparison_page_number(locator)
     segment_id = match.get(f"{side}_segment_id")
     excerpt = str(match.get(f"{side}_overlap_excerpt") or match.get(f"{side}_excerpt") or "")
-    normalized_excerpt = re.sub(r"\s+", "", excerpt).lower()
+    normalized_excerpt = _comparison_text(excerpt)
     pages = layout.get("pages") or []
     candidate_pages = [page for page in pages if page_number is None or page.get("page_number") == page_number]
     if not candidate_pages:
         candidate_pages = pages
     for page in candidate_pages:
         blocks = page.get("blocks") or []
-        matched = [block for block in blocks if segment_id and segment_id in (block.get("source_segment_ids") or [])]
-        if not matched and normalized_excerpt:
+        matched = []
+        if normalized_excerpt:
             matched = [
                 block
                 for block in blocks
-                if normalized_excerpt[:40]
-                and normalized_excerpt[:40] in re.sub(r"\s+", "", str(block.get("content") or "")).lower()
+                if (normalized_block := _comparison_text(block.get("content")))
+                and (
+                    normalized_excerpt in normalized_block
+                    or (
+                        len(normalized_block) >= 4
+                        and normalized_block in normalized_excerpt
+                    )
+                )
+            ]
+        if not matched and segment_id:
+            matched = [
+                block
+                for block in blocks
+                if segment_id in (block.get("source_segment_ids") or [])
             ]
         if matched:
             return page.get("page_number"), [str(block.get("block_id")) for block in matched]
@@ -852,8 +959,21 @@ async def get_relation_layout_comparison_page(
     cached = _RELATION_PAGE_CACHE.get(cache_key)
     if cached is None:
         try:
-            _version, _item, filename, content = await _version_source(version_id, db)
-            image, media_type = await render_document_page(filename, content, page_number=page_number)
+            version, _item, filename, content = await _version_source(version_id, db)
+            pdf_content = None
+            if PurePosixPath(filename).suffix.lower() in {".docx", ".pptx"}:
+                content_hash = str(version.content_hash or len(content))
+                pdf_content = await _cached_office_pdf(
+                    f"{version_id}:{content_hash}",
+                    filename,
+                    content,
+                )
+            image, media_type = await render_document_page(
+                filename,
+                content,
+                page_number=page_number,
+                pdf_content=pdf_content,
+            )
         except HTTPException:
             raise
         except IndexError as exc:
@@ -865,7 +985,7 @@ async def get_relation_layout_comparison_page(
     else:
         _RELATION_PAGE_CACHE.move_to_end(cache_key)
     image, media_type = cached
-    return Response(content=image, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+    return Response(content=image, media_type=media_type, headers={"Cache-Control": "private, max-age=86400"})
 
 
 @governance.post("/relations/{relation_id}/resolve-duplicate")

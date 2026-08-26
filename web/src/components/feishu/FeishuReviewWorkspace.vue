@@ -148,8 +148,8 @@
                 :aria-expanded="!queueCollapsed"
                 @click="queueCollapsed = !queueCollapsed"
               >
-                <PanelLeftOpen v-if="queueCollapsed" :size="16" />
-                <PanelLeftClose v-else :size="16" />
+                <PanelLeftOpen v-if="queueCollapsed" :size="22" />
+                <PanelLeftClose v-else :size="22" />
               </button>
               <button
                 v-if="isUpdateReview"
@@ -894,7 +894,11 @@
                         <span v-else>暂未生成可定位片段</span>
                       </div>
                       <label class="comparison-sync-toggle">
-                        <input v-model="comparisonSyncPages" type="checkbox" />
+                        <input
+                          v-model="comparisonSyncPages"
+                          type="checkbox"
+                          :disabled="!comparisonMatchPagesAligned"
+                        />
                         <span>同步翻页</span>
                       </label>
                     </header>
@@ -1453,6 +1457,8 @@ const DOCUMENT_PAGE_PREVIEW_CACHE_LIMIT = 12
 const COMPARISON_PAGE_PREVIEW_CACHE_LIMIT = 24
 let slidePreviewCacheEpoch = 0
 let slidePreviewRequestSeq = 0
+let documentPagePreviewRequestSeq = 0
+const comparisonPagePreviewRequestSeq = { source: 0, target: 0 }
 let detailRequestSeq = 0
 let contentRequestSeq = 0
 let previousContentRequestSeq = 0
@@ -1624,6 +1630,11 @@ const activeComparisonMatch = computed(() =>
     (match) => match.match_id === selectedComparisonMatchId.value
   ) || relationLayoutComparison.value?.matches?.[0]
 )
+const comparisonMatchPagesAligned = computed(() => {
+  const match = activeComparisonMatch.value
+  if (!match?.source_page_number || !match?.target_page_number) return true
+  return match.source_page_number === match.target_page_number
+})
 const activeDuplicateCandidate = computed(
   () => duplicateCandidates[activeRelation.value?.relation_id] || null
 )
@@ -1946,14 +1957,14 @@ async function selectPackage(packageId, relationId = '') {
   presentationError.value = ''
   activeSlideNumber.value = 1
   selectedPresentationFragmentId.value = ''
-  clearSlidePreviewCache()
+  resetSlidePreviewView()
   documentLayout.value = null
   documentLayoutError.value = ''
   activeDocumentPageNumber.value = 1
   selectedDocumentBlockId.value = ''
   documentBlockDraft.value = ''
-  clearDocumentPagePreviewCache()
-  clearRelationLayoutComparison()
+  resetDocumentPagePreviewView()
+  clearRelationLayoutComparison({ preserveCache: true })
   if (!packageId) return
   const requestId = ++detailRequestSeq
   loadingDetail.value = true
@@ -2150,7 +2161,7 @@ async function loadDocumentLayout() {
   activeDocumentPageNumber.value = 1
   selectedDocumentBlockId.value = ''
   documentBlockDraft.value = ''
-  clearDocumentPagePreviewCache()
+  resetDocumentPagePreviewView()
   if (!selectedPackageId.value || !isDocumentLayoutReview.value) return
   documentLayoutLoading.value = true
   try {
@@ -2179,12 +2190,17 @@ async function loadDocumentLayout() {
 function documentPagePreviewCacheKey(packageId, pageNumber) {
   return `${packageId}:${pageNumber}`
 }
+function resetDocumentPagePreviewView() {
+  documentPagePreviewRequestSeq += 1
+  documentPagePreviewUrl.value = ''
+  documentPagePreviewLoading.value = false
+  documentPagePreviewError.value = ''
+}
 function clearDocumentPagePreviewCache() {
   for (const url of documentPagePreviewCache.values()) URL.revokeObjectURL(url)
   documentPagePreviewCache.clear()
   documentPagePreviewRequests.clear()
-  documentPagePreviewUrl.value = ''
-  documentPagePreviewError.value = ''
+  resetDocumentPagePreviewView()
 }
 function rememberDocumentPagePreview(key, url) {
   documentPagePreviewCache.delete(key)
@@ -2224,6 +2240,7 @@ async function fetchDocumentPagePreview(packageId, pageNumber) {
 async function loadDocumentPagePreview() {
   const packageId = selectedPackageId.value
   const pageNumber = activeDocumentPageNumber.value
+  const requestId = ++documentPagePreviewRequestSeq
   if (!packageId || !activeDocumentPage.value || activeDocumentPage.value.render_mode === 'grid') {
     documentPagePreviewUrl.value = ''
     return
@@ -2231,11 +2248,37 @@ async function loadDocumentPagePreview() {
   documentPagePreviewLoading.value = true
   documentPagePreviewError.value = ''
   try {
-    documentPagePreviewUrl.value = await fetchDocumentPagePreview(packageId, pageNumber)
+    const url = await fetchDocumentPagePreview(packageId, pageNumber)
+    if (
+      requestId !== documentPagePreviewRequestSeq ||
+      packageId !== selectedPackageId.value ||
+      pageNumber !== activeDocumentPageNumber.value
+    )
+      return
+    documentPagePreviewUrl.value = url
+    void preloadDocumentPagePreview(pageNumber - 1)
+    void preloadDocumentPagePreview(pageNumber + 1)
   } catch (error) {
-    documentPagePreviewError.value = governanceApi.getErrorMessage(error, '页面预览生成失败')
+    if (requestId === documentPagePreviewRequestSeq)
+      documentPagePreviewError.value = governanceApi.getErrorMessage(error, '页面预览生成失败')
   } finally {
-    documentPagePreviewLoading.value = false
+    if (requestId === documentPagePreviewRequestSeq) documentPagePreviewLoading.value = false
+  }
+}
+async function preloadDocumentPagePreview(pageNumber) {
+  const packageId = selectedPackageId.value
+  const page = documentPages.value.find((item) => item.page_number === pageNumber)
+  if (
+    !packageId ||
+    !page ||
+    page.render_mode === 'grid' ||
+    documentPagePreviewCache.has(documentPagePreviewCacheKey(packageId, pageNumber))
+  )
+    return
+  try {
+    await fetchDocumentPagePreview(packageId, pageNumber)
+  } catch {
+    // 相邻页预取失败不影响当前页，实际翻页时会重试。
   }
 }
 async function selectDocumentPage(pageNumber) {
@@ -2249,6 +2292,7 @@ function changeDocumentPage(offset) {
     1,
     Math.min(documentPages.value.length, activeDocumentPageNumber.value + offset)
   )
+  if (next === activeDocumentPageNumber.value) return
   void selectDocumentPage(next)
 }
 function selectDocumentBlock(block) {
@@ -2299,9 +2343,13 @@ function clearSlidePreviewCache() {
   for (const url of slidePreviewCache.values()) URL.revokeObjectURL(url)
   slidePreviewCache.clear()
   slidePreviewRequests.clear()
+  resetSlidePreviewView()
+}
+function resetSlidePreviewView() {
   slidePreviewCacheEpoch += 1
   slidePreviewRequestSeq += 1
   activeSlidePreviewUrl.value = ''
+  slidePreviewLoading.value = false
   slidePreviewError.value = ''
 }
 
@@ -2378,6 +2426,7 @@ async function loadSlidePreview() {
     const url = await fetchSlidePreview(packageId, slideNumber)
     if (requestId !== slidePreviewRequestSeq) return
     activeSlidePreviewUrl.value = url
+    void preloadSlidePreview(slideNumber - 1)
     void preloadSlidePreview(slideNumber + 1)
   } catch (error) {
     if (requestId === slidePreviewRequestSeq)
@@ -2430,6 +2479,7 @@ function presentationFragmentLabel(fragment) {
 onBeforeUnmount(() => {
   clearSlidePreviewCache()
   clearDocumentPagePreviewCache()
+  clearRelationLayoutComparison()
 })
 function segmentLabel(segment) {
   return segment.locator_label || segment.title_path?.at(-1) || `片段 ${segment.segment_index + 1}`
@@ -2703,10 +2753,14 @@ async function focusRelation(comparison) {
   if (duplicateRelation(comparison)) await loadDuplicateCandidates(comparison)
 }
 
-function clearRelationLayoutComparison() {
-  for (const url of comparisonPagePreviewCache.values()) URL.revokeObjectURL(url)
-  comparisonPagePreviewCache.clear()
-  comparisonPagePreviewRequests.clear()
+function clearRelationLayoutComparison({ preserveCache = false } = {}) {
+  comparisonPagePreviewRequestSeq.source += 1
+  comparisonPagePreviewRequestSeq.target += 1
+  if (!preserveCache) {
+    for (const url of comparisonPagePreviewCache.values()) URL.revokeObjectURL(url)
+    comparisonPagePreviewCache.clear()
+    comparisonPagePreviewRequests.clear()
+  }
   relationLayoutComparison.value = null
   relationLayoutError.value = ''
   selectedComparisonMatchId.value = ''
@@ -2763,6 +2817,7 @@ async function fetchComparisonPagePreview(relationId, side, pageNumber) {
 async function loadComparisonPagePreview(side) {
   const relationId = activeRelation.value?.relation_id
   const pageNumber = comparisonPageNumbers[side]
+  const requestId = ++comparisonPagePreviewRequestSeq[side]
   if (!relationId || !pageNumber) return
   const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
   if (page?.render_mode === 'grid') {
@@ -2773,11 +2828,40 @@ async function loadComparisonPagePreview(side) {
   comparisonPagePreviewLoading[side] = true
   comparisonPagePreviewErrors[side] = ''
   try {
-    comparisonPagePreviewUrls[side] = await fetchComparisonPagePreview(relationId, side, pageNumber)
+    const url = await fetchComparisonPagePreview(relationId, side, pageNumber)
+    if (
+      requestId !== comparisonPagePreviewRequestSeq[side] ||
+      relationId !== activeRelation.value?.relation_id ||
+      pageNumber !== comparisonPageNumbers[side]
+    )
+      return
+    comparisonPagePreviewUrls[side] = url
+    void preloadComparisonPagePreview(side, pageNumber - 1)
+    void preloadComparisonPagePreview(side, pageNumber + 1)
   } catch (error) {
-    comparisonPagePreviewErrors[side] = governanceApi.getErrorMessage(error, '对比页面预览失败')
+    if (requestId === comparisonPagePreviewRequestSeq[side])
+      comparisonPagePreviewErrors[side] = governanceApi.getErrorMessage(error, '对比页面预览失败')
   } finally {
-    comparisonPagePreviewLoading[side] = false
+    if (requestId === comparisonPagePreviewRequestSeq[side])
+      comparisonPagePreviewLoading[side] = false
+  }
+}
+
+async function preloadComparisonPagePreview(side, pageNumber) {
+  const relationId = activeRelation.value?.relation_id
+  const pages = side === 'source' ? comparisonSourcePages.value : comparisonTargetPages.value
+  const page = pages.find((item) => item.page_number === pageNumber)
+  if (
+    !relationId ||
+    !page ||
+    page.render_mode === 'grid' ||
+    comparisonPagePreviewCache.has(comparisonPageCacheKey(relationId, side, pageNumber))
+  )
+    return
+  try {
+    await fetchComparisonPagePreview(relationId, side, pageNumber)
+  } catch {
+    // 相邻页预取失败不影响当前证据页，实际翻页时会重试。
   }
 }
 
@@ -2796,6 +2880,7 @@ async function loadRelationLayoutComparison(comparison) {
     selectedComparisonMatchId.value = match?.match_id || ''
     comparisonPageNumbers.source = match?.source_page_number || 1
     comparisonPageNumbers.target = match?.target_page_number || 1
+    if (!comparisonMatchPagesAligned.value) comparisonSyncPages.value = false
     if (response.supported) {
       const previewRequests = []
       if (activeComparisonSourcePage.value?.render_mode !== 'grid') {
@@ -2818,6 +2903,7 @@ async function selectComparisonMatch(match) {
   selectedComparisonMatchId.value = match.match_id
   comparisonPageNumbers.source = match.source_page_number || comparisonPageNumbers.source
   comparisonPageNumbers.target = match.target_page_number || comparisonPageNumbers.target
+  if (!comparisonMatchPagesAligned.value) comparisonSyncPages.value = false
   await Promise.all([loadComparisonPagePreview('source'), loadComparisonPagePreview('target')])
 }
 
@@ -2825,8 +2911,9 @@ async function changeComparisonPage(side, offset) {
   const pages = side === 'source' ? comparisonSourcePages.value : comparisonTargetPages.value
   const current = comparisonPageNumbers[side]
   const next = Math.max(1, Math.min(pages.length, current + offset))
+  if (next === current) return
   comparisonPageNumbers[side] = next
-  if (comparisonSyncPages.value) {
+  if (comparisonSyncPages.value && comparisonMatchPagesAligned.value) {
     const other = side === 'source' ? 'target' : 'source'
     const otherPages = other === 'source' ? comparisonSourcePages.value : comparisonTargetPages.value
     comparisonPageNumbers[other] = Math.max(1, Math.min(otherPages.length, comparisonPageNumbers[other] + offset))
@@ -2867,9 +2954,8 @@ function comparisonMatchLocator(match) {
 
 function comparisonMatchForBlock(side, block) {
   const matches = relationLayoutComparison.value?.matches || []
-  return (
-    matches.find((match) => (match?.[`${side}_block_ids`] || []).includes(block.block_id)) ||
-    activeComparisonMatch.value
+  return matches.find((match) =>
+    (match?.[`${side}_block_ids`] || []).includes(block.block_id)
   )
 }
 
@@ -4054,15 +4140,18 @@ loadReviewers()
   font-weight: 600;
   box-shadow: inset 0 -2px 0 var(--main-color);
 }
-.evidence-queue-toggle {
-  width: 30px;
-  flex: 0 0 30px;
+.evidence-tabs-main > .evidence-queue-toggle {
+  width: 36px;
+  flex: 0 0 36px;
   justify-content: center;
   margin-right: 2px;
   padding: 0;
   border-right: 1px solid var(--gray-150) !important;
   border-radius: 0;
   color: var(--color-text-secondary) !important;
+}
+.evidence-queue-toggle svg {
+  flex: 0 0 22px;
 }
 .evidence-queue-toggle:hover {
   background: var(--main-20) !important;

@@ -137,10 +137,10 @@ def render_pdf_slide(pdf_content: bytes, *, slide_number: int) -> bytes:
         if slide_number < 1 or slide_number > document.page_count:
             raise IndexError("Slide number is out of range")
         page = document.load_page(slide_number - 1)
-        target_width = 1800
+        target_width = 1600
         scale = min(3.0, max(1.0, target_width / max(page.rect.width, 1)))
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-        return pixmap.tobytes("png")
+        return pixmap.tobytes("jpeg", jpg_quality=88)
 
 
 async def render_pptx_slide(

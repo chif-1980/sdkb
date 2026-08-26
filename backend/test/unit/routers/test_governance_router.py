@@ -32,6 +32,57 @@ from yuxi.storage.postgres.models_knowledge import (
 pytestmark = pytest.mark.asyncio
 
 
+async def test_office_pdf_cache_survives_memory_cache_reset(tmp_path, monkeypatch):
+    conversions = 0
+
+    async def fake_convert(_filename, _content):
+        nonlocal conversions
+        conversions += 1
+        return b"%PDF-cached-preview"
+
+    monkeypatch.setattr(governance_router_module, "_PREVIEW_PDF_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(governance_router_module, "convert_office_to_pdf", fake_convert)
+    governance_router_module._OFFICE_PDF_CACHE.clear()
+    governance_router_module._OFFICE_PDF_LOCKS.clear()
+
+    first = await governance_router_module._cached_office_pdf("version:hash", "source.pptx", b"pptx")
+    governance_router_module._OFFICE_PDF_CACHE.clear()
+    second = await governance_router_module._cached_office_pdf("version:hash", "source.pptx", b"pptx")
+
+    assert first == second == b"%PDF-cached-preview"
+    assert conversions == 1
+
+
+async def test_office_pdf_cache_prunes_memory_and_disk_by_size(tmp_path, monkeypatch):
+    memory_cache = governance_router_module.OrderedDict()
+    governance_router_module._remember_bytes(
+        memory_cache,
+        "first",
+        b"1234",
+        limit=10,
+        max_bytes=6,
+    )
+    governance_router_module._remember_bytes(
+        memory_cache,
+        "second",
+        b"5678",
+        limit=10,
+        max_bytes=6,
+    )
+
+    assert list(memory_cache) == ["second"]
+
+    monkeypatch.setattr(governance_router_module, "_PREVIEW_PDF_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(governance_router_module, "_PREVIEW_PDF_DISK_LIMIT", 10)
+    monkeypatch.setattr(governance_router_module, "_PREVIEW_PDF_DISK_MAX_BYTES", 30)
+    for cache_key in ("first", "second", "third"):
+        governance_router_module._write_preview_pdf(cache_key, b"%PDF-1234567890")
+
+    cached_files = list(tmp_path.glob("*.pdf"))
+    assert len(cached_files) == 2
+    assert sum(item.stat().st_size for item in cached_files) == 30
+
+
 @pytest.fixture
 async def governance_api_fixture():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -911,6 +962,9 @@ async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
 
     async def fake_build(filename, _content, *, segments=()):
         block_id = "source-block" if filename.startswith("source") else "target-block"
+        unrelated_block_id = (
+            "source-block-unrelated" if filename.startswith("source") else "target-block-unrelated"
+        )
         return {
             "supported": True,
             "file_type": ".docx" if filename.startswith("source") else ".pptx",
@@ -923,8 +977,13 @@ async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
                         {
                             "block_id": block_id,
                             "content": "公司简介：狗狗你是公司专注企业数字化服务。",
-                            "source_segment_ids": [],
-                        }
+                            "source_segment_ids": ["segment-shared"],
+                        },
+                        {
+                            "block_id": unrelated_block_id,
+                            "content": "1",
+                            "source_segment_ids": ["segment-shared"],
+                        },
                     ],
                 }
             ],
@@ -936,10 +995,10 @@ async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
                 "fragment_matches": [
                     {
                         "match_id": "layout-match",
-                        "source_segment_id": None,
+                        "source_segment_id": "segment-shared",
                         "source_locator": {"page": 1},
                         "source_overlap_excerpt": "公司简介：狗狗你是公司专注企业数字化服务。",
-                        "target_segment_id": None,
+                        "target_segment_id": "segment-shared",
                         "target_locator": {"page": 1},
                         "target_overlap_excerpt": "公司简介：狗狗你是公司专注企业数字化服务。",
                         "similarity": 1.0,
@@ -952,11 +1011,19 @@ async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
 
     async def fake_render(_filename, _content, *, page_number, pdf_content=None):
         assert page_number == 1
+        assert pdf_content == b"%PDF-cached"
         return b"png", "image/png"
+
+    async def fake_cached_pdf(cache_key, filename, content):
+        assert cache_key == "version-1:hash-1"
+        assert filename == "source.docx"
+        assert content == b"source"
+        return b"%PDF-cached"
 
     monkeypatch.setattr(governance_router_module, "_version_source", fake_version_source)
     monkeypatch.setattr(governance_router_module, "build_document_layout", fake_build)
     monkeypatch.setattr(governance_router_module, "_duplicate_service", fake_duplicate_service)
+    monkeypatch.setattr(governance_router_module, "_cached_office_pdf", fake_cached_pdf)
     monkeypatch.setattr(governance_router_module, "render_document_page", fake_render)
     governance_router_module._RELATION_LAYOUT_CACHE.clear()
     governance_router_module._RELATION_PAGE_CACHE.clear()

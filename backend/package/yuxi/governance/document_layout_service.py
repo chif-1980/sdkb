@@ -493,9 +493,9 @@ async def render_document_page(
         if page_number < 1 or page_number > document.page_count:
             raise IndexError("页码超出范围")
         page = document.load_page(page_number - 1)
-        scale = min(3.0, max(1.0, 1800 / max(page.rect.width, 1)))
+        scale = min(3.0, max(1.0, 1600 / max(page.rect.width, 1)))
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-        return pixmap.tobytes("png"), "image/png"
+        return pixmap.tobytes("jpeg", jpg_quality=88), "image/jpeg"
 
 
 def supported_layout_suffix(suffix: str) -> bool:

@@ -613,6 +613,11 @@ describe('FeishuReviewWorkspace', () => {
 
     expect(wrapper.get('.presentation-review').text()).toContain('第 1 / 2 页')
     expect(wrapper.findAll('.presentation-fragment-hotspot')).toHaveLength(2)
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-ppt/presentation/slides/2',
+      {},
+      'blob'
+    )
     await wrapper.findAll('.presentation-fragment-hotspot')[1].trigger('click')
     expect(wrapper.get('.presentation-fragment-focus').text()).toContain(
       '提供咨询、实施、交付和持续运营服务。'
@@ -621,6 +626,15 @@ describe('FeishuReviewWorkspace', () => {
     await wrapper.get('button[aria-label="下一页幻灯片"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('.presentation-toolbar').text()).toContain('第 2 / 2 页')
+    const previewCallCount = apiAdminGet.mock.calls.filter(([url]) =>
+      url.includes('/presentation/slides/')
+    ).length
+    await wrapper.get('button[aria-label="上一页幻灯片"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.presentation-toolbar').text()).toContain('第 1 / 2 页')
+    expect(
+      apiAdminGet.mock.calls.filter(([url]) => url.includes('/presentation/slides/')).length
+    ).toBe(previewCallCount)
     expect(createObjectUrl).toHaveBeenCalledTimes(2)
     expect(revokeObjectUrl).not.toHaveBeenCalled()
     wrapper.unmount()
@@ -1229,7 +1243,7 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.duplicate-action-help').attributes('aria-label')).toContain('独有内容')
   })
 
-  it('跨文档证据支持双栏版式对比、匹配高亮和同步翻页', async () => {
+  it('跨文档证据只高亮对应文字块，异页证据分别定位且不联动翻页', async () => {
     const detail = duplicatePackageDetail()
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
@@ -1267,6 +1281,11 @@ describe('FeishuReviewWorkspace', () => {
               {
                 page_number: 1,
                 aspect_ratio: 1.77,
+                blocks: []
+              },
+              {
+                page_number: 2,
+                aspect_ratio: 1.77,
                 blocks: [
                   {
                     block_id: 'source-block-1',
@@ -1276,8 +1295,22 @@ describe('FeishuReviewWorkspace', () => {
                     width: 70,
                     height: 10,
                     source_segment_ids: []
+                  },
+                  {
+                    block_id: 'source-block-unrelated',
+                    content: '本页还包含产品功能介绍。',
+                    left: 10,
+                    top: 30,
+                    width: 70,
+                    height: 10,
+                    source_segment_ids: []
                   }
                 ]
+              },
+              {
+                page_number: 3,
+                aspect_ratio: 1.77,
+                blocks: []
               }
             ]
           },
@@ -1288,12 +1321,31 @@ describe('FeishuReviewWorkspace', () => {
               {
                 page_number: 1,
                 aspect_ratio: 1.77,
+                blocks: []
+              },
+              {
+                page_number: 2,
+                aspect_ratio: 1.77,
+                blocks: []
+              },
+              {
+                page_number: 3,
+                aspect_ratio: 1.77,
                 blocks: [
                   {
                     block_id: 'target-block-1',
                     content: '公司简介：狗狗你是公司专注企业数字化服务。',
                     left: 12,
                     top: 12,
+                    width: 70,
+                    height: 10,
+                    source_segment_ids: []
+                  },
+                  {
+                    block_id: 'target-block-unrelated',
+                    content: '本页还包含客户案例。',
+                    left: 12,
+                    top: 32,
                     width: 70,
                     height: 10,
                     source_segment_ids: []
@@ -1306,16 +1358,17 @@ describe('FeishuReviewWorkspace', () => {
             {
               match_id: 'match-1',
               similarity: 0.98,
-              source_page_number: 1,
-              target_page_number: 1,
+              source_page_number: 2,
+              target_page_number: 3,
               source_block_ids: ['source-block-1'],
               target_block_ids: ['target-block-1'],
-              source_overlap_excerpt: '狗狗你是公司专注企业数字化服务。'
+              source_overlap_excerpt: '狗狗你是公司专注企业数字化服务。',
+              target_overlap_excerpt: '狗狗你是公司专注企业数字化服务。'
             }
           ]
         })
       }
-      if (url.endsWith('/layout-comparison/source/pages/1') || url.endsWith('/layout-comparison/target/pages/1')) {
+      if (url.includes('/layout-comparison/source/pages/') || url.includes('/layout-comparison/target/pages/')) {
         return Promise.resolve({ blob: () => Promise.resolve(new Blob(['image'])) })
       }
       if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
@@ -1337,11 +1390,33 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.findAll('.comparison-layout-pane')).toHaveLength(2)
     expect(wrapper.get('.comparison-match-strip').text()).toContain('98%')
     expect(wrapper.findAll('.comparison-layout-block.comparison-block-match')).toHaveLength(2)
+    expect(wrapper.findAll('.comparison-layout-block.comparison-block-selected')).toHaveLength(2)
+    expect(wrapper.findAll('.comparison-layout-pane')[0].text()).toContain('第 2 / 3 页')
+    expect(wrapper.findAll('.comparison-layout-pane')[1].text()).toContain('第 3 / 3 页')
     expect(apiAdminGet).toHaveBeenCalledWith(
-      '/api/governance/relations/relation-duplicate/layout-comparison/source/pages/1',
+      '/api/governance/relations/relation-duplicate/layout-comparison/source/pages/2',
       {},
       'blob'
     )
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/relations/relation-duplicate/layout-comparison/target/pages/2',
+      {},
+      'blob'
+    )
+
+    const targetPageTwoCallCount = apiAdminGet.mock.calls.filter(([url]) =>
+      url.endsWith('/layout-comparison/target/pages/2')
+    ).length
+    await wrapper.get('button[aria-label="来源二上一页"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.comparison-layout-pane')[0].text()).toContain('第 2 / 3 页')
+    expect(wrapper.findAll('.comparison-layout-pane')[1].text()).toContain('第 2 / 3 页')
+    expect(
+      apiAdminGet.mock.calls.filter(([url]) =>
+        url.endsWith('/layout-comparison/target/pages/2')
+      ).length
+    ).toBe(targetPageTwoCallCount)
   })
 
   it('可以选择规范内容并将另一边记录为重复来源', async () => {

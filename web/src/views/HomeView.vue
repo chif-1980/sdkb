@@ -578,7 +578,9 @@ const realtimeStats = computed(() => {
   color: var(--main-800);
 
   .logo-img {
-    height: 2rem;
+    height: 2.25rem;
+    width: auto;
+    object-fit: contain;
     margin-right: 0.6rem;
   }
 }

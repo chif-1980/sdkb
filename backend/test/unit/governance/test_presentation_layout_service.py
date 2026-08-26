@@ -50,7 +50,7 @@ def test_extract_pptx_layout_keeps_real_pages_geometry_and_segment_mapping():
 
 
 @pytest.mark.asyncio
-async def test_render_pptx_slide_returns_png(monkeypatch):
+async def test_render_pptx_slide_returns_compressed_jpeg(monkeypatch):
     document = fitz.open()
     page = document.new_page(width=960, height=540)
     page.insert_text((72, 72), "Slide one")
@@ -64,7 +64,7 @@ async def test_render_pptx_slide_returns_png(monkeypatch):
 
     image = await render_pptx_slide(b"pptx", filename="intro.pptx", slide_number=1)
 
-    assert image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert image.startswith(b"\xff\xd8\xff")
 
 
 @pytest.mark.asyncio
@@ -102,4 +102,4 @@ async def test_render_pptx_slide_reuses_preconverted_pdf(monkeypatch):
         pdf_content=pdf_content,
     )
 
-    assert image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert image.startswith(b"\xff\xd8\xff")

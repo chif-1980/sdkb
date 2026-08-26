@@ -314,7 +314,7 @@ const brandOrgName = computed(() => {
 })
 const brandName = computed(() => {
   const orgName = brandOrgName.value
-  const brandNameRaw = infoStore.branding?.name?.trim() || 'Yuxi'
+  const brandNameRaw = infoStore.branding?.name?.trim() || 'ZhiShu'
 
   if (orgName && brandNameRaw && orgName !== brandNameRaw) {
     return brandNameRaw
@@ -734,7 +734,7 @@ onUnmounted(() => {
 }
 
 .brand-logo {
-  height: 32px;
+  height: 38px;
   width: auto;
   object-fit: contain;
 }
