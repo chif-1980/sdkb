@@ -13,9 +13,11 @@ from yuxi.governance.domain import (
     ReviewItemStatus,
     ReviewOutcome,
     ReviewPackageStatus,
+    ReviewSubjectType,
     ReviewType,
     SourceChangeRequestStatus,
 )
+from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
 from yuxi.governance.review_backfill import backfill_legacy_governance_reviews, stable_review_id
 from yuxi.governance.schemas import (
     ReviewItemDecisionRequest,
@@ -46,6 +48,7 @@ OUTCOME_ACTIONS: dict[str, dict[str, str | None]] = {
     ReviewType.UPDATE: {
         ReviewOutcome.ADOPT_NEW_VERSION: ReviewAction.UPDATE,
         ReviewOutcome.KEEP_CURRENT: ReviewAction.KEEP_CURRENT,
+        ReviewOutcome.EXCLUDE: ReviewAction.ARCHIVE,
         ReviewOutcome.SPLIT_SCOPE: ReviewAction.SPLIT_BY_SCOPE,
         ReviewOutcome.REQUEST_SOURCE_CHANGE: None,
     },
@@ -74,6 +77,7 @@ PUBLISH_OUTCOMES = {
     ReviewOutcome.ADOPT_NEW_VERSION,
     ReviewOutcome.SPLIT_SCOPE,
 }
+UNIT_PUBLISH_OUTCOMES = PUBLISH_OUTCOMES | {ReviewOutcome.CONFIRM_VALID}
 REJECT_CANDIDATE_OUTCOMES = {ReviewOutcome.EXCLUDE, ReviewOutcome.KEEP_CURRENT}
 FINAL_ITEM_STATUSES = {
     ReviewItemStatus.DECIDED,
@@ -159,6 +163,12 @@ class ReviewPackageService:
         total = len(filtered_packages)
         offset = (page - 1) * page_size
         paged_packages = filtered_packages[offset : offset + page_size]
+        unit_service = KnowledgeUnitService(self.session)
+        for package in paged_packages:
+            await unit_service.ensure_for_package(package)
+        if paged_packages:
+            page_items = await self._items_by_package([package.package_id for package in paged_packages])
+            items_by_package.update(page_items)
         return {
             "items": [
                 self._package_summary(package, items_by_package[package.package_id]) for package in paged_packages
@@ -171,7 +181,9 @@ class ReviewPackageService:
 
     async def get_package(self, package_id: str) -> dict:
         package = await self._load_package(package_id)
+        await KnowledgeUnitService(self.session).ensure_for_package(package)
         items = await self._load_items(package.package_id)
+        display_items = self._display_items(items)
         source_row = None
         if package.source_version_id:
             source_row = (
@@ -239,7 +251,7 @@ class ReviewPackageService:
             )
         source_version, source_item, source = source_row or (None, None, None)
         previous_version = None
-        has_update_item = any(item.review_type == ReviewType.UPDATE for item in items)
+        has_update_item = any(item.review_type == ReviewType.UPDATE for item in display_items)
         if (
             has_update_item
             and source_item
@@ -265,7 +277,7 @@ class ReviewPackageService:
                 .limit(1)
             )
         return {
-            **self._package_summary(package, items),
+            **self._package_summary(package, display_items),
             "source_item_id": package.source_item_id,
             "source_version_id": package.source_version_id,
             "source_url": package.source_url_snapshot,
@@ -292,7 +304,7 @@ class ReviewPackageService:
             else None,
             "draft": package.draft_json or {},
             "lock_version": package.lock_version,
-            "items": [self._item_dict(item) for item in items],
+            "items": [self._item_dict(item) for item in display_items],
             "relations": [self._relation_dict(relation, relation_sources) for relation in relations],
             "change_requests": [self._change_request_dict(request) for request in change_requests],
             "events": [self._event_dict(event) for event in events],
@@ -313,6 +325,44 @@ class ReviewPackageService:
         package.draft_json = draft
         package.lock_version += 1
         self._append_event(package, "review_draft_saved", operator_id=operator_id)
+        await self.session.flush()
+        return {"package_id": package.package_id, "draft": package.draft_json, "lock_version": package.lock_version}
+
+    async def save_layout_edit(
+        self,
+        package_id: str,
+        *,
+        operator_id: str,
+        lock_version: int,
+        block_id: str,
+        page_number: int,
+        content: str,
+        source_segment_ids: list[str] | None = None,
+    ) -> dict:
+        """Persist a visual edit as a review draft; the Feishu source stays read-only."""
+        package = await self._load_package(package_id, lock=True)
+        self._assert_not_terminal(package)
+        self._claim_or_assert_assignee(package, operator_id)
+        self._check_lock_version(package, lock_version)
+        draft = dict(package.draft_json or {})
+        edits = dict(draft.get("layout_edits") or {})
+        edits[block_id] = {
+            "block_id": block_id,
+            "page_number": page_number,
+            "content": content,
+            "source_segment_ids": list(source_segment_ids or []),
+            "edited_by": operator_id,
+            "edited_at": utc_now_naive().isoformat(),
+        }
+        draft["layout_edits"] = edits
+        package.draft_json = draft
+        package.lock_version += 1
+        self._append_event(
+            package,
+            "review_layout_edit_saved",
+            operator_id=operator_id,
+            payload={"block_id": block_id, "page_number": page_number},
+        )
         await self.session.flush()
         return {"package_id": package.package_id, "draft": package.draft_json, "lock_version": package.lock_version}
 
@@ -387,7 +437,10 @@ class ReviewPackageService:
                 "workflow_status": package.workflow_status,
                 "lock_version": package.lock_version,
                 "publish_version_ids": [],
+                "unit_publish_version_ids": [],
                 "reject_candidates": [],
+                **self._unit_progress(items),
+                "affected_unit_titles": [],
                 "idempotent_replay": True,
             }
 
@@ -403,6 +456,9 @@ class ReviewPackageService:
             raise ValueError("Conflict review items must be decided individually")
 
         now = utc_now_naive()
+        affected_unit_titles: list[str] = []
+        unit_publish_requested = False
+        layout_edits = dict((package.draft_json or {}).get("layout_edits") or {})
         for decision in payload.decisions:
             item = items_by_id[decision.review_item_id]
             if item.item_status not in {ReviewItemStatus.PENDING, ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION}:
@@ -425,6 +481,7 @@ class ReviewPackageService:
                 "problem_tags": item.problem_tags,
                 "decision_comment": decision.decision_comment,
                 "applicability_scope": scope,
+                "layout_edits": layout_edits,
             }
             item.decided_by = operator_id
             item.decided_at = now
@@ -440,6 +497,11 @@ class ReviewPackageService:
             else:
                 item.item_status = ReviewItemStatus.DECIDED
                 await self._resolve_item_relations(item, operator_id=operator_id, now=now)
+
+            await KnowledgeUnitService(self.session).apply_decision(item, decision.outcome)
+            if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT:
+                affected_unit_titles.append(item.title or "未命名知识单元")
+                unit_publish_requested = unit_publish_requested or decision.outcome in UNIT_PUBLISH_OUTCOMES
 
             await self._update_legacy_review(package, item, operator_id=operator_id, now=now)
             self._append_event(
@@ -462,18 +524,31 @@ class ReviewPackageService:
         package.lock_version += 1
 
         publish_version_ids: set[str] = set()
+        unit_publish_version_ids: set[str] = set()
         reject_candidates: dict[str, str] = {}
+        knowledge_unit_package = any(item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT for item in items)
+        if knowledge_unit_package and unit_publish_requested and package.source_version_id:
+            unit_publish_version_ids.add(package.source_version_id)
         if package.workflow_status == ReviewPackageStatus.COMPLETED and package.source_version_id:
-            publish_items = [item for item in items if item.outcome in PUBLISH_OUTCOMES]
+            publish_items = [item for item in items if item.outcome in UNIT_PUBLISH_OUTCOMES]
             rejected_items = [item for item in items if item.outcome in REJECT_CANDIDATE_OUTCOMES]
-            if publish_items and rejected_items:
+            if publish_items and rejected_items and not knowledge_unit_package:
                 raise ValueError("One source-version package cannot both publish and reject the same material")
             if publish_items:
-                publish_version_ids.add(package.source_version_id)
+                if not knowledge_unit_package:
+                    publish_version_ids.add(package.source_version_id)
             elif rejected_items:
                 reject_item = rejected_items[0]
                 reject_candidates[package.source_version_id] = reject_item.decision_comment or self._outcome_label(
                     reject_item.outcome
+                )
+            if knowledge_unit_package:
+                await self._complete_unit_legacy_review(
+                    package,
+                    items,
+                    publish=bool(publish_items),
+                    operator_id=operator_id,
+                    now=now,
                 )
 
         if package.workflow_status == ReviewPackageStatus.COMPLETED and previous_status != package.workflow_status:
@@ -484,9 +559,12 @@ class ReviewPackageService:
             "workflow_status": package.workflow_status,
             "lock_version": package.lock_version,
             "publish_version_ids": sorted(publish_version_ids),
+            "unit_publish_version_ids": sorted(unit_publish_version_ids),
             "reject_candidates": [
                 {"version_id": version_id, "reason": reason} for version_id, reason in reject_candidates.items()
             ],
+            **self._unit_progress(items),
+            "affected_unit_titles": affected_unit_titles,
             "idempotent_replay": False,
         }
 
@@ -578,6 +656,11 @@ class ReviewPackageService:
     ) -> None:
         if not package.source_version_id:
             return
+        if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT and item.item_status not in {
+            ReviewItemStatus.WAITING_SOURCE_CHANGE,
+            ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION,
+        }:
+            return
         legacy_review = await self.session.scalar(
             select(FeishuGovernanceReview).where(FeishuGovernanceReview.version_id == package.source_version_id)
         )
@@ -591,11 +674,21 @@ class ReviewPackageService:
         legacy_review.decision_comment = item.decision_comment
         legacy_review.applicability_scope = dict(item.applicability_scope or {})
         if item.item_status == ReviewItemStatus.WAITING_SOURCE_CHANGE:
+            has_included_unit = bool(
+                await self.session.scalar(
+                    select(func.count(FeishuReviewItem.id)).where(
+                        FeishuReviewItem.package_id == package.package_id,
+                        FeishuReviewItem.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT,
+                        FeishuReviewItem.outcome.in_(UNIT_PUBLISH_OUTCOMES),
+                    )
+                )
+            )
             legacy_review.decision = ReviewDecision.REQUEST_CHANGES
             legacy_review.status = "changes_requested"
             legacy_review.decided_by = operator_id
             legacy_review.decided_at = now
-            version.review_status = "changes_requested"
+            if not has_included_unit:
+                version.review_status = "changes_requested"
             version.reviewer_id = operator_id
             version.reviewed_at = now
             version.review_comment = item.decision_comment
@@ -614,6 +707,31 @@ class ReviewPackageService:
             legacy_review.status = "rejected"
             legacy_review.decided_by = operator_id
             legacy_review.decided_at = now
+
+    async def _complete_unit_legacy_review(
+        self,
+        package: FeishuReviewPackage,
+        items: list[FeishuReviewItem],
+        *,
+        publish: bool,
+        operator_id: str,
+        now: datetime,
+    ) -> None:
+        legacy_review = await self.session.scalar(
+            select(FeishuGovernanceReview).where(FeishuGovernanceReview.version_id == package.source_version_id)
+        )
+        if legacy_review is None:
+            return
+        unit_items = [item for item in items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT]
+        published_count = sum(item.outcome in PUBLISH_OUTCOMES for item in unit_items)
+        excluded_count = sum(item.outcome in REJECT_CANDIDATE_OUTCOMES for item in unit_items)
+        legacy_review.decision = ReviewDecision.PUBLISH if publish else ReviewDecision.REJECT
+        legacy_review.action = ReviewAction.UPDATE if publish else ReviewAction.ARCHIVE
+        legacy_review.problem_tags = sorted({tag for item in unit_items for tag in (item.problem_tags or [])})
+        legacy_review.decision_comment = f"知识单元审核完成：纳入 {published_count}，不纳入 {excluded_count}"
+        legacy_review.status = "resolved" if publish else "rejected"
+        legacy_review.decided_by = operator_id
+        legacy_review.decided_at = now
 
     @staticmethod
     def _aggregate_status(items: list[FeishuReviewItem]) -> str:
@@ -736,7 +854,19 @@ class ReviewPackageService:
 
     @staticmethod
     def _package_summary(package: FeishuReviewPackage, items: list[FeishuReviewItem]) -> dict:
+        items = ReviewPackageService._display_items(items)
         type_counts = Counter(item.review_type for item in items)
+        knowledge_units = [item for item in items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT]
+        recommendation_counts = Counter(
+            str((item.evidence_json or {}).get("recommended_outcome"))
+            for item in knowledge_units
+            if (item.evidence_json or {}).get("recommended_outcome")
+        )
+        actionable_units = [
+            item
+            for item in knowledge_units
+            if item.item_status in {ReviewItemStatus.PENDING, ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION}
+        ]
         return {
             "package_id": package.package_id,
             "source_version_id": package.source_version_id,
@@ -748,12 +878,38 @@ class ReviewPackageService:
             "item_count": len(items),
             "pending_item_count": sum(item.item_status == ReviewItemStatus.PENDING for item in items),
             "review_type_counts": dict(type_counts),
+            "knowledge_unit_count": len(knowledge_units),
+            "attention_unit_count": sum(
+                bool((item.evidence_json or {}).get("manual_review_required")) for item in actionable_units
+            ),
+            "safe_recommendation_count": sum(
+                not bool((item.evidence_json or {}).get("manual_review_required"))
+                and (item.evidence_json or {}).get("recommended_outcome") in OUTCOME_ACTIONS.get(item.review_type, {})
+                for item in actionable_units
+            ),
+            "recommendation_counts": dict(recommendation_counts),
+            **ReviewPackageService._unit_progress(items),
             "created_at": _iso(package.created_at),
             "updated_at": _iso(package.updated_at),
         }
 
     @staticmethod
+    def _unit_progress(items: list[FeishuReviewItem]) -> dict:
+        knowledge_units = [item for item in items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT]
+        decided = sum(item.item_status in FINAL_ITEM_STATUSES for item in knowledge_units)
+        included = sum(item.outcome in UNIT_PUBLISH_OUTCOMES for item in knowledge_units)
+        excluded = sum(item.outcome in REJECT_CANDIDATE_OUTCOMES for item in knowledge_units)
+        return {
+            "resolved_unit_count": decided,
+            "decided_unit_count": decided,
+            "remaining_unit_count": max(len(knowledge_units) - decided, 0),
+            "included_unit_count": included,
+            "excluded_unit_count": excluded,
+        }
+
+    @staticmethod
     def _item_dict(item: FeishuReviewItem) -> dict:
+        evidence = item.evidence_json or {}
         return {
             "review_item_id": item.review_item_id,
             "review_type": item.review_type,
@@ -762,7 +918,7 @@ class ReviewPackageService:
             "title": item.title,
             "summary": item.summary,
             "subject_locator": item.subject_locator_json or {},
-            "evidence": item.evidence_json or {},
+            "evidence": evidence,
             "relation_ids": item.relation_ids or [],
             "problem_tags": item.problem_tags or [],
             "applicability_scope": item.applicability_scope or {},
@@ -774,7 +930,23 @@ class ReviewPackageService:
             "decided_by": item.decided_by,
             "decided_at": _iso(item.decided_at),
             "reopened_from_item_id": item.reopened_from_item_id,
+            "knowledge_unit": bool(evidence.get("knowledge_unit")),
+            "unit_type": evidence.get("unit_type"),
+            "content": evidence.get("content"),
+            "previous_content": evidence.get("previous_content"),
+            "source_segment_ids": evidence.get("source_segment_ids") or [],
+            "change_type": evidence.get("change_type"),
+            "recommended_outcome": evidence.get("recommended_outcome"),
+            "recommendation_reason": evidence.get("recommendation_reason"),
+            "recommendation_confidence": evidence.get("recommendation_confidence"),
+            "manual_review_required": bool(evidence.get("manual_review_required")),
+            "comparison_status": evidence.get("comparison_status"),
         }
+
+    @staticmethod
+    def _display_items(items: list[FeishuReviewItem]) -> list[FeishuReviewItem]:
+        knowledge_units = [item for item in items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT]
+        return knowledge_units or items
 
     @staticmethod
     def _relation_dict(

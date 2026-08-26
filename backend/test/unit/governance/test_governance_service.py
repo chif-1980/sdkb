@@ -21,6 +21,7 @@ from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuGovernanceReview,
+    FeishuKnowledgeUnit,
     FeishuMaterialVersion,
     FeishuSource,
     FeishuSourceItem,
@@ -265,6 +266,59 @@ async def test_formal_knowledge_only_returns_active_published_approved_version(g
     assert items[0]["current_version_id"] == "version-current"
     assert items[0]["index_status"] == "INDEXED"
     assert items[0]["source_role"] == "PRIMARY"
+
+
+async def test_formal_knowledge_prefers_included_units_and_keeps_source_trace(governance_session):
+    governance_session.add_all(
+        [
+            FeishuKnowledgeUnit(
+                unit_id="unit-included",
+                unit_key="section:deployment",
+                lineage_key="section:deployment",
+                version_id="version-current",
+                item_id="item-current",
+                unit_index=0,
+                unit_type="SECTION",
+                title="部署前置条件",
+                content="生产环境至少需要八核处理器。",
+                content_hash="unit-included-hash",
+                source_segment_ids=["segment-1", "segment-2"],
+                locator_json={"page": 3},
+                recommended_outcome="PUBLISH",
+                recommendation_reason="内容完整且没有冲突。",
+                publication_state="INCLUDED",
+            ),
+            FeishuKnowledgeUnit(
+                unit_id="unit-excluded",
+                unit_key="section:marketing",
+                lineage_key="section:marketing",
+                version_id="version-current",
+                item_id="item-current",
+                unit_index=1,
+                unit_type="SECTION",
+                title="宣传口号",
+                content="行业领先。",
+                content_hash="unit-excluded-hash",
+                source_segment_ids=["segment-3"],
+                recommended_outcome="EXCLUDE",
+                recommendation_reason="不属于可复用知识。",
+                publication_state="EXCLUDED",
+            ),
+        ]
+    )
+    await governance_session.commit()
+
+    items = await GovernanceService(governance_session).list_formal_knowledge("source-1")
+
+    assert len(items) == 1
+    assert items[0]["knowledge_level"] == "UNIT"
+    assert items[0]["knowledge_id"] == "item-current:section:deployment"
+    assert items[0]["unit_id"] == "unit-included"
+    assert items[0]["title"] == "部署前置条件"
+    assert items[0]["source_item_id"] == "item-current"
+    assert items[0]["source_title"] == "Q900 部署指南"
+    assert items[0]["source_segment_count"] == 2
+    assert items[0]["source_locator"] == {"page": 3}
 
 
 async def test_comparison_is_idempotent_and_ensures_review_task(governance_session):

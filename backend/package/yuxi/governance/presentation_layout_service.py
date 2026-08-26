@@ -132,8 +132,7 @@ def extract_pptx_layout(content: bytes, *, segments: Sequence[Any] = ()) -> Pres
     return PresentationLayout(slide_width=slide_width, slide_height=slide_height, slides=slides)
 
 
-async def render_pptx_slide(content: bytes, *, filename: str, slide_number: int) -> bytes:
-    pdf_content = await convert_office_to_pdf(filename, content)
+def render_pdf_slide(pdf_content: bytes, *, slide_number: int) -> bytes:
     with fitz.open(stream=pdf_content, filetype="pdf") as document:
         if slide_number < 1 or slide_number > document.page_count:
             raise IndexError("Slide number is out of range")
@@ -142,6 +141,24 @@ async def render_pptx_slide(content: bytes, *, filename: str, slide_number: int)
         scale = min(3.0, max(1.0, target_width / max(page.rect.width, 1)))
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
         return pixmap.tobytes("png")
+
+
+async def render_pptx_slide(
+    content: bytes,
+    *,
+    filename: str,
+    slide_number: int,
+    pdf_content: bytes | None = None,
+) -> bytes:
+    """Render one slide, optionally reusing a PDF produced for the same deck.
+
+    Converting a PPTX with LibreOffice is much more expensive than rendering a
+    page from the resulting PDF. Callers that render multiple slides should
+    convert once and pass ``pdf_content`` for subsequent pages.
+    """
+    if pdf_content is None:
+        pdf_content = await convert_office_to_pdf(filename, content)
+    return render_pdf_slide(pdf_content, slide_number=slide_number)
 
 
 def iter_fragment_text(layout: PresentationLayout) -> Iterable[str]:

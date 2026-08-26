@@ -1,3 +1,5 @@
+import asyncio
+import re
 from collections import OrderedDict
 from pathlib import PurePosixPath
 from typing import Annotated
@@ -17,11 +19,20 @@ from server.routers.feishu_knowledge_router import (
 from server.utils.auth_middleware import get_admin_user, get_db
 from yuxi.governance.domain import ReviewAction, ReviewDecision
 from yuxi.governance.duplicate_knowledge_service import DuplicateKnowledgeService
-from yuxi.governance.presentation_layout_service import extract_pptx_layout, render_pptx_slide
+from yuxi.governance.presentation_layout_service import (
+    extract_pptx_layout,
+    render_pptx_slide,
+)
+from yuxi.governance.document_layout_service import (
+    build_document_layout,
+    render_document_page,
+    supported_layout_suffix,
+)
 from yuxi.governance.review_package_service import ReviewPackageService
 from yuxi.governance.schemas import (
     DuplicateRelationResolutionRequest,
     ReviewPackageDraftRequest,
+    ReviewLayoutEditRequest,
     ReviewPackageResolveRequest,
     ReviewPackageTransferRequest,
     ReviewResolveRequest,
@@ -32,6 +43,7 @@ from yuxi.governance.source_change_service import SourceChangeService
 from yuxi.governance.source_segment_service import SourceSegmentService, source_segment_dict
 from yuxi.knowledge.utils.kb_utils import parse_minio_url
 from yuxi.storage.minio import get_minio_client
+from yuxi.services.file_preview import convert_office_to_pdf
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
@@ -52,7 +64,17 @@ class ComparisonBackfillRequest(BaseModel):
 
 
 _PRESENTATION_SOURCE_CACHE: OrderedDict[str, bytes] = OrderedDict()
+_PRESENTATION_PDF_CACHE: OrderedDict[str, bytes] = OrderedDict()
+_PRESENTATION_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
 _PRESENTATION_SLIDE_CACHE: OrderedDict[tuple[str, int], bytes] = OrderedDict()
+_PRESENTATION_CONVERSION_LOCK = asyncio.Lock()
+_DOCUMENT_SOURCE_CACHE: OrderedDict[str, bytes] = OrderedDict()
+_DOCUMENT_PDF_CACHE: OrderedDict[str, bytes] = OrderedDict()
+_DOCUMENT_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
+_DOCUMENT_PAGE_CACHE: OrderedDict[tuple[str, int], tuple[bytes, str]] = OrderedDict()
+_DOCUMENT_CONVERSION_LOCK = asyncio.Lock()
+_RELATION_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
+_RELATION_PAGE_CACHE: OrderedDict[tuple[str, str, int], tuple[bytes, str]] = OrderedDict()
 
 
 def _remember(cache: OrderedDict, key, value, *, limit: int) -> None:
@@ -60,6 +82,43 @@ def _remember(cache: OrderedDict, key, value, *, limit: int) -> None:
     cache.move_to_end(key)
     while len(cache) > limit:
         cache.popitem(last=False)
+
+
+async def _version_source(
+    version_id: str,
+    db: AsyncSession,
+) -> tuple[FeishuMaterialVersion, FeishuSourceItem, str, bytes]:
+    row = (
+        await db.execute(
+            select(FeishuMaterialVersion, FeishuSourceItem)
+            .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+            .where(FeishuMaterialVersion.version_id == version_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"未找到资料版本：{version_id}")
+    version, source_item = row
+    object_path = version.source_object_path or (version.processing_params or {}).get("object_path")
+    if not object_path or not str(object_path).startswith("minio://"):
+        raise HTTPException(status_code=404, detail="未找到资料原文件")
+    filename = source_item.title or "source"
+    suffix = PurePosixPath(filename).suffix.lower()
+    if not suffix:
+        item_type_suffix = f".{str(source_item.item_type or '').strip().lower().lstrip('.')}"
+        object_suffix = PurePosixPath(str(object_path).split("?", 1)[0]).suffix.lower()
+        suffix = item_type_suffix if supported_layout_suffix(item_type_suffix) else object_suffix
+        if suffix:
+            filename = f"{filename}{suffix}"
+    if not supported_layout_suffix(suffix):
+        raise HTTPException(status_code=400, detail=f"资料格式暂不支持版式还原：{suffix or '未知格式'}")
+    content_hash = str(version.content_hash or len(object_path))
+    cache_key = f"{version_id}:{content_hash}"
+    content = _DOCUMENT_SOURCE_CACHE.get(cache_key)
+    if content is None:
+        bucket_name, object_name = parse_minio_url(object_path)
+        content = await get_minio_client().adownload_file(bucket_name, object_name)
+        _remember(_DOCUMENT_SOURCE_CACHE, cache_key, content, limit=8)
+    return version, source_item, filename, content
 
 
 async def _presentation_source(package_id: str, db: AsyncSession) -> tuple[dict, str, bytes]:
@@ -80,6 +139,7 @@ async def _presentation_source(package_id: str, db: AsyncSession) -> tuple[dict,
     if row is None:
         raise HTTPException(status_code=404, detail="未找到演示文稿资料")
     version, source_item = row
+    package["source_content_hash"] = version.content_hash
     filename = source_item.title or "presentation.pptx"
     if PurePosixPath(filename).suffix.lower() != ".pptx":
         raise HTTPException(status_code=400, detail="当前资料不是可还原版式的 PPTX 文件")
@@ -92,6 +152,44 @@ async def _presentation_source(package_id: str, db: AsyncSession) -> tuple[dict,
         bucket_name, object_name = parse_minio_url(object_path)
         content = await get_minio_client().adownload_file(bucket_name, object_name)
         _remember(_PRESENTATION_SOURCE_CACHE, cache_key, content, limit=8)
+    return package, filename, content
+
+
+async def _document_source(package_id: str, db: AsyncSession) -> tuple[dict, str, bytes]:
+    """Load one archived source for all supported visual review formats."""
+    try:
+        package = await ReviewPackageService(db).get_package(package_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    version_id = package.get("source_version_id")
+    if not version_id:
+        raise HTTPException(status_code=404, detail="当前审核任务没有关联资料版本")
+    row = (
+        await db.execute(
+            select(FeishuMaterialVersion, FeishuSourceItem)
+            .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+            .where(FeishuMaterialVersion.version_id == version_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="未找到资料原文件")
+    version, source_item = row
+    filename = source_item.title or "source"
+    suffix = PurePosixPath(filename).suffix.lower()
+    if not supported_layout_suffix(suffix):
+        raise HTTPException(status_code=400, detail="当前资料格式暂不支持版式还原")
+    object_path = version.source_object_path or (version.processing_params or {}).get("object_path")
+    if not object_path or not str(object_path).startswith("minio://"):
+        raise HTTPException(status_code=404, detail="未找到资料原文件")
+    content_hash = str(version.content_hash or len(object_path))
+    package["source_content_hash"] = version.content_hash
+    package["source_version_id"] = version_id
+    cache_key = f"{version_id}:{content_hash}"
+    content = _DOCUMENT_SOURCE_CACHE.get(cache_key)
+    if content is None:
+        bucket_name, object_name = parse_minio_url(object_path)
+        content = await get_minio_client().adownload_file(bucket_name, object_name)
+        _remember(_DOCUMENT_SOURCE_CACHE, cache_key, content, limit=8)
     return package, filename, content
 
 
@@ -170,9 +268,16 @@ async def list_review_package_segments(package_id: str, db: AsyncSession = Depen
 async def get_review_package_presentation(package_id: str, db: AsyncSession = Depends(get_db)):
     package, _filename, content = await _presentation_source(package_id, db)
     version_id = package.get("source_version_id")
+    cache_key = f"{version_id}:{package.get('source_content_hash') or len(content)}"
+    cached_layout = _PRESENTATION_LAYOUT_CACHE.get(cache_key)
+    if cached_layout is not None:
+        _PRESENTATION_LAYOUT_CACHE.move_to_end(cache_key)
+        return cached_layout
     segments = await SourceSegmentService(db).list_active(version_id)
     try:
-        return extract_pptx_layout(content, segments=segments).as_dict()
+        layout = extract_pptx_layout(content, segments=segments).as_dict()
+        _remember(_PRESENTATION_LAYOUT_CACHE, cache_key, layout, limit=8)
+        return layout
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"演示文稿版式读取失败：{exc}") from exc
 
@@ -186,11 +291,26 @@ async def get_review_package_slide_preview(
     if slide_number < 1:
         raise HTTPException(status_code=400, detail="幻灯片页码必须从 1 开始")
     package, filename, content = await _presentation_source(package_id, db)
-    cache_key = (str(package.get("source_version_id")), slide_number)
+    version_id = str(package.get("source_version_id"))
+    content_hash = str(package.get("source_content_hash") or len(content))
+    pdf_cache_key = f"{version_id}:{content_hash}"
+    cache_key = (pdf_cache_key, slide_number)
     image = _PRESENTATION_SLIDE_CACHE.get(cache_key)
     if image is None:
         try:
-            image = await render_pptx_slide(content, filename=filename, slide_number=slide_number)
+            pdf_content = _PRESENTATION_PDF_CACHE.get(pdf_cache_key)
+            if pdf_content is None:
+                async with _PRESENTATION_CONVERSION_LOCK:
+                    pdf_content = _PRESENTATION_PDF_CACHE.get(pdf_cache_key)
+                    if pdf_content is None:
+                        pdf_content = await convert_office_to_pdf(filename, content)
+                        _remember(_PRESENTATION_PDF_CACHE, pdf_cache_key, pdf_content, limit=8)
+            image = await render_pptx_slide(
+                content,
+                filename=filename,
+                slide_number=slide_number,
+                pdf_content=pdf_content,
+            )
         except IndexError as exc:
             raise HTTPException(status_code=404, detail="未找到该页幻灯片") from exc
         except Exception as exc:
@@ -201,6 +321,102 @@ async def get_review_package_slide_preview(
         media_type="image/png",
         headers={"Cache-Control": "private, max-age=3600"},
     )
+
+
+@governance.get("/review-packages/{package_id}/layout")
+async def get_review_package_layout(package_id: str, db: AsyncSession = Depends(get_db)):
+    package, filename, content = await _document_source(package_id, db)
+    version_id = str(package.get("source_version_id"))
+    content_hash = str(package.get("source_content_hash") or len(content))
+    cache_key = f"{version_id}:{content_hash}:{filename}"
+    layout = _DOCUMENT_LAYOUT_CACHE.get(cache_key)
+    if layout is None:
+        segments = await SourceSegmentService(db).list_active(version_id)
+        try:
+            layout = await build_document_layout(filename, content, segments=segments)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"资料版式读取失败：{exc}") from exc
+        _remember(_DOCUMENT_LAYOUT_CACHE, cache_key, layout, limit=8)
+    else:
+        _DOCUMENT_LAYOUT_CACHE.move_to_end(cache_key)
+    response = dict(layout)
+    response["source_version_id"] = version_id
+    response["edits"] = dict((package.get("draft") or {}).get("layout_edits") or {})
+    return response
+
+
+@governance.get("/review-packages/{package_id}/layout/pages/{page_number}")
+async def get_review_package_layout_page(
+    package_id: str,
+    page_number: int,
+    db: AsyncSession = Depends(get_db),
+):
+    if page_number < 1:
+        raise HTTPException(status_code=400, detail="页码必须从 1 开始")
+    package, filename, content = await _document_source(package_id, db)
+    version_id = str(package.get("source_version_id"))
+    content_hash = str(package.get("source_content_hash") or len(content))
+    cache_key = (f"{version_id}:{content_hash}:{filename}", page_number)
+    cached = _DOCUMENT_PAGE_CACHE.get(cache_key)
+    if cached is None:
+        try:
+            suffix = PurePosixPath(filename).suffix.lower()
+            pdf_content = None
+            # Excel is rendered as an editable worksheet grid in the layout
+            # response, so it does not need an Office-to-PDF conversion here.
+            if suffix in {".docx", ".pptx"}:
+                pdf_key = cache_key[0]
+                pdf_content = _DOCUMENT_PDF_CACHE.get(pdf_key)
+                if pdf_content is None:
+                    async with _DOCUMENT_CONVERSION_LOCK:
+                        pdf_content = _DOCUMENT_PDF_CACHE.get(pdf_key)
+                        if pdf_content is None:
+                            pdf_content = await convert_office_to_pdf(filename, content)
+                            _remember(_DOCUMENT_PDF_CACHE, pdf_key, pdf_content, limit=8)
+            cached = await render_document_page(
+                filename,
+                content,
+                page_number=page_number,
+                pdf_content=pdf_content,
+            )
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail="未找到该页资料") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"资料页面预览生成失败：{exc}") from exc
+        _remember(_DOCUMENT_PAGE_CACHE, cache_key, cached, limit=64)
+    else:
+        _DOCUMENT_PAGE_CACHE.move_to_end(cache_key)
+    image, media_type = cached
+    return Response(content=image, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+
+
+@governance.patch("/review-packages/{package_id}/layout/edits")
+async def save_review_package_layout_edit(
+    package_id: str,
+    payload: ReviewLayoutEditRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        result = await ReviewPackageService(db).save_layout_edit(
+            package_id,
+            operator_id=current_user.uid,
+            lock_version=payload.lock_version,
+            block_id=payload.block_id,
+            page_number=payload.page_number,
+            content=payload.content,
+            source_segment_ids=payload.source_segment_ids,
+        )
+        await db.commit()
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @governance.patch("/review-packages/{package_id}/draft")
@@ -265,6 +481,7 @@ async def resolve_review_package(
 ):
     try:
         result = await ReviewPackageService(db).resolve(package_id, payload, operator_id=current_user.uid)
+        unit_publish_queue: dict[str, bool] = {}
         if not result["idempotent_replay"]:
             review_service = FeishuReviewService(db)
             for candidate in result["reject_candidates"]:
@@ -275,11 +492,24 @@ async def resolve_review_package(
                 )
             for version_id in result["publish_version_ids"]:
                 await review_service.approve(version_id, operator_id=current_user.uid)
+            for version_id in result["unit_publish_version_ids"]:
+                queued = await review_service.queue_unit_publish(version_id, operator_id=current_user.uid)
+                unit_publish_queue[version_id] = queued.enqueue_required
         await db.commit()
 
         publish_tasks = []
         if not result["idempotent_replay"]:
             for version_id in result["publish_version_ids"]:
+                try:
+                    task = await _enqueue_publish(version_id, operator_id=current_user.uid)
+                    publish_tasks.append(task.id)
+                except Exception as exc:
+                    await FeishuReviewService(db).mark_publish_failed(version_id, message=str(exc))
+                    await db.commit()
+                    raise
+            for version_id in result["unit_publish_version_ids"]:
+                if not unit_publish_queue.get(version_id):
+                    continue
                 try:
                     task = await _enqueue_publish(version_id, operator_id=current_user.uid)
                     publish_tasks.append(task.id)
@@ -480,6 +710,162 @@ async def get_duplicate_relation_candidates(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _comparison_page_number(locator: dict | None) -> int | None:
+    locator = locator or {}
+    for key in ("page", "slide", "sheet_index"):
+        value = locator.get(key)
+        if value is not None:
+            try:
+                return max(1, int(value))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _comparison_block_ids(layout: dict, match: dict, side: str) -> tuple[int | None, list[str]]:
+    locator = match.get(f"{side}_locator") or {}
+    page_number = _comparison_page_number(locator)
+    segment_id = match.get(f"{side}_segment_id")
+    excerpt = str(match.get(f"{side}_overlap_excerpt") or match.get(f"{side}_excerpt") or "")
+    normalized_excerpt = re.sub(r"\s+", "", excerpt).lower()
+    pages = layout.get("pages") or []
+    candidate_pages = [page for page in pages if page_number is None or page.get("page_number") == page_number]
+    if not candidate_pages:
+        candidate_pages = pages
+    for page in candidate_pages:
+        blocks = page.get("blocks") or []
+        matched = [block for block in blocks if segment_id and segment_id in (block.get("source_segment_ids") or [])]
+        if not matched and normalized_excerpt:
+            matched = [
+                block
+                for block in blocks
+                if normalized_excerpt[:40]
+                and normalized_excerpt[:40] in re.sub(r"\s+", "", str(block.get("content") or "")).lower()
+            ]
+        if matched:
+            return page.get("page_number"), [str(block.get("block_id")) for block in matched]
+    return page_number, []
+
+
+@governance.get("/relations/{relation_id}/layout-comparison")
+async def get_relation_layout_comparison(
+    relation_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    relation = await db.scalar(
+        select(FeishuCrossDocumentRelation).where(FeishuCrossDocumentRelation.relation_id == relation_id)
+    )
+    if relation is None:
+        raise HTTPException(status_code=404, detail=f"Cross-document relation not found: {relation_id}")
+    cache_key = f"{relation_id}:{relation.source_version_id}:{relation.target_version_id}"
+    cached = _RELATION_LAYOUT_CACHE.get(cache_key)
+    if cached is not None:
+        _RELATION_LAYOUT_CACHE.move_to_end(cache_key)
+        return cached
+    try:
+        source_version, source_item, source_filename, source_content = await _version_source(
+            relation.source_version_id, db
+        )
+        target_version, target_item, target_filename, target_content = await _version_source(
+            relation.target_version_id, db
+        )
+        source_segments = await SourceSegmentService(db).list_active(relation.source_version_id)
+        target_segments = await SourceSegmentService(db).list_active(relation.target_version_id)
+        source_layout = await build_document_layout(source_filename, source_content, segments=source_segments)
+        target_layout = await build_document_layout(target_filename, target_content, segments=target_segments)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"跨文档版式读取失败：{exc}") from exc
+
+    matches: list[dict] = []
+    if relation.relation_type in {"EXACT_DUPLICATE", "OVERLAP"}:
+        try:
+            candidates = await (await _duplicate_service(db, relation_id)).get_relation_candidates(relation_id)
+            matches = list(candidates.get("fragment_matches") or [])
+        except (LookupError, ValueError):
+            matches = []
+    enriched_matches = []
+    for match in matches:
+        source_page, source_block_ids = _comparison_block_ids(source_layout, match, "source")
+        target_page, target_block_ids = _comparison_block_ids(target_layout, match, "target")
+        enriched_matches.append(
+            {
+                **match,
+                "source_page_number": source_page,
+                "target_page_number": target_page,
+                "source_block_ids": source_block_ids,
+                "target_block_ids": target_block_ids,
+            }
+        )
+    response = {
+        "supported": bool(source_layout.get("supported") and target_layout.get("supported")),
+        "relation_id": relation_id,
+        "relation_type": relation.relation_type,
+        "source": {
+            "version_id": source_version.version_id,
+            "title": source_item.title or source_filename,
+            "path": source_item.path_text,
+            "revision": source_version.revision,
+            "filename": source_filename,
+            "file_type": source_layout.get("file_type"),
+            "page_count": source_layout.get("page_count", 0),
+            "pages": source_layout.get("pages", []),
+        },
+        "target": {
+            "version_id": target_version.version_id,
+            "title": target_item.title or target_filename,
+            "path": target_item.path_text,
+            "revision": target_version.revision,
+            "filename": target_filename,
+            "file_type": target_layout.get("file_type"),
+            "page_count": target_layout.get("page_count", 0),
+            "pages": target_layout.get("pages", []),
+        },
+        "matches": enriched_matches,
+        "message": None if enriched_matches else "当前关系暂未生成可定位的版式匹配片段，以下保留文字证据。",
+    }
+    _remember(_RELATION_LAYOUT_CACHE, cache_key, response, limit=8)
+    return response
+
+
+@governance.get("/relations/{relation_id}/layout-comparison/{side}/pages/{page_number}")
+async def get_relation_layout_comparison_page(
+    relation_id: str,
+    side: str,
+    page_number: int,
+    db: AsyncSession = Depends(get_db),
+):
+    if side not in {"source", "target"}:
+        raise HTTPException(status_code=400, detail="对比资料侧必须是 source 或 target")
+    if page_number < 1:
+        raise HTTPException(status_code=400, detail="页码必须从 1 开始")
+    relation = await db.scalar(
+        select(FeishuCrossDocumentRelation).where(FeishuCrossDocumentRelation.relation_id == relation_id)
+    )
+    if relation is None:
+        raise HTTPException(status_code=404, detail=f"Cross-document relation not found: {relation_id}")
+    version_id = relation.source_version_id if side == "source" else relation.target_version_id
+    cache_key = (relation_id, side, page_number)
+    cached = _RELATION_PAGE_CACHE.get(cache_key)
+    if cached is None:
+        try:
+            _version, _item, filename, content = await _version_source(version_id, db)
+            image, media_type = await render_document_page(filename, content, page_number=page_number)
+        except HTTPException:
+            raise
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail="未找到该对比页面") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"对比页面预览生成失败：{exc}") from exc
+        cached = (image, media_type)
+        _remember(_RELATION_PAGE_CACHE, cache_key, cached, limit=48)
+    else:
+        _RELATION_PAGE_CACHE.move_to_end(cache_key)
+    image, media_type = cached
+    return Response(content=image, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @governance.post("/relations/{relation_id}/resolve-duplicate")

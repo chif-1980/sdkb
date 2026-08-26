@@ -81,3 +81,25 @@ async def test_render_pptx_slide_rejects_unknown_page(monkeypatch):
 
     with pytest.raises(IndexError, match="out of range"):
         await render_pptx_slide(b"pptx", filename="intro.pptx", slide_number=2)
+
+
+@pytest.mark.asyncio
+async def test_render_pptx_slide_reuses_preconverted_pdf(monkeypatch):
+    document = fitz.open()
+    document.new_page()
+    pdf_content = document.tobytes()
+    document.close()
+
+    async def fail_convert(_filename, _content):
+        raise AssertionError("should not convert when a cached PDF is provided")
+
+    monkeypatch.setattr(presentation_layout_service, "convert_office_to_pdf", fail_convert)
+
+    image = await render_pptx_slide(
+        b"pptx",
+        filename="intro.pptx",
+        slide_number=1,
+        pdf_content=pdf_content,
+    )
+
+    assert image.startswith(b"\x89PNG\r\n\x1a\n")

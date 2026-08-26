@@ -91,7 +91,12 @@ function mountView() {
         'a-range-picker': { template: '<div />' },
         'a-empty': { template: '<div />' },
         'a-spin': { template: '<div><slot /></div>' },
-        'a-tree': { template: '<div />' },
+        'a-tooltip': { template: '<span><slot /></span>' },
+        'a-tree': {
+          props: ['treeData'],
+          template:
+            '<div class="tree-stub">{{ treeData.map((item) => item.title).join(",") }}</div>'
+        },
         'a-modal': {
           props: ['open'],
           emits: ['cancel'],
@@ -100,10 +105,25 @@ function mountView() {
         },
         FeishuSyncRunsTable: true,
         FeishuMaterialTable: true,
-        FeishuMaterialDetailDrawer: true
+        FeishuMaterialDetailDrawer: true,
+        FeishuReviewWorkspace: {
+          name: 'FeishuReviewWorkspace',
+          emits: ['knowledge-change'],
+          template: '<div data-testid="review-workspace" />'
+        },
+        FeishuRelationsPanel: true,
+        FeishuFormalKnowledgePanel: true
       }
     }
   })
+}
+
+async function openMaterials(wrapper) {
+  const materialsTab = wrapper
+    .findAll('.governance-tab')
+    .find((tab) => tab.text().includes('资料与扫描'))
+  await materialsTab.trigger('click')
+  await flushPromises()
 }
 
 function mountMaterialTable(props = {}) {
@@ -593,6 +613,57 @@ describe('FeishuKnowledgeView', () => {
     sessionStorage.clear()
   })
 
+  it('顶部仅显示一行摘要，并可按需展开数据源详情', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.find('[aria-label="知识加工说明"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('管理飞书素材的扫描、审核与发布状态')
+    const toggle = wrapper.get('[data-testid="source-overview-toggle"]')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.text()).toContain('飞书产品资料')
+    expect(toggle.text()).toContain('素材总数')
+    expect(wrapper.get('.source-details').isVisible()).toBe(false)
+
+    await toggle.trigger('click')
+
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('.source-details').attributes('style') || '').not.toContain('display: none')
+    expect(wrapper.get('.source-details').text()).toContain('Wiki 根节点')
+    expect(wrapper.get('.source-details').text()).toContain('目标知识库')
+    wrapper.unmount()
+  })
+
+  it('将资料与扫描放在模块导航最后', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const labels = wrapper.findAll('.governance-tab').map((tab) => tab.text().trim())
+    expect(labels[0]).toContain('待审核')
+    expect(labels.at(-1)).toBe('资料与扫描')
+    expect(wrapper.findAll('.governance-tab')[0].classes()).toContain('active')
+    expect(wrapper.find('[data-testid="review-workspace"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('重新进入页面时先显示上次成功加载的工作台数据', async () => {
+    const firstWrapper = mountView()
+    await flushPromises()
+    firstWrapper.unmount()
+
+    const secondWrapper = mountView()
+    await secondWrapper.vm.$nextTick()
+
+    expect(secondWrapper.get('[data-testid="source-overview-toggle"]').text()).toContain(
+      '飞书产品资料'
+    )
+    expect(secondWrapper.find('[data-testid="review-workspace"]').exists()).toBe(true)
+    expect(
+      apiAdminGet.mock.calls.filter(([url]) => url === '/api/feishu-knowledge/sources')
+    ).toHaveLength(1)
+    secondWrapper.unmount()
+  })
+
   it('首次进入知识加工页面时立即显示真实待审核数量', async () => {
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
@@ -655,6 +726,42 @@ describe('FeishuKnowledgeView', () => {
     wrapper.unmount()
   })
 
+  it('知识单元发布后会持续刷新正式知识数量', async () => {
+    let formalRequests = 0
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status')) {
+        return Promise.resolve({ authorized: true, status: 'active' })
+      }
+      if (url === '/api/governance/knowledge?source_id=source-1') {
+        formalRequests += 1
+        return Promise.resolve({
+          items: formalRequests >= 3 ? [{ knowledge_id: 'knowledge-unit-1' }] : []
+        })
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      if (url === '/api/governance/review-packages?source_id=source-1&view=mine') {
+        return Promise.resolve({ items: [], total: 1, counts: { mine: 1 } })
+      }
+      return Promise.resolve({ nodes: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    wrapper.findComponent({ name: 'FeishuReviewWorkspace' }).vm.$emit('knowledge-change')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    const formalTab = wrapper
+      .findAll('.governance-tab')
+      .find((tab) => tab.text().includes('正式知识'))
+    expect(formalRequests).toBeGreaterThanOrEqual(3)
+    expect(formalTab.text()).toContain('1')
+    wrapper.unmount()
+  })
+
   it('重新进入页面时复用未过期的知识目录缓存', async () => {
     let treeRequests = 0
     apiAdminGet.mockImplementation((url) => {
@@ -678,8 +785,10 @@ describe('FeishuKnowledgeView', () => {
 
     const secondWrapper = mountView()
     await flushPromises()
+    await openMaterials(secondWrapper)
 
     expect(treeRequests).toBe(1)
+    expect(secondWrapper.get('.tree-stub').text()).toContain('产品资料')
     secondWrapper.unmount()
   })
 
@@ -700,6 +809,7 @@ describe('FeishuKnowledgeView', () => {
 
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
     expect(treeRequests).toBe(1)
 
     await wrapper.get('[aria-label="刷新知识目录"]').trigger('click')
@@ -741,6 +851,7 @@ describe('FeishuKnowledgeView', () => {
 
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
 
     expect(wrapper.get('[data-testid="oauth-qr-authorize"]').text()).toContain('扫码授权')
     expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
@@ -754,6 +865,7 @@ describe('FeishuKnowledgeView', () => {
     })
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
 
     await wrapper.get('[data-testid="oauth-qr-authorize"]').trigger('click')
     await flushPromises()
@@ -799,6 +911,7 @@ describe('FeishuKnowledgeView', () => {
     })
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
 
     await wrapper.get('[data-testid="oauth-qr-authorize"]').trigger('click')
     await flushPromises()
@@ -936,6 +1049,7 @@ describe('FeishuKnowledgeView', () => {
     apiAdminPost.mockResolvedValue({ status: 'publish_queued' })
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
 
     wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('action', {
       action: 'approve',
@@ -977,6 +1091,7 @@ describe('FeishuKnowledgeView', () => {
     })
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
 
     wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('open-detail', {
       version_id: 'version-1'
@@ -1008,6 +1123,7 @@ describe('FeishuKnowledgeView', () => {
     })
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
 
     wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('open-detail', {
       version_id: 'version-new'
@@ -1041,6 +1157,7 @@ describe('FeishuKnowledgeView', () => {
     })
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
 
     wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('open-detail', {
       version_id: 'version-1'
@@ -1078,6 +1195,7 @@ describe('FeishuKnowledgeView', () => {
     )
     const wrapper = mountView()
     await flushPromises()
+    await openMaterials(wrapper)
 
     wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('open-detail', {
       version_id: 'version-1'

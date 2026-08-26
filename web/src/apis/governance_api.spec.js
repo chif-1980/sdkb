@@ -49,6 +49,32 @@ describe('governanceApi', () => {
     )
   })
 
+  it('读取通用资料版式、页面预览并保存内容块草稿', () => {
+    governanceApi.getReviewPackageLayout('package/1')
+    governanceApi.getReviewPackageLayoutPage('package/1', 2)
+    governanceApi.saveReviewPackageLayoutEdit('package/1', {
+      lock_version: 3,
+      block_id: 'page-1-block-1',
+      page_number: 1,
+      content: '修订后的正文'
+    })
+
+    expect(apiAdminGet).toHaveBeenNthCalledWith(
+      1,
+      '/api/governance/review-packages/package%2F1/layout'
+    )
+    expect(apiAdminGet).toHaveBeenNthCalledWith(
+      2,
+      '/api/governance/review-packages/package%2F1/layout/pages/2',
+      {},
+      'blob'
+    )
+    expect(apiAdminPatch).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package%2F1/layout/edits',
+      expect.objectContaining({ block_id: 'page-1-block-1' })
+    )
+  })
+
   it('审核包草稿、裁决和转交使用对应方法及请求体', () => {
     const draft = { outcome: 'REQUEST_SOURCE_CHANGE', comment: '请补充版本信息' }
     const decision = { decision: 'REQUEST_CHANGES', action: 'MARK_INSUFFICIENT' }
@@ -95,6 +121,22 @@ describe('governanceApi', () => {
     expect(apiAdminPost).toHaveBeenCalledWith(
       '/api/governance/relations/relation%2F1/resolve-duplicate',
       payload
+    )
+  })
+
+  it('读取跨文档版式对比和页面预览', () => {
+    governanceApi.getRelationLayoutComparison('relation/1')
+    governanceApi.getRelationLayoutComparisonPage('relation/1', 'source', 2)
+
+    expect(apiAdminGet).toHaveBeenNthCalledWith(
+      1,
+      '/api/governance/relations/relation%2F1/layout-comparison'
+    )
+    expect(apiAdminGet).toHaveBeenNthCalledWith(
+      2,
+      '/api/governance/relations/relation%2F1/layout-comparison/source/pages/2',
+      {},
+      'blob'
     )
   })
 })

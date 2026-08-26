@@ -52,6 +52,19 @@ export const governanceApi = {
       'blob'
     ),
 
+  getReviewPackageLayout: (packageId) =>
+    apiAdminGet(`${BASE_URL}/review-packages/${encoded(packageId)}/layout`),
+
+  getReviewPackageLayoutPage: (packageId, pageNumber) =>
+    apiAdminGet(
+      `${BASE_URL}/review-packages/${encoded(packageId)}/layout/pages/${encoded(pageNumber)}`,
+      {},
+      'blob'
+    ),
+
+  saveReviewPackageLayoutEdit: (packageId, payload) =>
+    apiAdminPatch(`${BASE_URL}/review-packages/${encoded(packageId)}/layout/edits`, payload),
+
   saveReviewPackageDraft: (packageId, payload) =>
     apiAdminPatch(`${BASE_URL}/review-packages/${encoded(packageId)}/draft`, payload),
 
@@ -90,6 +103,16 @@ export const governanceApi = {
 
   getDuplicateCandidates: (relationId) =>
     apiAdminGet(`${BASE_URL}/relations/${encoded(relationId)}/duplicate-candidates`),
+
+  getRelationLayoutComparison: (relationId) =>
+    apiAdminGet(`${BASE_URL}/relations/${encoded(relationId)}/layout-comparison`),
+
+  getRelationLayoutComparisonPage: (relationId, side, pageNumber) =>
+    apiAdminGet(
+      `${BASE_URL}/relations/${encoded(relationId)}/layout-comparison/${encoded(side)}/pages/${encoded(pageNumber)}`,
+      {},
+      'blob'
+    ),
 
   resolveDuplicateRelation: (relationId, payload) =>
     apiAdminPost(`${BASE_URL}/relations/${encoded(relationId)}/resolve-duplicate`, payload),

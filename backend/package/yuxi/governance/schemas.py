@@ -72,6 +72,19 @@ class ReviewPackageDraftRequest(BaseModel):
     draft: dict = Field(default_factory=dict)
 
 
+class ReviewLayoutEditRequest(BaseModel):
+    lock_version: int = Field(ge=1)
+    block_id: str = Field(min_length=1, max_length=128)
+    page_number: int = Field(ge=1)
+    content: str = Field(max_length=20000)
+    source_segment_ids: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("block_id", "content")
+    @classmethod
+    def normalize_layout_text(cls, value: str) -> str:
+        return value.strip()
+
+
 class ReviewItemDecisionRequest(BaseModel):
     review_item_id: str = Field(min_length=1, max_length=64)
     outcome: ReviewOutcome
@@ -101,7 +114,7 @@ class ReviewItemDecisionRequest(BaseModel):
 class ReviewPackageResolveRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=64)
     lock_version: int = Field(ge=1)
-    decisions: list[ReviewItemDecisionRequest] = Field(min_length=1, max_length=100)
+    decisions: list[ReviewItemDecisionRequest] = Field(min_length=1, max_length=500)
 
     @field_validator("request_id")
     @classmethod

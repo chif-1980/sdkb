@@ -1,9 +1,13 @@
 <template>
   <main class="workbench-page">
     <header class="page-heading">
-      <div>
+      <div class="page-title">
         <h1>知识加工</h1>
-        <p>管理飞书素材的扫描、审核与发布状态</p>
+        <a-tooltip title="管理飞书素材的扫描、审核与发布状态">
+          <span class="page-help" aria-label="知识加工说明" role="img">
+            <CircleHelp :size="15" />
+          </span>
+        </a-tooltip>
       </div>
       <div class="heading-actions">
         <a-button :loading="checkingSource" :disabled="!currentSource" @click="checkCurrentSource">
@@ -36,57 +40,65 @@
 
     <a-spin :spinning="loadingSources">
       <template v-if="currentSource">
-        <section class="source-strip" aria-label="飞书数据源">
-          <div class="source-identity">
-            <div class="source-icon"><BookOpen :size="20" /></div>
-            <div>
-              <label>数据源</label>
+        <section
+          class="source-overview"
+          :class="{ expanded: sourceOverviewExpanded }"
+          aria-label="飞书数据源与素材统计"
+        >
+          <button
+            type="button"
+            class="source-overview-toggle"
+            data-testid="source-overview-toggle"
+            :aria-expanded="sourceOverviewExpanded"
+            @click="sourceOverviewExpanded = !sourceOverviewExpanded"
+          >
+            <span class="source-overview-identity">
+              <BookOpen :size="16" />
               <strong>{{ currentSource.name }}</strong>
-            </div>
-          </div>
-          <div class="source-field source-field-wide">
-            <label>Wiki 根节点</label>
-            <a
-              v-if="currentSource.wiki_root_url"
-              :href="currentSource.wiki_root_url"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {{ currentSource.wiki_root_url }}
-            </a>
-            <span v-else>{{ currentSource.wiki_root_token || '-' }}</span>
-          </div>
-          <div class="source-field">
-            <label>目标知识库</label>
-            <strong>{{ currentSource.target_kb_id || '-' }}</strong>
-          </div>
-          <div class="source-field">
-            <label>飞书访问身份</label>
-            <strong>{{ oauthStatusLabel }}</strong>
-          </div>
-          <div class="source-field">
-            <label>最近全量 / 增量</label>
-            <span>{{ formatTime(currentSource.last_full_sync_at) }}</span>
-            <span>{{ formatTime(currentSource.last_incremental_sync_at) }}</span>
-          </div>
-        </section>
+            </span>
+            <span class="source-overview-metrics" aria-label="素材统计">
+              <span v-for="stat in stats" :key="stat.label" class="overview-metric">
+                {{ stat.label }}
+                <strong :class="stat.tone">{{ stat.value }}</strong>
+              </span>
+            </span>
+            <span class="source-overview-auth">{{ oauthStatusLabel }}</span>
+            <span class="source-overview-detail-label">
+              <span class="detail-copy">详情</span>
+              <ChevronDown :size="14" />
+            </span>
+          </button>
 
-        <section class="stats-row" aria-label="素材统计">
-          <div v-for="stat in stats" :key="stat.label" class="stat-item">
-            <span>{{ stat.label }}</span>
-            <strong :class="stat.tone">{{ stat.value }}</strong>
+          <div v-show="sourceOverviewExpanded" class="source-details" aria-label="数据源详情">
+            <div class="source-field source-field-wide">
+              <label>Wiki 根节点</label>
+              <a
+                v-if="currentSource.wiki_root_url"
+                :href="currentSource.wiki_root_url"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {{ currentSource.wiki_root_url }}
+              </a>
+              <span v-else>{{ currentSource.wiki_root_token || '-' }}</span>
+            </div>
+            <div class="source-field">
+              <label>目标知识库</label>
+              <strong>{{ currentSource.target_kb_id || '-' }}</strong>
+            </div>
+            <div class="source-field">
+              <label>飞书访问身份</label>
+              <strong>{{ oauthStatusLabel }}</strong>
+            </div>
+            <div class="source-field">
+              <label>最近全量 / 增量</label>
+              <span>{{ formatTime(currentSource.last_full_sync_at) }}</span>
+              <span>{{ formatTime(currentSource.last_incremental_sync_at) }}</span>
+            </div>
           </div>
         </section>
 
         <nav class="governance-tabs" aria-label="知识加工模块">
-          <button
-            type="button"
-            class="governance-tab"
-            :class="{ active: activeModule === 'materials' }"
-            @click="activeModule = 'materials'"
-          >
-            资料与扫描
-          </button>
           <button
             type="button"
             class="governance-tab"
@@ -110,6 +122,14 @@
             @click="activeModule = 'formal'"
           >
             正式知识 <span class="governance-count">{{ governanceCounts.formal }}</span>
+          </button>
+          <button
+            type="button"
+            class="governance-tab"
+            :class="{ active: activeModule === 'materials' }"
+            @click="activeModule = 'materials'"
+          >
+            资料与扫描
           </button>
         </nav>
 
@@ -296,6 +316,7 @@
           :source-id="currentSourceId"
           :target-review-id="governanceReviewTarget"
           @count-change="governanceCounts.reviews = $event"
+          @knowledge-change="scheduleFormalKnowledgeRefresh"
           @target-consumed="governanceReviewTarget = null"
         />
         <FeishuRelationsPanel
@@ -368,6 +389,7 @@ import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { Input, message, Modal } from 'ant-design-vue'
 import {
   BookOpen,
+  ChevronDown,
   CircleCheck,
   CircleHelp,
   ExternalLink,
@@ -393,7 +415,10 @@ const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 const QR_AUTH_TTL_MS = 5 * 60 * 1000
 const QR_POLL_INTERVAL_MS = 2000
 const TREE_CACHE_KEY = 'feishu-knowledge-tree-cache-v1'
-const TREE_CACHE_TTL_MS = 10 * 60 * 1000
+const TREE_CACHE_TTL_MS = 12 * 60 * 60 * 1000
+const WORKSPACE_CACHE_KEY = 'feishu-knowledge-workspace-cache-v1'
+const WORKSPACE_CACHE_FRESH_TTL_MS = 5 * 60 * 1000
+const WORKSPACE_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
 const sources = ref([])
 const currentSourceId = ref('')
@@ -426,11 +451,13 @@ const detailContent = ref(emptyDetailContent())
 const loadingDetail = ref(false)
 const updatedRange = ref([])
 const materialTableRef = ref(null)
-const activeModule = ref('materials')
+const activeModule = ref('reviews')
+const sourceOverviewExpanded = ref(false)
 const governanceCounts = reactive({ reviews: 0, relations: 0, formal: 0 })
 const governanceReviewTarget = ref(null)
 let pollTimer = null
 let qrPollTimer = null
+let formalKnowledgeRefreshTimers = []
 let qrRequestSeq = 0
 let detailRequestSeq = 0
 let isAlive = true
@@ -532,6 +559,56 @@ const stats = computed(() => [
   { label: '来源失效', value: currentSource.value?.source_invalid_count ?? 0, tone: 'muted' }
 ])
 
+function readWorkspaceCache() {
+  try {
+    const entry = JSON.parse(sessionStorage.getItem(WORKSPACE_CACHE_KEY) || 'null')
+    const age = Date.now() - (entry?.cachedAt || 0)
+    if (!entry || !Array.isArray(entry.sources) || age > WORKSPACE_CACHE_TTL_MS) {
+      return { restored: false, fresh: false }
+    }
+    sources.value = entry.sources
+    currentSourceId.value = entry.currentSourceId || entry.sources[0]?.source_id || ''
+    oauthStatus.value = entry.oauthStatus || { authorized: false, status: 'not_authorized' }
+    runs.value = Array.isArray(entry.runs) ? entry.runs : []
+    materials.value = Array.isArray(entry.materials) ? entry.materials : []
+    Object.assign(governanceCounts, entry.governanceCounts || {})
+    const restored = Boolean(currentSourceId.value)
+    const cachedTree = restored ? readTreeCache(currentSourceId.value) : null
+    if (cachedTree) treeData.value = cachedTree
+    const activeRun = runs.value.find((run) => run.status === 'queued' || run.status === 'running')
+    if (activeRun) {
+      activeRunId.value = activeRun.run_id
+      schedulePoll()
+    }
+    const treeReady = !oauthStatus.value.authorized || cachedTree !== null
+    return {
+      restored,
+      fresh: restored && treeReady && age <= WORKSPACE_CACHE_FRESH_TTL_MS
+    }
+  } catch {
+    return { restored: false, fresh: false }
+  }
+}
+
+function writeWorkspaceCache() {
+  try {
+    sessionStorage.setItem(
+      WORKSPACE_CACHE_KEY,
+      JSON.stringify({
+        cachedAt: Date.now(),
+        currentSourceId: currentSourceId.value,
+        sources: sources.value,
+        oauthStatus: oauthStatus.value,
+        runs: runs.value,
+        materials: materials.value,
+        governanceCounts: { ...governanceCounts }
+      })
+    )
+  } catch {
+    // 缓存不可用时继续使用实时接口数据。
+  }
+}
+
 async function loadSources() {
   const response = await feishuKnowledgeApi.listSources()
   sources.value = response.items || []
@@ -568,6 +645,15 @@ async function loadFormalKnowledgeCount() {
     governanceCounts.formal = response.items?.length ?? 0
   } catch {
     governanceCounts.formal = 0
+  }
+}
+
+function scheduleFormalKnowledgeRefresh() {
+  formalKnowledgeRefreshTimers.forEach((timer) => clearTimeout(timer))
+  formalKnowledgeRefreshTimers = []
+  void loadFormalKnowledgeCount()
+  for (const delay of [2000, 5000, 10000]) {
+    formalKnowledgeRefreshTimers.push(setTimeout(() => void loadFormalKnowledgeCount(), delay))
   }
 }
 
@@ -683,6 +769,7 @@ async function refreshAll({ forceTree = false } = {}) {
       loadRelationCount(),
       loadFormalKnowledgeCount()
     ])
+    writeWorkspaceCache()
   }
 }
 
@@ -817,12 +904,15 @@ function handleOAuthCallbackResult() {
     const error = { response: { data: { detail: { code } } } }
     message.error(feishuKnowledgeApi.getErrorMessage(error, '飞书用户授权失败'))
   }
+  sessionStorage.removeItem(WORKSPACE_CACHE_KEY)
   window.history.replaceState({}, '', window.location.pathname)
 }
 
 async function initialize() {
-  loadingSources.value = true
+  const cacheState = readWorkspaceCache()
+  loadingSources.value = !cacheState.restored
   pageError.value = ''
+  if (cacheState.fresh) return
   try {
     await refreshAll()
   } catch (error) {
@@ -1124,6 +1214,7 @@ onBeforeUnmount(() => {
   isAlive = false
   clearTimeout(pollTimer)
   clearTimeout(qrPollTimer)
+  formalKnowledgeRefreshTimers.forEach((timer) => clearTimeout(timer))
 })
 </script>
 
@@ -1141,7 +1232,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  min-height: 72px;
+  min-height: 60px;
   padding: 12px var(--page-padding);
   background: color-mix(in srgb, var(--gray-0) 94%, transparent);
 }
@@ -1158,11 +1249,29 @@ onBeforeUnmount(() => {
   font-size: 22px;
 }
 
-.page-heading p,
 .section-heading p {
   margin: 3px 0 0;
   color: var(--color-text-tertiary);
   font-size: 13px;
+}
+
+.page-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.page-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-tertiary);
+  cursor: help;
+  transition: color 160ms ease;
+}
+
+.page-help:hover {
+  color: var(--main-color);
 }
 
 .heading-actions {
@@ -1183,90 +1292,179 @@ onBeforeUnmount(() => {
   margin: 12px var(--page-padding) 0;
 }
 
-.source-strip {
-  display: grid;
-  grid-template-columns:
-    minmax(160px, 0.8fr) minmax(260px, 1.5fr) minmax(130px, 0.7fr)
-    minmax(160px, 0.8fr) minmax(180px, 0.9fr);
-  gap: 0;
-  margin: 12px var(--page-padding) 0;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--gray-150) 45%, transparent);
-  border-radius: 8px;
+.source-overview {
+  margin: 8px var(--page-padding) 0;
+}
+
+.source-overview-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  align-items: center;
+  gap: 18px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--gray-150) 46%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--gray-0) 82%, transparent);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.source-overview-toggle:hover {
+  border-color: color-mix(in srgb, var(--main-color) 28%, var(--gray-150));
   background: var(--gray-0);
 }
 
-.source-identity,
+.source-overview.expanded .source-overview-toggle {
+  border-radius: 6px 6px 0 0;
+  background: var(--gray-0);
+}
+
+.source-overview-identity {
+  display: inline-flex;
+  min-width: 190px;
+  max-width: 300px;
+  align-items: center;
+  gap: 8px;
+  color: var(--main-700);
+}
+
+.source-overview-identity strong {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-overview-metrics {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 22px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.source-overview-metrics::-webkit-scrollbar {
+  display: none;
+}
+
+.overview-metric {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.overview-metric strong {
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.overview-metric strong.warning {
+  color: var(--color-warning-900);
+}
+
+.overview-metric strong.error {
+  color: var(--color-error-700);
+}
+
+.overview-metric strong.muted {
+  color: var(--gray-600);
+}
+
+.source-overview-auth {
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.source-overview-detail-label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.source-overview-detail-label svg {
+  transition: transform 160ms ease;
+}
+
+.source-overview.expanded .source-overview-detail-label svg {
+  transform: rotate(180deg);
+}
+
+.source-details {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.6fr) minmax(150px, 0.7fr) minmax(170px, 0.8fr) minmax(
+      210px,
+      0.9fr
+    );
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--gray-150) 46%, transparent);
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: var(--gray-0);
+}
+
 .source-field {
   display: flex;
   min-width: 0;
-  min-height: 78px;
+  min-height: 58px;
   flex-direction: column;
   justify-content: center;
-  padding: 13px 16px;
+  padding: 9px 14px;
   border-right: 1px solid color-mix(in srgb, var(--gray-150) 42%, transparent);
-}
-
-.source-identity {
-  flex-direction: row;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
 }
 
 .source-field:last-child {
   border-right: 0;
 }
 
-.source-icon {
-  display: grid;
-  width: 38px;
-  height: 38px;
-  flex-shrink: 0;
-  place-items: center;
-  border-radius: 7px;
-  background: var(--main-30);
-  color: var(--main-color);
-}
-
-.source-strip label {
+.source-field label {
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   color: var(--color-text-tertiary);
-  font-size: 12px;
+  font-size: 11px;
 }
 
-.source-strip strong,
-.source-strip span,
-.source-strip a {
+.source-field strong,
+.source-field span,
+.source-field a {
   min-width: 0;
   overflow: hidden;
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.source-strip a {
+.source-field a {
   color: var(--main-color);
 }
 
 .source-field span + span {
   margin-top: 2px;
   color: var(--color-text-tertiary);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 400;
-}
-
-.stats-row {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  margin: 10px var(--page-padding) 0;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--gray-150) 40%, transparent);
-  border-radius: 8px;
-  background: var(--gray-0);
 }
 
 .governance-tabs {
@@ -1331,40 +1529,6 @@ onBeforeUnmount(() => {
 .governance-tab.active .governance-count {
   background: var(--main-30);
   color: var(--main-700);
-}
-
-.stat-item {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  min-height: 56px;
-  padding: 12px 16px;
-  border-right: 1px solid color-mix(in srgb, var(--gray-150) 40%, transparent);
-}
-
-.stat-item:last-child {
-  border-right: 0;
-}
-
-.stat-item span {
-  color: var(--color-text-secondary);
-  font-size: 13px;
-}
-
-.stat-item strong {
-  color: var(--main-700);
-  font-size: 22px;
-  font-weight: 600;
-}
-
-.stat-item strong.warning {
-  color: var(--color-warning-900);
-}
-.stat-item strong.error {
-  color: var(--color-error-700);
-}
-.stat-item strong.muted {
-  color: var(--gray-600);
 }
 
 .workspace-section {
@@ -1641,16 +1805,31 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1180px) {
-  .source-strip {
-    grid-template-columns: 1fr 1.5fr;
+  .source-overview-toggle {
+    gap: 14px;
   }
 
-  .source-field:nth-child(2) {
+  .source-overview-identity {
+    min-width: 160px;
+  }
+
+  .source-overview-metrics {
+    gap: 16px;
+  }
+
+  .source-overview-auth {
+    display: none;
+  }
+
+  .source-details {
+    grid-template-columns: 1.5fr 1fr;
+  }
+
+  .source-field:nth-child(even) {
     border-right: 0;
   }
 
-  .source-identity,
-  .source-field:nth-child(2) {
+  .source-field:nth-child(-n + 2) {
     border-bottom: 1px solid color-mix(in srgb, var(--gray-150) 42%, transparent);
   }
 
@@ -1688,13 +1867,30 @@ onBeforeUnmount(() => {
     flex-shrink: 0;
   }
 
-  .source-strip {
+  .source-overview-toggle {
+    gap: 10px;
+    padding-inline: 10px;
+  }
+
+  .source-overview-identity {
+    min-width: 126px;
+    max-width: 42vw;
+  }
+
+  .source-overview-metrics {
+    gap: 14px;
+  }
+
+  .detail-copy {
+    display: none;
+  }
+
+  .source-details {
     grid-template-columns: 1fr;
   }
 
-  .source-identity,
-  .source-field {
-    min-height: 66px;
+  .source-field,
+  .source-field:nth-child(even) {
     border-right: 0;
     border-bottom: 1px solid color-mix(in srgb, var(--gray-150) 42%, transparent);
   }
@@ -1703,16 +1899,17 @@ onBeforeUnmount(() => {
     border-bottom: 0;
   }
 
-  .stats-row {
-    grid-template-columns: 1fr 1fr;
+  .governance-tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
   }
 
-  .stat-item:nth-child(2) {
-    border-right: 0;
+  .governance-tabs::-webkit-scrollbar {
+    display: none;
   }
 
-  .stat-item:nth-child(-n + 2) {
-    border-bottom: 1px solid color-mix(in srgb, var(--gray-150) 40%, transparent);
+  .governance-tab {
+    flex: 0 0 auto;
   }
 
   .filter-bar {

@@ -159,6 +159,90 @@ function duplicatePackageDetail() {
   }
 }
 
+function knowledgeUnitPackageDetail() {
+  return {
+    ...packageDetail('package-first'),
+    item_count: 3,
+    knowledge_unit_count: 3,
+    attention_unit_count: 2,
+    safe_recommendation_count: 1,
+    decided_unit_count: 0,
+    remaining_unit_count: 3,
+    included_unit_count: 0,
+    excluded_unit_count: 0,
+    recommendation_counts: { PUBLISH: 1, ADOPT_NEW_VERSION: 1, KEEP_CURRENT: 1 },
+    items: [
+      {
+        review_item_id: 'unit-safe',
+        review_type: 'NEW',
+        subject_type: 'KNOWLEDGE_UNIT',
+        subject_id: 'knowledge-unit-safe',
+        title: '产品能力',
+        summary: '未发现冲突或解析异常，建议纳入知识库。',
+        subject_locator: { page: 1 },
+        relation_ids: [],
+        problem_tags: [],
+        item_status: 'PENDING',
+        allowed_outcomes: ['PUBLISH', 'REQUEST_SOURCE_CHANGE', 'EXCLUDE'],
+        knowledge_unit: true,
+        content: '产品支持知识加工、审核和来源追溯。',
+        source_segment_ids: ['seg-1'],
+        change_type: 'NEW',
+        recommended_outcome: 'PUBLISH',
+        recommendation_reason: '未发现冲突或解析异常，建议纳入知识库。',
+        recommendation_confidence: 0.92,
+        manual_review_required: false,
+        comparison_status: 'completed'
+      },
+      {
+        review_item_id: 'unit-updated',
+        review_type: 'UPDATE',
+        subject_type: 'KNOWLEDGE_UNIT',
+        subject_id: 'knowledge-unit-updated',
+        title: '部署要求',
+        summary: '该知识单元内容已变化，请核对差异后采用新版。',
+        subject_locator: { page: 2 },
+        relation_ids: [],
+        problem_tags: [],
+        item_status: 'PENDING',
+        allowed_outcomes: ['ADOPT_NEW_VERSION', 'KEEP_CURRENT', 'EXCLUDE'],
+        knowledge_unit: true,
+        content: '生产环境至少需要八核处理器。',
+        previous_content: '生产环境至少需要四核处理器。',
+        source_segment_ids: ['seg-2'],
+        change_type: 'UPDATED',
+        recommended_outcome: 'ADOPT_NEW_VERSION',
+        recommendation_reason: '该知识单元内容已变化，请核对差异后采用新版。',
+        recommendation_confidence: 0.9,
+        manual_review_required: true,
+        comparison_status: 'completed'
+      },
+      {
+        review_item_id: 'unit-conflict',
+        review_type: 'CONFLICT',
+        subject_type: 'KNOWLEDGE_UNIT',
+        subject_id: 'knowledge-unit-conflict',
+        title: '服务端口',
+        summary: '发现结论冲突，需要人工确认。',
+        subject_locator: { page: 3 },
+        relation_ids: ['relation-1'],
+        problem_tags: ['CONFLICT'],
+        item_status: 'PENDING',
+        allowed_outcomes: ['KEEP_CURRENT', 'ADOPT_NEW_VERSION'],
+        knowledge_unit: true,
+        content: '服务端口为 9090。',
+        source_segment_ids: ['seg-3'],
+        change_type: 'UPDATED',
+        recommended_outcome: 'KEEP_CURRENT',
+        recommendation_reason: '发现结论冲突，需要人工确认。',
+        recommendation_confidence: 1,
+        manual_review_required: true,
+        comparison_status: 'completed'
+      }
+    ]
+  }
+}
+
 function duplicateCandidates(decision = null) {
   return {
     relation_id: 'relation-duplicate',
@@ -303,7 +387,11 @@ describe('FeishuReviewWorkspace', () => {
     const wrapper = mountWorkspace()
     await flushPromises()
 
-    expect(wrapper.get('.record-heading h2').text()).toBe('第一份资料')
+    expect(wrapper.find('.record-heading').exists()).toBe(false)
+    expect(wrapper.find('.unit-overview').exists()).toBe(false)
+    expect(wrapper.find('.item-navigation').exists()).toBe(false)
+    expect(wrapper.find('.knowledge-lineage').exists()).toBe(false)
+    expect(wrapper.find('.evidence-context').exists()).toBe(false)
     expect(wrapper.get('.markdown-stub').text()).toContain('第一份资料正文')
     expect(wrapper.text()).toContain('发布')
     expect(wrapper.text()).toContain('退回飞书修改')
@@ -321,6 +409,112 @@ describe('FeishuReviewWorkspace', () => {
     expect(apiAdminGet).toHaveBeenCalledWith(
       '/api/governance/review-packages?source_id=source-1&view=mine'
     )
+  })
+
+  it('整篇资料可从顶部批量审核，当前知识单元仍从右侧处理', async () => {
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    const wholeReviewButton = wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('整篇批量审核'))
+    expect(wholeReviewButton).toBeTruthy()
+    await wholeReviewButton.trigger('click')
+    expect(Modal.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: '整篇批量审核',
+        okText: '确认批量处理整篇资料'
+      })
+    )
+
+    await Modal.confirm.mock.calls[0][0].onOk()
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-first/resolve',
+      expect.objectContaining({
+        decisions: [
+          expect.objectContaining({
+            review_item_id: 'item-review-first',
+            outcome: 'PUBLISH'
+          })
+        ]
+      })
+    )
+
+    await wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('审核处理'))
+      .trigger('click')
+    expect(wrapper.get('.decision-panel').classes()).toContain('open')
+    expect(wrapper.get('.outcome-list').exists()).toBe(true)
+    expect(wrapper.get('.field-label-row label').text()).toBe('问题记录（可选）')
+    expect(wrapper.get('.problem-help').attributes('aria-label')).toContain('不等同于审核结果')
+    await wrapper
+      .findAll('.outcome-list button')
+      .find((button) => button.text().includes('退回飞书修改'))
+      .trigger('click')
+    expect(wrapper.get('.field-label-row label').text()).toBe('退回原因（可多选）')
+    expect(wrapper.get('.problem-help').attributes('aria-label')).toContain('作为修改依据')
+  })
+
+  it('整篇资料没有可批量项时仍显示入口并明确提示逐条处理', async () => {
+    const detail = packageDetail('package-first')
+    detail.items[0].item_status = 'WAITING_SOURCE_CHANGE'
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [packages[0]], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-first') {
+        return Promise.resolve(detail)
+      }
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    const wholeReviewButton = wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('整篇批量审核'))
+    expect(wholeReviewButton).toBeTruthy()
+    expect(wholeReviewButton.attributes('disabled')).toBeDefined()
+    expect(wholeReviewButton.attributes('title')).toContain('逐条处理')
+  })
+
+  it('滚动到审核任务列表底部时继续加载下一页，直到显示全部任务', async () => {
+    const nextPackage = {
+      ...packages[0],
+      package_id: 'package-next',
+      source_version_id: 'version-next',
+      title: '下一页资料'
+    }
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/governance/review-packages?source_id=source-1&view=mine') {
+        return Promise.resolve({ items: packages, total: 3, counts: { mine: 3 } })
+      }
+      if (url === '/api/governance/review-packages?source_id=source-1&view=mine&page=2&page_size=20') {
+        return Promise.resolve({ items: [nextPackage], total: 3, counts: { mine: 3 } })
+      }
+      if (url.startsWith('/api/governance/review-packages/package-')) {
+        return Promise.resolve(packageDetail(url.split('/').pop()))
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    const loadMore = wrapper.get('.queue-load-more-button')
+    expect(loadMore.text()).toContain('已显示 2 / 3')
+    await loadMore.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.queue-item')).toHaveLength(3)
+    expect(wrapper.get('.queue-load-more').text()).toContain('已显示全部 3 个审核任务')
   })
 
   it('当前正文可按稳定来源片段定位并返回全文', async () => {
@@ -428,7 +622,284 @@ describe('FeishuReviewWorkspace', () => {
     await flushPromises()
     expect(wrapper.get('.presentation-toolbar').text()).toContain('第 2 / 2 页')
     expect(createObjectUrl).toHaveBeenCalledTimes(2)
+    expect(revokeObjectUrl).not.toHaveBeenCalled()
+    wrapper.unmount()
     expect(revokeObjectUrl).toHaveBeenCalled()
+  })
+
+  it('PPT 知识单元在页面清单加载后自动定位对应页', async () => {
+    const pptSummary = {
+      ...packages[0],
+      package_id: 'package-ppt-unit',
+      source_version_id: 'version-ppt-unit',
+      title: '实施方案.pptx',
+      knowledge_unit_count: 1,
+      attention_unit_count: 1
+    }
+    const pptDetail = {
+      ...packageDetail('package-first'),
+      ...pptSummary,
+      item_type: 'pptx',
+      yuxi_file_id: 'file-ppt-unit',
+      recommendation_counts: { PUBLISH: 1 },
+      safe_recommendation_count: 0,
+      items: [
+        {
+          review_item_id: 'unit-slide-2',
+          review_type: 'NEW',
+          subject_type: 'KNOWLEDGE_UNIT',
+          subject_id: 'knowledge-unit-slide-2',
+          title: '第 2 页幻灯片',
+          summary: '请核对当前页面。',
+          subject_locator: { slide: 2 },
+          relation_ids: [],
+          problem_tags: [],
+          item_status: 'PENDING',
+          allowed_outcomes: ['PUBLISH', 'REQUEST_SOURCE_CHANGE', 'EXCLUDE'],
+          knowledge_unit: true,
+          content: '第二页完整内容',
+          source_segment_ids: ['seg-slide-2'],
+          change_type: 'NEW',
+          recommended_outcome: 'PUBLISH',
+          manual_review_required: true
+        }
+      ]
+    }
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:ppt-slide-2')
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [pptSummary], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-ppt-unit') {
+        return Promise.resolve(pptDetail)
+      }
+      if (url === '/api/governance/review-packages/package-ppt-unit/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/governance/review-packages/package-ppt-unit/presentation') {
+        return Promise.resolve({
+          supported: true,
+          slide_count: 2,
+          aspect_ratio: 1.777778,
+          slides: [
+            { slide_number: 1, fragment_count: 0, fragments: [] },
+            { slide_number: 2, fragment_count: 0, fragments: [] }
+          ]
+        })
+      }
+      if (url.startsWith('/api/governance/review-packages/package-ppt-unit/presentation/slides/')) {
+        return Promise.resolve({ blob: () => Promise.resolve(new Blob(['image'])) })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-ppt-unit/content') {
+        return Promise.resolve({ content: '# 实施方案', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.presentation-toolbar').text()).toContain('第 2 / 2 页')
+    expect(wrapper.get('.presentation-stage-row').classes()).toContain('has-side-panel')
+    expect(wrapper.get('.layout-context-sidebar').text()).toContain('审核信息')
+    expect(wrapper.get('.layout-sidebar-primary').text()).toContain('处理当前知识单元')
+    expect(
+      wrapper.findAll('.record-actions button').some((button) => button.text().includes('处理当前知识单元'))
+    ).toBe(false)
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-ppt-unit/presentation/slides/2',
+      {},
+      'blob'
+    )
+  })
+
+  it('Word 版式按页面展示并支持编辑内容块审核草稿', async () => {
+    const documentSummary = {
+      ...packages[0],
+      package_id: 'package-docx-layout',
+      source_version_id: 'version-docx-layout',
+      title: '部署指南.docx',
+      item_type: 'docx'
+    }
+    const documentDetail = {
+      ...packageDetail('package-first'),
+      ...documentSummary,
+      yuxi_file_id: 'file-docx-layout'
+    }
+    documentDetail.knowledge_unit_count = 1
+    documentDetail.items = documentDetail.items.map((item) => ({
+      ...item,
+      knowledge_unit: true,
+      source_segment_ids: []
+    }))
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:document-page')
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [documentSummary], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-docx-layout') {
+        return Promise.resolve(documentDetail)
+      }
+      if (url === '/api/governance/review-packages/package-docx-layout/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/governance/review-packages/package-docx-layout/layout') {
+        return Promise.resolve({
+          supported: true,
+          file_type: '.docx',
+          page_count: 1,
+          pages: [
+            {
+              page_number: 1,
+              label: '第 1 页',
+              aspect_ratio: 0.707,
+              render_mode: 'image',
+              block_count: 1,
+              blocks: [
+                {
+                  block_id: 'page-1-block-1',
+                  content: '部署前准备',
+                  left: 10,
+                  top: 10,
+                  width: 30,
+                  height: 8,
+                  source_segment_ids: []
+                }
+              ]
+            }
+          ],
+          edits: {}
+        })
+      }
+      if (url === '/api/governance/review-packages/package-docx-layout/layout/pages/1') {
+        return Promise.resolve({ blob: () => Promise.resolve(new Blob(['image'])) })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-docx-layout/content') {
+        return Promise.resolve({ content: '# 部署指南', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    apiAdminPatch.mockResolvedValue({
+      lock_version: 4,
+      draft: { layout_edits: { 'page-1-block-1': { content: '部署前准备（已确认）' } } }
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.document-layout-review').text()).toContain('1 个可定位内容块')
+    expect(wrapper.get('.document-layout-review').text()).not.toContain('版式查看')
+    expect(wrapper.get('.evidence-tabs-actions').text()).toContain('查看飞书原文')
+    expect(wrapper.find('.record-heading').exists()).toBe(false)
+    expect(wrapper.get('.layout-sidebar-primary').text()).toContain('处理当前知识单元')
+    expect(wrapper.findAll('.record-actions button').some((button) => button.text().includes('处理当前知识单元'))).toBe(false)
+    expect(wrapper.get('.layout-context-sidebar').text()).toContain('部署指南.docx')
+    expect(wrapper.get('.layout-context-sidebar').text()).toContain('审核信息')
+    expect(wrapper.findAll('.document-layout-block')).toHaveLength(1)
+    await wrapper.get('.document-layout-block').trigger('click')
+    const editor = wrapper.get('.document-layout-editor textarea')
+    await editor.setValue('部署前准备（已确认）')
+    await wrapper.get('.document-layout-save').trigger('click')
+    await flushPromises()
+
+    expect(apiAdminPatch).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-docx-layout/layout/edits',
+      expect.objectContaining({
+        block_id: 'page-1-block-1',
+        content: '部署前准备（已确认）'
+      })
+    )
+    expect(message.success).toHaveBeenCalledWith('版式编辑草稿已保存，飞书原文未被修改')
+  })
+
+  it('Excel 内容较多时使用可滚动的表格画布并保持可读尺寸', async () => {
+    const spreadsheetSummary = {
+      ...packages[0],
+      package_id: 'package-xlsx-layout',
+      source_version_id: 'version-xlsx-layout',
+      title: '投标清单.xlsx',
+      item_type: 'xlsx'
+    }
+    const spreadsheetDetail = {
+      ...packageDetail('package-first'),
+      ...spreadsheetSummary,
+      yuxi_file_id: 'file-xlsx-layout'
+    }
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [spreadsheetSummary], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-xlsx-layout') {
+        return Promise.resolve(spreadsheetDetail)
+      }
+      if (url === '/api/governance/review-packages/package-xlsx-layout/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/governance/review-packages/package-xlsx-layout/layout') {
+        return Promise.resolve({
+          supported: true,
+          file_type: '.xlsx',
+          page_count: 1,
+          pages: [
+            {
+              page_number: 1,
+              label: '报价明细',
+              width: 12,
+              height: 90,
+              render_mode: 'grid',
+              block_count: 2,
+              blocks: [
+                {
+                  block_id: 'sheet-1-cell-A1',
+                  content: '项目名称',
+                  left: 0,
+                  top: 0,
+                  width: 8.3333,
+                  height: 1.1111,
+                  locator: { sheet: '报价明细', cell: 'A1' },
+                  source_segment_ids: []
+                },
+                {
+                  block_id: 'sheet-1-cell-L90',
+                  content: '较长的说明文字',
+                  left: 91.6667,
+                  top: 98.8889,
+                  width: 8.3333,
+                  height: 1.1111,
+                  locator: { sheet: '报价明细', cell: 'L90' },
+                  source_segment_ids: []
+                }
+              ]
+            }
+          ],
+          edits: {}
+        })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-xlsx-layout/content') {
+        return Promise.resolve({ content: '# 投标清单', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.spreadsheet-viewport').text()).toContain('项目名称')
+    expect(wrapper.get('.document-layout-toolbar').text()).toContain('横向、纵向滚动查看')
+    expect(wrapper.get('.review-workspace').classes()).toContain('layout-focus')
+    expect(wrapper.find('.spreadsheet-canvas').attributes('style')).toContain('--sheet-columns: 12')
+    expect(wrapper.findAll('.spreadsheet-cell')).toHaveLength(2)
   })
 
   it('用直观文案说明无内容变化的现有知识确认任务', async () => {
@@ -504,8 +975,8 @@ describe('FeishuReviewWorkspace', () => {
     const wrapper = mountWorkspace({ targetReviewId: 'version-target' })
     await flushPromises()
 
-    expect(wrapper.get('.record-heading h2').text()).toBe('目标资料')
-    expect(wrapper.text()).toContain('资料修改后重新审核')
+    expect(wrapper.find('.record-heading').exists()).toBe(false)
+    expect(wrapper.find('.reopen-trail').exists()).toBe(false)
     expect(wrapper.text()).toContain('更新已有知识')
     expect(wrapper.get('.evidence-tabs').text()).toContain('具体变更')
     expect(wrapper.get('.version-change-review').text()).toContain('版本 1')
@@ -534,7 +1005,7 @@ describe('FeishuReviewWorkspace', () => {
     })
     await flushPromises()
 
-    expect(wrapper.get('.record-heading h2').text()).toBe('目标资料')
+    expect(wrapper.find('.record-heading').exists()).toBe(false)
     expect(wrapper.get('.evidence-tabs [role="tab"][aria-selected="true"]').text()).toContain(
       '跨文档证据'
     )
@@ -643,7 +1114,7 @@ describe('FeishuReviewWorkspace', () => {
       '/api/governance/review-packages?source_id=source-1&view=mine&page_size=100'
     )
     expect(apiAdminGet).not.toHaveBeenCalledWith('/api/governance/review-packages/package-first')
-    expect(wrapper.get('.record-heading h2').text()).toBe('目标资料')
+    expect(wrapper.find('.record-heading').exists()).toBe(false)
     expect(wrapper.findAll('.queue-item')).toHaveLength(2)
     expect(wrapper.get('.evidence-tabs [role="tab"][aria-selected="true"]').text()).toContain(
       '跨文档证据'
@@ -755,7 +1226,122 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.duplicate-match').text()).toContain('来源一 · 重叠部分')
     expect(wrapper.get('.duplicate-match').text()).toContain('来源二 · 重叠部分')
     expect(wrapper.get('.duplicate-match').text()).toContain('狗狗你是公司专注企业数字化服务')
-    expect(wrapper.get('.duplicate-actions').text()).toContain('独有内容')
+    expect(wrapper.get('.duplicate-action-help').attributes('aria-label')).toContain('独有内容')
+  })
+
+  it('跨文档证据支持双栏版式对比、匹配高亮和同步翻页', async () => {
+    const detail = duplicatePackageDetail()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:relation-page')
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              package_id: detail.package_id,
+              source_version_id: detail.source_version_id,
+              title: detail.title
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-duplicate') return Promise.resolve(detail)
+      if (url === '/api/governance/relations/relation-duplicate/duplicate-candidates') {
+        return Promise.resolve(duplicateCandidates())
+      }
+      if (url === '/api/governance/relations/relation-duplicate/layout-comparison') {
+        return Promise.resolve({
+          supported: true,
+          relation_id: 'relation-duplicate',
+          relation_type: 'EXACT_DUPLICATE',
+          source: {
+            title: '产品介绍 A',
+            revision: '2',
+            pages: [
+              {
+                page_number: 1,
+                aspect_ratio: 1.77,
+                blocks: [
+                  {
+                    block_id: 'source-block-1',
+                    content: '公司简介：狗狗你是公司专注企业数字化服务。',
+                    left: 10,
+                    top: 10,
+                    width: 70,
+                    height: 10,
+                    source_segment_ids: []
+                  }
+                ]
+              }
+            ]
+          },
+          target: {
+            title: '产品介绍 B',
+            revision: '1',
+            pages: [
+              {
+                page_number: 1,
+                aspect_ratio: 1.77,
+                blocks: [
+                  {
+                    block_id: 'target-block-1',
+                    content: '公司简介：狗狗你是公司专注企业数字化服务。',
+                    left: 12,
+                    top: 12,
+                    width: 70,
+                    height: 10,
+                    source_segment_ids: []
+                  }
+                ]
+              }
+            ]
+          },
+          matches: [
+            {
+              match_id: 'match-1',
+              similarity: 0.98,
+              source_page_number: 1,
+              target_page_number: 1,
+              source_block_ids: ['source-block-1'],
+              target_block_ids: ['target-block-1'],
+              source_overlap_excerpt: '狗狗你是公司专注企业数字化服务。'
+            }
+          ]
+        })
+      }
+      if (url.endsWith('/layout-comparison/source/pages/1') || url.endsWith('/layout-comparison/target/pages/1')) {
+        return Promise.resolve({ blob: () => Promise.resolve(new Blob(['image'])) })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url === '/api/knowledge/databases/kb-1/documents/file-duplicate/content') {
+        return Promise.resolve({ content: '# 产品介绍 A', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    await wrapper
+      .findAll('.evidence-tabs button')
+      .find((button) => button.text().includes('跨文档证据'))
+      .trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.comparison-layout-review').text()).toContain('版式对比')
+    expect(wrapper.findAll('.comparison-layout-pane')).toHaveLength(2)
+    expect(wrapper.get('.comparison-match-strip').text()).toContain('98%')
+    expect(wrapper.findAll('.comparison-layout-block.comparison-block-match')).toHaveLength(2)
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/relations/relation-duplicate/layout-comparison/source/pages/1',
+      {},
+      'blob'
+    )
   })
 
   it('可以选择规范内容并将另一边记录为重复来源', async () => {
@@ -887,5 +1473,246 @@ describe('FeishuReviewWorkspace', () => {
       expect.objectContaining({ strategy: 'KEEP_SEPARATE' })
     )
     expect(wrapper.get('.duplicate-decision-result').text()).toContain('已决定分别保留')
+  })
+
+  it('知识单元默认展示待处理项并可从顶部批量处理低风险项', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              knowledge_unit_count: 3,
+              attention_unit_count: 2,
+              decided_unit_count: 0,
+              remaining_unit_count: 3,
+              included_unit_count: 0
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') {
+        return Promise.resolve(detail)
+      }
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({
+          items: [
+            {
+              segment_id: 'seg-1',
+              segment_index: 0,
+              title_path: ['产品能力'],
+              locator_label: '第1页',
+              content: '产品支持知识加工、审核和来源追溯。'
+            },
+            {
+              segment_id: 'seg-2',
+              segment_index: 1,
+              title_path: ['部署要求'],
+              locator_label: '第2页',
+              content: '生产环境至少需要八核处理器。'
+            },
+            {
+              segment_id: 'seg-3',
+              segment_index: 2,
+              title_path: ['服务端口'],
+              locator_label: '第3页',
+              content: '服务端口为 9090。'
+            }
+          ]
+        })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockResolvedValue({
+      unit_publish_version_ids: ['version-first'],
+      remaining_unit_count: 2
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('0/3 已处理')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('待处理 3')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 0')
+    expect(wrapper.find('.unit-overview').exists()).toBe(false)
+    expect(wrapper.find('.item-navigation').exists()).toBe(false)
+    expect(wrapper.find('.knowledge-lineage').exists()).toBe(false)
+    expect(wrapper.find('.evidence-context').exists()).toBe(false)
+    expect(wrapper.get('.record-actions').text()).toContain('处理当前知识单元')
+    expect(wrapper.get('.version-change-list').text()).toContain('四核处理器')
+    expect(wrapper.get('.version-change-list').text()).toContain('八核处理器')
+
+    const batchButton = wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('整篇批量审核'))
+    await batchButton.trigger('click')
+    expect(Modal.confirm).toHaveBeenCalledOnce()
+    await Modal.confirm.mock.calls[0][0].onOk()
+    await flushPromises()
+
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-first/resolve',
+      expect.objectContaining({
+        decisions: [
+          expect.objectContaining({
+            review_item_id: 'unit-safe',
+            outcome: 'PUBLISH'
+          })
+        ]
+      })
+    )
+    expect(wrapper.emitted('knowledge-change')).toHaveLength(1)
+    expect(message.success).toHaveBeenCalledWith('已批量处理 1 个安全项；仍有 2 个知识单元待逐条审核')
+  })
+
+  it('知识单元支持批量不纳入和批量退回资料修改', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [packages[0]], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-first') {
+        return Promise.resolve(detail)
+      }
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockResolvedValue({ remaining_unit_count: 1 })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    const excludeButton = wrapper
+      .findAll('.batch-action-secondary')
+      .find((button) => button.text() === '批量不纳入')
+    expect(excludeButton.attributes('disabled')).toBeUndefined()
+    await excludeButton.trigger('click')
+    await Modal.confirm.mock.calls[0][0].onOk()
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-first/resolve',
+      expect.objectContaining({
+        decisions: expect.arrayContaining([
+          expect.objectContaining({ outcome: 'EXCLUDE' })
+        ])
+      })
+    )
+
+    const returnButton = wrapper
+      .findAll('.batch-action-secondary')
+      .find((button) => button.text() === '批量退回')
+    await returnButton.trigger('click')
+    await Modal.confirm.mock.calls[1][0].onOk()
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenLastCalledWith(
+      '/api/governance/review-packages/package-first/resolve',
+      expect.objectContaining({
+        decisions: [expect.objectContaining({ outcome: 'REQUEST_SOURCE_CHANGE' })]
+      })
+    )
+  })
+
+  it('已处理知识单元数量仍在审核任务列表显示', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    detail.decided_unit_count = 1
+    detail.remaining_unit_count = 2
+    detail.included_unit_count = 1
+    detail.items[0] = {
+      ...detail.items[0],
+      item_status: 'DECIDED',
+      outcome: 'PUBLISH',
+      decision_comment: '已确认纳入'
+    }
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              knowledge_unit_count: 3,
+              decided_unit_count: 1,
+              remaining_unit_count: 2,
+              included_unit_count: 1
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-first/content')) {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('1/3 已处理')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('待处理 2')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 1')
+    expect(wrapper.find('.item-navigation').exists()).toBe(false)
+  })
+
+  it('发布单个知识单元时明确提示正在加入正式知识和剩余数量', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              knowledge_unit_count: 3,
+              decided_unit_count: 0,
+              remaining_unit_count: 3,
+              included_unit_count: 0
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-first/content')) {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockResolvedValue({
+      unit_publish_version_ids: ['version-first'],
+      remaining_unit_count: 2
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    await wrapper.findAll('.decision-footer button')[1].trigger('click')
+    await flushPromises()
+
+    expect(message.success).toHaveBeenCalledWith(
+      '“部署要求”已确认纳入，正在加入正式知识；本材料还有 2 个知识单元待处理'
+    )
+    expect(wrapper.emitted('knowledge-change')).toHaveLength(1)
   })
 })

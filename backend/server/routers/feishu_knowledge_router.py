@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_admin_user, get_db
@@ -27,6 +27,7 @@ from yuxi.integrations.feishu.schemas import FeishuNode
 from yuxi.integrations.feishu.service import FeishuScanService
 from yuxi.governance.comparator import CrossDocumentComparisonService
 from yuxi.governance.content_quality import assess_content
+from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
 from yuxi.governance.review_backfill import backfill_legacy_governance_reviews
 from yuxi.governance.source_segment_service import SourceSegmentService
 from yuxi.knowledge.runtime import knowledge_base
@@ -42,6 +43,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuProcessingEvent,
     FeishuSource,
     FeishuSourceItem,
+    FeishuSourceSegment,
     FeishuSyncRun,
 )
 from yuxi.storage.postgres.models_business import User
@@ -139,6 +141,13 @@ class PublishResult:
 class PublishSwitchResult:
     material: FeishuMaterialVersion
     replaced_file_id: str | None
+    republish_required: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class UnitPublishQueueResult:
+    material: FeishuMaterialVersion
+    enqueue_required: bool
 
 
 def _feishu_source_path(*, wiki_path: str | None, title: str | None, item_type: str) -> str:
@@ -400,6 +409,64 @@ class FeishuReviewService:
             await self.session.flush()
             return version
 
+    async def queue_unit_publish(self, version_id: str, *, operator_id: str) -> UnitPublishQueueResult:
+        """Queue only the knowledge units already included by human review."""
+        async with self._transaction():
+            version, item, _ = await self._get_material(version_id, lock=True)
+            if version.processing_status not in {
+                "parsed",
+                "awaiting_review",
+                "published",
+                "publish_failed",
+                "publish_queued",
+                "publishing",
+            }:
+                raise ValueError("Material is not ready for knowledge-unit publishing")
+            included_count = await self.session.scalar(
+                select(func.count(FeishuSourceSegment.id)).where(
+                    FeishuSourceSegment.version_id == version.version_id,
+                    FeishuSourceSegment.status == "ACTIVE",
+                    FeishuSourceSegment.publication_state == "INCLUDED",
+                )
+            )
+            if not included_count:
+                raise ValueError("No included knowledge unit is ready for publishing")
+            quality = (version.processing_params or {}).get("content_quality") or {}
+            if not quality.get("checked"):
+                raise ValueError("正文检查尚未完成，不能发布")
+            if not quality.get("has_body"):
+                raise ValueError("资料只有标题、没有可审核正文，不能发布")
+
+            params = dict(version.processing_params or {})
+            revision = int(params.get("unit_publish_requested_revision") or 0) + 1
+            params["unit_publish_requested_revision"] = revision
+            version.processing_params = params
+            from_status = version.processing_status
+            enqueue_required = from_status != "publishing"
+            if enqueue_required:
+                version.processing_status = "publish_queued"
+            version.review_status = "approved"
+            version.reviewer_id = operator_id
+            version.reviewed_at = utc_now()
+            version.error_code = None
+            version.error_message = None
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="unit_publish_queued",
+                from_status=from_status,
+                to_status=version.processing_status,
+                operator_id=operator_id,
+                payload_json={
+                    "requested_revision": revision,
+                    "enqueue_required": enqueue_required,
+                    "included_segment_count": int(included_count),
+                },
+            )
+            await self.session.flush()
+            return UnitPublishQueueResult(material=version, enqueue_required=enqueue_required)
+
     async def reject(self, version_id: str, *, operator_id: str, reason: str) -> FeishuMaterialVersion:
         reason = reason.strip()
         if not reason:
@@ -456,6 +523,12 @@ class FeishuReviewService:
             version, item, source = await self._get_material(version_id, lock=True)
             if version.processing_status != "publish_queued":
                 raise ValueError("Material is not queued for publishing")
+            processing_params = dict(version.processing_params or {})
+            if processing_params.get("unit_publish_requested_revision") is not None:
+                processing_params["unit_publish_claimed_revision"] = int(
+                    processing_params.get("unit_publish_requested_revision") or 0
+                )
+                version.processing_params = processing_params
             version.processing_status = "publishing"
             self._append_event(
                 source_id=item.source_id,
@@ -580,6 +653,10 @@ class FeishuReviewService:
             if item is None:
                 raise LookupError(f"Feishu source item not found: {version.item_id}")
             old_active_id = item.active_version_id
+            processing_params = dict(version.processing_params or {})
+            requested_revision = int(processing_params.get("unit_publish_requested_revision") or 0)
+            claimed_revision = int(processing_params.get("unit_publish_claimed_revision") or requested_revision)
+            republish_required = requested_revision > claimed_revision
             old_version = None
             if old_active_id and old_active_id != version.version_id:
                 old_result = await self.session.execute(
@@ -595,8 +672,9 @@ class FeishuReviewService:
                 version.replaced_at = utc_now()
                 version.error_code = None
                 version.error_message = None
-                processing_params = dict(version.processing_params or {})
                 processing_params.pop("publish_candidate_needs_parse", None)
+                if requested_revision:
+                    processing_params["unit_publish_completed_revision"] = claimed_revision
                 version.processing_params = processing_params
                 self._append_event(
                     source_id=item.source_id,
@@ -609,7 +687,11 @@ class FeishuReviewService:
                 )
                 await self.session.flush()
                 cleanup_file_id = None if old_version.yuxi_file_id == yuxi_file_id else yuxi_file_id
-                return PublishSwitchResult(material=version, replaced_file_id=cleanup_file_id)
+                return PublishSwitchResult(
+                    material=version,
+                    replaced_file_id=cleanup_file_id,
+                    republish_required=republish_required,
+                )
             cleanup_file_id = None
             if old_version is not None:
                 if old_version.yuxi_file_id != yuxi_file_id:
@@ -617,14 +699,15 @@ class FeishuReviewService:
                 old_version.processing_status = "replaced"
                 old_version.replaced_at = utc_now()
             item.active_version_id = version.version_id
-            version.processing_status = "published"
+            version.processing_status = "publish_queued" if republish_required else "published"
             version.yuxi_file_id = yuxi_file_id
             version.chunk_count = chunk_count
             version.published_at = utc_now()
             version.error_code = None
             version.error_message = None
-            processing_params = dict(version.processing_params or {})
             processing_params.pop("publish_candidate_needs_parse", None)
+            if requested_revision:
+                processing_params["unit_publish_completed_revision"] = claimed_revision
             version.processing_params = processing_params
             self._append_event(
                 source_id=item.source_id,
@@ -632,11 +715,19 @@ class FeishuReviewService:
                 version_id=version.version_id,
                 event_type="published",
                 from_status="publish_queued",
-                to_status="published",
-                payload_json={"previous_active_version_id": old_active_id},
+                to_status=version.processing_status,
+                payload_json={
+                    "previous_active_version_id": old_active_id,
+                    "completed_revision": claimed_revision if requested_revision else None,
+                    "republish_required": republish_required,
+                },
             )
             await self.session.flush()
-            return PublishSwitchResult(material=version, replaced_file_id=cleanup_file_id)
+            return PublishSwitchResult(
+                material=version,
+                replaced_file_id=cleanup_file_id,
+                republish_required=republish_required,
+            )
 
     async def mark_replacement_cleanup_failed(self, version_id: str, *, message: str) -> FeishuMaterialVersion:
         async with self._transaction():
@@ -1713,6 +1804,13 @@ async def _run_publish_worker(
                 raise
             if isinstance(exc, asyncio.CancelledError):
                 raise
+    if switch.republish_required:
+        return await _run_publish_worker(
+            version_id,
+            operator_id=operator_id,
+            publish_adapter=publish_adapter,
+            context=context,
+        )
     return {"version_id": material.version_id, "status": material.processing_status, "file_id": result.file_id}
 
 
@@ -1833,6 +1931,7 @@ async def _run_processing_worker(
                 file_id=existing_file_id,
             )
             await backfill_legacy_governance_reviews(session, version_ids=[version_id])
+            await KnowledgeUnitService(session).ensure_for_version(version_id)
     except asyncio.CancelledError as exc:
         try:
             async with pg_manager.get_async_session_context() as session:
@@ -1915,6 +2014,7 @@ async def _run_comparison_worker(
             relation_count = len(relations)
         async with pg_manager.get_async_session_context() as session:
             await _update_comparison_state(session, version_id, "completed", relation_count=relation_count)
+            await KnowledgeUnitService(session).ensure_for_version(version_id)
         return {"version_id": version_id, "status": "completed", "relation_count": relation_count}
     except asyncio.CancelledError:
         async with pg_manager.get_async_session_context() as session:
@@ -1974,6 +2074,7 @@ async def _run_comparison_backfill_worker(
                 ).compare_version(version_id)
                 found_count = len(found)
                 await _update_comparison_state(session, version_id, "completed", relation_count=found_count)
+                await KnowledgeUnitService(session).ensure_for_version(version_id)
             except asyncio.CancelledError:
                 await _update_comparison_state(session, version_id, "queued", error="任务已取消")
                 raise

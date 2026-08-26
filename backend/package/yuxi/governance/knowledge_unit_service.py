@@ -88,13 +88,12 @@ def _unit_type(segment: FeishuSourceSegment) -> str:
 
 def _structural_anchor(segment: FeishuSourceSegment) -> dict[str, Any]:
     locator = dict(segment.locator_json or {})
-    anchor = {
-        "unit_type": _unit_type(segment),
-        "title_path": [str(value) for value in (segment.title_path or []) if value],
-    }
+    anchor = {"unit_type": _unit_type(segment)}
     for key in ("slide", "sheet", "page"):
         if locator.get(key) is not None:
             anchor[key] = locator[key]
+    if not any(key in anchor for key in ("slide", "sheet", "page")):
+        anchor["title_path"] = [str(value) for value in (segment.title_path or []) if value]
     if anchor["unit_type"] in {"OCR", "QA"} and not any(key in anchor for key in ("slide", "sheet", "page")):
         anchor["segment_type"] = segment.segment_type
     return anchor
@@ -166,11 +165,13 @@ def build_knowledge_unit_drafts(
 
     for segment in sorted(segments, key=lambda value: value.segment_index):
         anchor = json.dumps(_structural_anchor(segment), ensure_ascii=False, sort_keys=True)
-        structured = _unit_type(segment) in {"SLIDE", "TABLE", "OCR", "QA", "PAGE"}
+        unit_type = _unit_type(segment)
+        structured = unit_type in {"SLIDE", "TABLE", "OCR", "QA", "PAGE"}
+        fixed_page_group = unit_type in {"SLIDE", "PAGE"}
         can_append = (
             bool(current)
             and anchor == current_anchor
-            and _token_count([*current, segment]) <= MAX_UNIT_TOKENS
+            and (fixed_page_group or _token_count([*current, segment]) <= MAX_UNIT_TOKENS)
             and (_unit_type(current[0]) == _unit_type(segment))
         )
         if current and not can_append:
@@ -178,7 +179,7 @@ def build_knowledge_unit_drafts(
         if not current:
             current_anchor = anchor
         current.append(segment)
-        if structured and _token_count(current) >= MAX_UNIT_TOKENS:
+        if structured and not fixed_page_group and _token_count(current) >= MAX_UNIT_TOKENS:
             flush()
     flush()
 
@@ -249,7 +250,10 @@ class KnowledgeUnitService:
         if not segments:
             return []
         units = await self._upsert_units(version, source_item, segments)
-        await self._sync_review_items(package, units)
+        comparison_status = str(
+            ((version.processing_params or {}).get("comparison") or {}).get("status") or "not_started"
+        )
+        await self._sync_review_items(package, units, comparison_status=comparison_status)
         await self.session.flush()
         return units
 
@@ -326,6 +330,8 @@ class KnowledgeUnitService:
         self,
         package: FeishuReviewPackage,
         units: list[FeishuKnowledgeUnit],
+        *,
+        comparison_status: str,
     ) -> None:
         items = list(
             await self.session.scalars(
@@ -335,9 +341,7 @@ class KnowledgeUnitService:
             )
         )
         unit_items = {item.subject_id: item for item in items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT}
-        material_items = [
-            item for item in items if item.subject_type == ReviewSubjectType.MATERIAL_VERSION
-        ]
+        material_items = [item for item in items if item.subject_type == ReviewSubjectType.MATERIAL_VERSION]
         base_item = next(
             (
                 item
@@ -351,6 +355,13 @@ class KnowledgeUnitService:
         if base_item and base_item.item_status == ReviewItemStatus.WAITING_SOURCE_CHANGE:
             return
 
+        previous_unit_ids = [unit.previous_unit_id for unit in units if unit.previous_unit_id]
+        previous_units = {
+            unit.unit_id: unit
+            for unit in await self.session.scalars(
+                select(FeishuKnowledgeUnit).where(FeishuKnowledgeUnit.unit_id.in_(previous_unit_ids))
+            )
+        }
         relations_by_unit = await self._relations_by_unit(package.source_version_id, units)
         for unit in units:
             relations = relations_by_unit.get(unit.unit_id, [])
@@ -362,6 +373,19 @@ class KnowledgeUnitService:
                 review_type=review_type,
                 relation_types=relation_types,
             )
+            if (
+                comparison_status != "completed"
+                and not relation_types
+                and unit.change_type in {"NEW", "UPDATED"}
+                and not _is_non_knowledge(unit.title, unit.content)
+            ):
+                reason = (
+                    "跨文档检查失败，请人工核对后处理。"
+                    if comparison_status == "failed"
+                    else "跨文档检查尚未完成，完成后系统会自动刷新建议。"
+                )
+                confidence = min(confidence, 0.5)
+                manual_required = True
             unit.recommended_outcome = recommended_outcome
             unit.recommendation_reason = reason
             unit.recommendation_confidence = confidence
@@ -386,16 +410,22 @@ class KnowledgeUnitService:
             item.title = unit.title
             item.summary = reason
             item.subject_locator_json = dict(unit.locator_json or {})
+            previous_unit = previous_units.get(unit.previous_unit_id)
             item.evidence_json = {
                 "knowledge_unit": True,
+                "unit_type": unit.unit_type,
+                "content": unit.content,
                 "source_segment_ids": list(unit.source_segment_ids or []),
                 "content_hash": unit.content_hash,
                 "change_type": unit.change_type,
                 "previous_unit_id": unit.previous_unit_id,
+                "previous_content": previous_unit.content if previous_unit else None,
+                "previous_title": previous_unit.title if previous_unit else None,
                 "recommended_outcome": recommended_outcome,
                 "recommendation_reason": reason,
                 "recommendation_confidence": confidence,
                 "manual_review_required": manual_required,
+                "comparison_status": comparison_status,
             }
             item.relation_ids = [relation.relation_id for relation in relations]
             item.problem_tags = [str(tag) for tag in problem_tags]
@@ -417,9 +447,7 @@ class KnowledgeUnitService:
         if item.subject_type != ReviewSubjectType.KNOWLEDGE_UNIT:
             return
         unit = await self.session.scalar(
-            select(FeishuKnowledgeUnit)
-            .where(FeishuKnowledgeUnit.unit_id == item.subject_id)
-            .with_for_update()
+            select(FeishuKnowledgeUnit).where(FeishuKnowledgeUnit.unit_id == item.subject_id).with_for_update()
         )
         if unit is None:
             raise LookupError(f"Knowledge unit not found: {item.subject_id}")
@@ -582,7 +610,11 @@ class KnowledgeUnitService:
         if review_type == ReviewType.STALE:
             return ReviewOutcome.CONFIRM_VALID, "内容未发生实质变化，建议确认仍然有效。", 0.98, False
         if _is_non_knowledge(unit.title, unit.content):
-            outcome = ReviewOutcome.KEEP_CURRENT if review_type == ReviewType.UPDATE else ReviewOutcome.EXCLUDE
+            outcome = (
+                ReviewOutcome.KEEP_CURRENT
+                if review_type == ReviewType.UPDATE and unit.change_type != "NEW"
+                else ReviewOutcome.EXCLUDE
+            )
             return outcome, "内容属于目录、封面或无法独立成义的短文本，建议不纳入知识库。", 0.98, False
         if review_type == ReviewType.UPDATE:
             if unit.change_type == "UNCHANGED":

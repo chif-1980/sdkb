@@ -593,6 +593,91 @@ async def test_review_package_publish_uses_existing_material_publish_chain(gover
     assert version.processing_status == "publish_queued"
 
 
+async def test_review_package_publishes_one_unit_without_consuming_the_rest(
+    governance_api_fixture,
+    monkeypatch,
+):
+    client, session, _, _ = governance_api_fixture
+    session.add_all(
+        [
+            FeishuSourceSegment(
+                segment_id="segment-unit-1",
+                segment_key="unit-1",
+                version_id="version-1",
+                item_id="item-1",
+                yuxi_file_id="file-1",
+                segment_index=0,
+                segment_type="paragraph",
+                title_path=["安装步骤"],
+                locator_json={"page": 1},
+                content="安装前准备管理员账号和服务地址，然后按照向导完成部署。",
+                content_hash="segment-unit-1-hash",
+                publication_state="PENDING",
+                status="ACTIVE",
+            ),
+            FeishuSourceSegment(
+                segment_id="segment-unit-2",
+                segment_key="unit-2",
+                version_id="version-1",
+                item_id="item-1",
+                yuxi_file_id="file-1",
+                segment_index=1,
+                segment_type="paragraph",
+                title_path=["验收检查"],
+                locator_json={"page": 2},
+                content="部署完成后检查登录、检索和权限隔离是否符合验收要求。",
+                content_hash="segment-unit-2-hash",
+                publication_state="PENDING",
+                status="ACTIVE",
+            ),
+        ]
+    )
+    await session.commit()
+
+    class _Task:
+        id = "unit-publish-task-1"
+
+    async def fake_enqueue_publish(version_id: str, *, operator_id: str):
+        assert version_id == "version-1"
+        assert operator_id == "admin-a"
+        return _Task()
+
+    monkeypatch.setattr(governance_router_module, "_enqueue_publish", fake_enqueue_publish)
+    listed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
+    package_id = listed.json()["items"][0]["package_id"]
+    detail = (await client.get(f"/api/governance/review-packages/{package_id}")).json()
+
+    response = await client.post(
+        f"/api/governance/review-packages/{package_id}/resolve",
+        json={
+            "request_id": "publish-unit-request-1",
+            "lock_version": detail["lock_version"],
+            "decisions": [
+                {
+                    "review_item_id": detail["items"][0]["review_item_id"],
+                    "outcome": "PUBLISH",
+                    "problem_tags": [],
+                    "applicability_scope": {},
+                }
+            ],
+        },
+    )
+    segment_states = list(
+        await session.scalars(select(FeishuSourceSegment.publication_state).order_by(FeishuSourceSegment.segment_index))
+    )
+    version = await session.scalar(select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-1"))
+
+    assert response.status_code == 200
+    assert response.json()["workflow_status"] == "OPEN"
+    assert response.json()["unit_publish_version_ids"] == ["version-1"]
+    assert response.json()["publish_task_ids"] == ["unit-publish-task-1"]
+    assert response.json()["remaining_unit_count"] == 1
+    assert response.json()["included_unit_count"] == 1
+    assert segment_states == ["INCLUDED", "PENDING"]
+    assert version.review_status == "approved"
+    assert version.processing_status == "publish_queued"
+
+
 async def test_review_package_exclude_allows_empty_decision_comment(governance_api_fixture):
     client, session, _, _ = governance_api_fixture
     listed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
@@ -620,6 +705,64 @@ async def test_review_package_exclude_allows_empty_decision_comment(governance_a
     assert response.json()["workflow_status"] == "COMPLETED"
     assert response.json()["reject_candidates"] == [{"version_id": "version-1", "reason": "不纳入知识库"}]
     assert version.review_status == "rejected"
+
+
+async def test_layout_endpoint_returns_pages_and_persists_review_draft(governance_api_fixture, monkeypatch):
+    client, session, _, _ = governance_api_fixture
+    listed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
+    package_id = listed.json()["items"][0]["package_id"]
+
+    async def fake_document_source(_package_id, _db):
+        return (
+            {
+                "package_id": package_id,
+                "source_version_id": "version-1",
+                "source_content_hash": "hash-1",
+                "draft": {},
+            },
+            "部署指南.pdf",
+            b"pdf",
+        )
+
+    async def fake_build_layout(_filename, _content, *, segments=()):
+        assert segments == []
+        return {
+            "supported": True,
+            "filename": "部署指南.pdf",
+            "file_type": ".pdf",
+            "editable": True,
+            "page_count": 1,
+            "pages": [{"page_number": 1, "blocks": [{"block_id": "block-1", "content": "旧内容"}]}],
+        }
+
+    async def fake_page(_filename, _content, *, page_number, pdf_content=None):
+        assert page_number == 1
+        return b"image", "image/png"
+
+    monkeypatch.setattr(governance_router_module, "_document_source", fake_document_source)
+    monkeypatch.setattr(governance_router_module, "build_document_layout", fake_build_layout)
+    monkeypatch.setattr(governance_router_module, "render_document_page", fake_page)
+
+    layout = await client.get(f"/api/governance/review-packages/{package_id}/layout")
+    page = await client.get(f"/api/governance/review-packages/{package_id}/layout/pages/1")
+    detail = (await client.get(f"/api/governance/review-packages/{package_id}")).json()
+    edited = await client.patch(
+        f"/api/governance/review-packages/{package_id}/layout/edits",
+        json={
+            "lock_version": detail["lock_version"],
+            "block_id": "block-1",
+            "page_number": 1,
+            "content": "新内容",
+            "source_segment_ids": [],
+        },
+    )
+
+    assert layout.status_code == 200
+    assert layout.json()["pages"][0]["blocks"][0]["block_id"] == "block-1"
+    assert page.status_code == 200
+    assert page.headers["content-type"] == "image/png"
+    assert edited.status_code == 200
+    assert edited.json()["draft"]["layout_edits"]["block-1"]["content"] == "新内容"
 
 
 async def test_review_package_conflict_decision_resolves_only_linked_relation(governance_api_fixture):
@@ -742,6 +885,95 @@ async def test_duplicate_candidates_return_matching_source_fragments(governance_
     assert body["fragment_matches"][0]["similarity"] == 1.0
     assert "公司简介" in body["fragment_matches"][0]["source_excerpt"]
     assert "狗狗你是公司专注企业数字化服务" in body["fragment_matches"][0]["source_overlap_excerpt"]
+
+
+async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
+    governance_api_fixture,
+    monkeypatch,
+):
+    client, session, _, _ = governance_api_fixture
+    relation_id = await add_duplicate_relation_data(session, suffix="layout")
+    source_version = await session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-1")
+    )
+    target_version = await session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-layout")
+    )
+    source_item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+    target_item = await session.scalar(
+        select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-layout")
+    )
+
+    async def fake_version_source(version_id, _db):
+        if version_id == "version-1":
+            return source_version, source_item, "source.docx", b"source"
+        return target_version, target_item, "target.pptx", b"target"
+
+    async def fake_build(filename, _content, *, segments=()):
+        block_id = "source-block" if filename.startswith("source") else "target-block"
+        return {
+            "supported": True,
+            "file_type": ".docx" if filename.startswith("source") else ".pptx",
+            "page_count": 1,
+            "pages": [
+                {
+                    "page_number": 1,
+                    "aspect_ratio": 1.77,
+                    "blocks": [
+                        {
+                            "block_id": block_id,
+                            "content": "公司简介：狗狗你是公司专注企业数字化服务。",
+                            "source_segment_ids": [],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    class FakeDuplicateService:
+        async def get_relation_candidates(self, _relation_id):
+            return {
+                "fragment_matches": [
+                    {
+                        "match_id": "layout-match",
+                        "source_segment_id": None,
+                        "source_locator": {"page": 1},
+                        "source_overlap_excerpt": "公司简介：狗狗你是公司专注企业数字化服务。",
+                        "target_segment_id": None,
+                        "target_locator": {"page": 1},
+                        "target_overlap_excerpt": "公司简介：狗狗你是公司专注企业数字化服务。",
+                        "similarity": 1.0,
+                    }
+                ]
+            }
+
+    async def fake_duplicate_service(_db, _relation_id):
+        return FakeDuplicateService()
+
+    async def fake_render(_filename, _content, *, page_number, pdf_content=None):
+        assert page_number == 1
+        return b"png", "image/png"
+
+    monkeypatch.setattr(governance_router_module, "_version_source", fake_version_source)
+    monkeypatch.setattr(governance_router_module, "build_document_layout", fake_build)
+    monkeypatch.setattr(governance_router_module, "_duplicate_service", fake_duplicate_service)
+    monkeypatch.setattr(governance_router_module, "render_document_page", fake_render)
+    governance_router_module._RELATION_LAYOUT_CACHE.clear()
+    governance_router_module._RELATION_PAGE_CACHE.clear()
+
+    response = await client.get(f"/api/governance/relations/{relation_id}/layout-comparison")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["supported"] is True
+    assert body["source"]["page_count"] == 1
+    assert body["target"]["page_count"] == 1
+    assert body["matches"][0]["source_block_ids"] == ["source-block"]
+    assert body["matches"][0]["target_block_ids"] == ["target-block"]
+
+    page = await client.get(f"/api/governance/relations/{relation_id}/layout-comparison/source/pages/1")
+    assert page.status_code == 200
+    assert page.headers["content-type"].startswith("image/png")
+    assert page.content == b"png"
 
 
 async def test_duplicate_candidates_fall_back_to_yuxi_parsed_content(governance_api_fixture):

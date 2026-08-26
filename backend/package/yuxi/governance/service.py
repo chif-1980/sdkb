@@ -18,6 +18,7 @@ from yuxi.governance.schemas import ReviewResolveRequest
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuGovernanceReview,
+    FeishuKnowledgeUnit,
     FeishuMaterialVersion,
     FeishuProcessingEvent,
     FeishuSource,
@@ -266,26 +267,87 @@ class GovernanceService:
             .order_by(FeishuMaterialVersion.published_at.desc())
         )
         rows = (await self.session.execute(statement)).all()
-        return [
-            {
-                "knowledge_id": item.item_id,
-                "title": item.title or "未命名知识",
-                "current_version_id": version.version_id,
-                "revision": version.revision,
-                "source_id": item.source_id,
-                "source_url": item.source_url,
-                "wiki_path": item.path_text,
-                "source_role": "PRIMARY",
-                "applicability_scope": (version.processing_params or {}).get("applicability_scope", {}),
-                "index_status": "INDEXED",
-                "yuxi_file_id": version.yuxi_file_id,
-                "chunk_count": version.chunk_count or 0,
-                "published_at": _iso(version.published_at),
-                "updated_at": _iso(version.updated_at),
-                "target_kb_id": source.target_kb_id,
-            }
-            for item, version, source in rows
-        ]
+        version_ids = [version.version_id for _, version, _ in rows]
+        units_by_version: dict[str, list[FeishuKnowledgeUnit]] = {}
+        if version_ids:
+            units = list(
+                await self.session.scalars(
+                    select(FeishuKnowledgeUnit)
+                    .where(
+                        FeishuKnowledgeUnit.version_id.in_(version_ids),
+                        FeishuKnowledgeUnit.status == "ACTIVE",
+                        FeishuKnowledgeUnit.publication_state == "INCLUDED",
+                    )
+                    .order_by(FeishuKnowledgeUnit.version_id.asc(), FeishuKnowledgeUnit.unit_index.asc())
+                )
+            )
+            for unit in units:
+                units_by_version.setdefault(unit.version_id, []).append(unit)
+
+        result: list[dict] = []
+        for item, version, source in rows:
+            units = units_by_version.get(version.version_id, [])
+            if units:
+                for unit in units:
+                    result.append(
+                        {
+                            "knowledge_id": unit.matched_logical_knowledge_id or f"{item.item_id}:{unit.lineage_key}",
+                            "knowledge_level": "UNIT",
+                            "unit_id": unit.unit_id,
+                            "unit_type": unit.unit_type,
+                            "unit_index": unit.unit_index,
+                            "title": unit.title or "未命名知识单元",
+                            "current_version_id": version.version_id,
+                            "revision": version.revision,
+                            "source_id": item.source_id,
+                            "source_item_id": item.item_id,
+                            "source_title": item.title or "未命名原始材料",
+                            "source_url": item.source_url,
+                            "wiki_path": item.path_text,
+                            "source_role": "PRIMARY",
+                            "source_segment_ids": list(unit.source_segment_ids or []),
+                            "source_segment_count": len(unit.source_segment_ids or []),
+                            "source_locator": dict(unit.locator_json or {}),
+                            "applicability_scope": (version.processing_params or {}).get("applicability_scope", {}),
+                            "index_status": "INDEXED",
+                            "yuxi_file_id": version.yuxi_file_id,
+                            "chunk_count": version.chunk_count or 0,
+                            "published_at": _iso(version.published_at),
+                            "updated_at": _iso(unit.updated_at or version.updated_at),
+                            "target_kb_id": source.target_kb_id,
+                        }
+                    )
+                continue
+
+            # 兼容尚未拆分知识单元的历史正式资料，避免升级后旧知识从列表消失。
+            result.append(
+                {
+                    "knowledge_id": item.item_id,
+                    "knowledge_level": "MATERIAL",
+                    "unit_id": None,
+                    "unit_type": None,
+                    "title": item.title or "未命名知识",
+                    "current_version_id": version.version_id,
+                    "revision": version.revision,
+                    "source_id": item.source_id,
+                    "source_item_id": item.item_id,
+                    "source_title": item.title or "未命名原始材料",
+                    "source_url": item.source_url,
+                    "wiki_path": item.path_text,
+                    "source_role": "PRIMARY",
+                    "source_segment_ids": [],
+                    "source_segment_count": 0,
+                    "source_locator": {},
+                    "applicability_scope": (version.processing_params or {}).get("applicability_scope", {}),
+                    "index_status": "INDEXED",
+                    "yuxi_file_id": version.yuxi_file_id,
+                    "chunk_count": version.chunk_count or 0,
+                    "published_at": _iso(version.published_at),
+                    "updated_at": _iso(version.updated_at),
+                    "target_kb_id": source.target_kb_id,
+                }
+            )
+        return result
 
     async def list_knowledge_versions(self, knowledge_id: str) -> list[dict]:
         item = await self.session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == knowledge_id))

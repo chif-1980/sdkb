@@ -499,6 +499,70 @@ async def test_approve_queues_publish_without_replacing_active(review_fixture):
     assert segment_states == ["INCLUDED", "ALIAS"]
 
 
+async def test_unit_publish_keeps_pending_segments_and_replays_new_revision(review_fixture):
+    review_fixture.add_all(
+        [
+            FeishuSourceSegment(
+                segment_id="segment-included",
+                segment_key="included",
+                version_id="version-new",
+                item_id="item-1",
+                yuxi_file_id="file-new",
+                segment_index=0,
+                segment_type="paragraph",
+                title_path=["已确认单元"],
+                locator_json={},
+                content="已经人工确认并纳入的知识单元。",
+                content_hash="segment-included-hash",
+                publication_state="INCLUDED",
+                status="ACTIVE",
+            ),
+            FeishuSourceSegment(
+                segment_id="segment-still-pending",
+                segment_key="still-pending",
+                version_id="version-new",
+                item_id="item-1",
+                yuxi_file_id="file-new",
+                segment_index=1,
+                segment_type="paragraph",
+                title_path=["待处理单元"],
+                locator_json={},
+                content="仍然等待人工处理的知识单元。",
+                content_hash="segment-still-pending-hash",
+                publication_state="PENDING",
+                status="ACTIVE",
+            ),
+        ]
+    )
+    await review_fixture.flush()
+    service = FeishuReviewService(review_fixture)
+
+    first_queue = await service.queue_unit_publish("version-new", operator_id="admin")
+    claimed, _, _ = await service.claim_publish("version-new")
+    second_queue = await service.queue_unit_publish("version-new", operator_id="admin")
+    first_switch = await service.mark_publish_succeeded("version-new", yuxi_file_id="file-new", chunk_count=1)
+
+    assert first_queue.enqueue_required is True
+    assert claimed.processing_status == "publish_queued"
+    assert second_queue.enqueue_required is False
+    assert first_switch.republish_required is True
+    assert first_switch.material.processing_status == "publish_queued"
+
+    await service.claim_publish("version-new")
+    second_switch = await service.mark_publish_succeeded("version-new", yuxi_file_id="file-new", chunk_count=1)
+    states = list(
+        await review_fixture.scalars(
+            select(FeishuSourceSegment.publication_state).order_by(FeishuSourceSegment.segment_index)
+        )
+    )
+
+    assert second_switch.republish_required is False
+    assert second_switch.material.processing_status == "published"
+    assert second_switch.material.review_status == "approved"
+    assert second_switch.material.processing_params["unit_publish_completed_revision"] == 2
+    assert states == ["INCLUDED", "PENDING"]
+
+
 async def test_publish_success_switches_active_and_replaces_old_version(review_fixture):
     service = FeishuReviewService(review_fixture)
     await service.approve("version-new", operator_id="admin")
