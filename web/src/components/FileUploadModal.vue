@@ -1434,7 +1434,7 @@ const getAuthHeaders = () => {
 
 const openDocLink = () => {
   window.open(
-    'https://xerrors.github.io/Yuxi/advanced/document-processing.html',
+    'https://chif-1980.github.io/sdkb/advanced/document-processing',
     '_blank',
     'noopener'
   )

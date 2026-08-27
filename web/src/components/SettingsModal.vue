@@ -101,7 +101,7 @@
           >
             <img
               class="star-card-link-image"
-              src="https://img.shields.io/github/stars/xerrors/Yuxi?label=ZhiShu&style=social"
+              src="https://img.shields.io/github/stars/chif-1980/sdkb?label=ZhiShu&style=social"
               alt="GitHub stars for ZhiShu"
             />
             <ExternalLink :size="13" />
@@ -232,7 +232,7 @@ const activeTab = ref('account')
 const showStarCard = ref(true)
 
 const STAR_CARD_STORAGE_KEY = 'yuxi-settings-star-card-dismissed'
-const projectRepoUrl = 'https://github.com/xerrors/Yuxi'
+const projectRepoUrl = 'https://github.com/chif-1980/sdkb'
 
 const visible = computed({
   get: () => props.visible,
