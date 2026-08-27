@@ -2171,15 +2171,7 @@ async function loadDocumentLayout() {
       return
     }
     documentLayout.value = mergeDocumentLayoutEdits(response, response.edits)
-    const targetLocator = currentItem.value?.subject_locator || {}
-    const targetSheetPage = targetLocator.sheet
-      ? documentPages.value.find((page) => page.label === targetLocator.sheet)?.page_number
-      : 0
-    const targetPage = Number(targetLocator.page || targetLocator.sheet_page || targetSheetPage || 1)
-    activeDocumentPageNumber.value = Math.max(
-      1,
-      Math.min(documentPages.value.length, targetPage || 1)
-    )
+    focusKnowledgeUnit(currentItem.value, { loadPreview: false })
     await loadDocumentPagePreview()
   } catch (error) {
     documentLayoutError.value = governanceApi.getErrorMessage(error, '版式读取失败')
@@ -2504,20 +2496,59 @@ function toggleProblemTag(tag) {
     ? form.problem_tags.filter((item) => item !== tag)
     : [...form.problem_tags, tag]
 }
+function knowledgeUnitSourceSegmentIds(item) {
+  return new Set([
+    ...(item?.source_segment_ids || []),
+    ...(item?.subject_locator?.source_segment_ids || [])
+  ])
+}
+function findPresentationTarget(item) {
+  const sourceSegmentIds = knowledgeUnitSourceSegmentIds(item)
+  if (!sourceSegmentIds.size) return null
+  for (const slide of presentationSlides.value) {
+    const fragment = (slide.fragments || []).find((candidate) =>
+      (candidate.source_segment_ids || []).some((segmentId) => sourceSegmentIds.has(segmentId))
+    )
+    if (fragment) return { slide, fragment }
+  }
+  return null
+}
+function findDocumentTarget(item) {
+  const sourceSegmentIds = knowledgeUnitSourceSegmentIds(item)
+  if (!sourceSegmentIds.size) return null
+  for (const page of documentPages.value) {
+    const block = (page.blocks || []).find((candidate) =>
+      (candidate.source_segment_ids || []).some((segmentId) => sourceSegmentIds.has(segmentId))
+    )
+    if (block) return { page, block }
+  }
+  return null
+}
 function focusKnowledgeUnit(item, { loadPreview = true } = {}) {
   if (!item?.knowledge_unit) return
   selectedSourceSegmentId.value = item.source_segment_ids?.[0] || ''
-  const slide = Number(item.subject_locator?.slide || 0)
+  const presentationTarget = findPresentationTarget(item)
+  const slide = Number(presentationTarget?.slide.slide_number || item.subject_locator?.slide || 0)
   if (slide && presentationSlides.value.length) {
     activeSlideNumber.value = slide
-    selectedPresentationFragmentId.value = ''
+    selectedPresentationFragmentId.value = presentationTarget?.fragment.fragment_id || ''
     if (loadPreview) void loadSlidePreview()
   }
-  const page = Number(item.subject_locator?.page || item.subject_locator?.sheet_page || 0)
+  const documentTarget = findDocumentTarget(item)
+  const targetSheetPage = item.subject_locator?.sheet
+    ? documentPages.value.find((page) => page.label === item.subject_locator.sheet)?.page_number
+    : 0
+  const page = Number(
+    documentTarget?.page.page_number ||
+      item.subject_locator?.page ||
+      item.subject_locator?.sheet_page ||
+      targetSheetPage ||
+      0
+  )
   if (page && documentPages.value.length) {
     activeDocumentPageNumber.value = Math.max(1, Math.min(documentPages.value.length, page))
-    selectedDocumentBlockId.value = ''
-    documentBlockDraft.value = ''
+    selectedDocumentBlockId.value = documentTarget?.block.block_id || ''
+    documentBlockDraft.value = documentTarget?.block.content || ''
     if (loadPreview) void loadDocumentPagePreview()
   }
 }

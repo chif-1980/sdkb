@@ -665,7 +665,7 @@ describe('FeishuReviewWorkspace', () => {
           subject_id: 'knowledge-unit-slide-2',
           title: '第 2 页幻灯片',
           summary: '请核对当前页面。',
-          subject_locator: { slide: 2 },
+          subject_locator: { source_segment_ids: ['seg-slide-2'] },
           relation_ids: [],
           problem_tags: [],
           item_status: 'PENDING',
@@ -701,7 +701,22 @@ describe('FeishuReviewWorkspace', () => {
           aspect_ratio: 1.777778,
           slides: [
             { slide_number: 1, fragment_count: 0, fragments: [] },
-            { slide_number: 2, fragment_count: 0, fragments: [] }
+            {
+              slide_number: 2,
+              fragment_count: 1,
+              fragments: [
+                {
+                  fragment_id: 'slide-2-shape-1',
+                  fragment_number: 1,
+                  content: '第二页完整内容',
+                  left: 10,
+                  top: 10,
+                  width: 50,
+                  height: 20,
+                  source_segment_ids: ['seg-slide-2']
+                }
+              ]
+            }
           ]
         })
       }
@@ -719,6 +734,7 @@ describe('FeishuReviewWorkspace', () => {
     await flushPromises()
 
     expect(wrapper.get('.presentation-toolbar').text()).toContain('第 2 / 2 页')
+    expect(wrapper.get('.presentation-fragment-hotspot').classes()).toContain('active')
     expect(wrapper.get('.presentation-stage-row').classes()).toContain('has-side-panel')
     expect(wrapper.get('.layout-context-sidebar').text()).toContain('审核信息')
     expect(wrapper.get('.layout-sidebar-primary').text()).toContain('处理当前知识单元')
@@ -834,6 +850,143 @@ describe('FeishuReviewWorkspace', () => {
       })
     )
     expect(message.success).toHaveBeenCalledWith('版式编辑草稿已保存，飞书原文未被修改')
+  })
+
+  it('点击 Word 知识单元时按来源片段切页并高亮对应内容块', async () => {
+    const documentSummary = {
+      ...packages[0],
+      package_id: 'package-docx-unit-linkage',
+      source_version_id: 'version-docx-unit-linkage',
+      title: '合同条款.docx',
+      item_type: 'docx',
+      knowledge_unit_count: 2
+    }
+    const baseItem = packageDetail('package-first').items[0]
+    const documentDetail = {
+      ...packageDetail('package-first'),
+      ...documentSummary,
+      yuxi_file_id: 'file-docx-unit-linkage',
+      item_count: 2,
+      remaining_unit_count: 2,
+      items: [
+        {
+          ...baseItem,
+          review_item_id: 'unit-page-1',
+          subject_type: 'KNOWLEDGE_UNIT',
+          subject_id: 'knowledge-unit-page-1',
+          title: '第一页条款',
+          subject_locator: { source_segment_ids: ['seg-page-1'] },
+          knowledge_unit: true,
+          content: '第一页条款内容',
+          source_segment_ids: ['seg-page-1'],
+          change_type: 'NEW',
+          recommended_outcome: 'PUBLISH',
+          manual_review_required: false
+        },
+        {
+          ...baseItem,
+          review_item_id: 'unit-page-2',
+          subject_type: 'KNOWLEDGE_UNIT',
+          subject_id: 'knowledge-unit-page-2',
+          title: '第二页条款',
+          subject_locator: { source_segment_ids: ['seg-page-2'] },
+          knowledge_unit: true,
+          content: '第二页条款内容',
+          source_segment_ids: ['seg-page-2'],
+          change_type: 'NEW',
+          recommended_outcome: 'PUBLISH',
+          manual_review_required: false
+        }
+      ]
+    }
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn((blob) => `blob:document-page-${blob.size}`)
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [documentSummary], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-docx-unit-linkage') {
+        return Promise.resolve(documentDetail)
+      }
+      if (url === '/api/governance/review-packages/package-docx-unit-linkage/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/governance/review-packages/package-docx-unit-linkage/layout') {
+        return Promise.resolve({
+          supported: true,
+          file_type: '.docx',
+          page_count: 2,
+          pages: [
+            {
+              page_number: 1,
+              label: '第 1 页',
+              aspect_ratio: 0.707,
+              render_mode: 'image',
+              block_count: 1,
+              blocks: [
+                {
+                  block_id: 'page-1-block-1',
+                  content: '第一页条款内容',
+                  left: 10,
+                  top: 10,
+                  width: 30,
+                  height: 8,
+                  source_segment_ids: ['seg-page-1']
+                }
+              ]
+            },
+            {
+              page_number: 2,
+              label: '第 2 页',
+              aspect_ratio: 0.707,
+              render_mode: 'image',
+              block_count: 1,
+              blocks: [
+                {
+                  block_id: 'page-2-block-1',
+                  content: '第二页条款内容',
+                  left: 20,
+                  top: 20,
+                  width: 40,
+                  height: 8,
+                  source_segment_ids: ['seg-page-2']
+                }
+              ]
+            }
+          ],
+          edits: {}
+        })
+      }
+      if (url.startsWith('/api/governance/review-packages/package-docx-unit-linkage/layout/pages/')) {
+        return Promise.resolve({ blob: () => Promise.resolve(new Blob([url])) })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-docx-unit-linkage/content') {
+        return Promise.resolve({ content: '# 合同条款', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.document-layout-page-strip button.active').text()).toContain('第 1 页')
+    expect(wrapper.get('.document-layout-block.active').attributes('title')).toBe('第一页条款内容')
+    await wrapper.get('.layout-sidebar-list-toggle').trigger('click')
+    await wrapper.findAll('.layout-sidebar-unit-list button')[1].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.document-layout-page-strip button.active').text()).toContain('第 2 页')
+    expect(wrapper.get('.document-layout-block.active').attributes('title')).toBe('第二页条款内容')
+    expect(wrapper.get('.layout-sidebar-facts').text()).toContain('2 / 2')
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-docx-unit-linkage/layout/pages/2',
+      {},
+      'blob'
+    )
   })
 
   it('Excel 内容较多时使用可滚动的表格画布并保持可读尺寸', async () => {
