@@ -5431,7 +5431,7 @@ loadReviewers()
   background: var(--gray-10);
 }
 .comparison-match-panel .comparison-match-strip {
-  padding: 0;
+  padding: 0 0 7px;
 }
 .comparison-layout-columns {
   display: grid;
