@@ -14,12 +14,14 @@ from yuxi.governance.domain import (
     ReviewOutcome,
     ReviewPackageStatus,
     ReviewSubjectType,
+    ReviewTriggerType,
     ReviewType,
     SourceChangeRequestStatus,
 )
 from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
 from yuxi.governance.review_backfill import backfill_legacy_governance_reviews, stable_review_id
 from yuxi.governance.schemas import (
+    ReviewPackageBulkExcludeRequest,
     ReviewItemDecisionRequest,
     ReviewPackageResolveRequest,
 )
@@ -28,6 +30,7 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuGovernanceReview,
+    FeishuKnowledgeUnit,
     FeishuMaterialVersion,
     FeishuProcessingEvent,
     FeishuReviewItem,
@@ -35,6 +38,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuSource,
     FeishuSourceChangeRequest,
     FeishuSourceItem,
+    FeishuSourceSegment,
 )
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -79,6 +83,7 @@ PUBLISH_OUTCOMES = {
 }
 UNIT_PUBLISH_OUTCOMES = PUBLISH_OUTCOMES | {ReviewOutcome.CONFIRM_VALID}
 REJECT_CANDIDATE_OUTCOMES = {ReviewOutcome.EXCLUDE, ReviewOutcome.KEEP_CURRENT}
+COMPLETION_RESULTS = {"all_included", "partial", "all_excluded"}
 FINAL_ITEM_STATUSES = {
     ReviewItemStatus.DECIDED,
     ReviewItemStatus.SOURCE_UPDATED,
@@ -104,10 +109,13 @@ class ReviewPackageService:
         review_types: list[str] | None = None,
         problem_tag: str | None = None,
         risk_level: str | None = None,
+        completion_result: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
         await backfill_legacy_governance_reviews(self.session)
+        if completion_result and completion_result not in COMPLETION_RESULTS:
+            raise ValueError("completion_result must be all_included, partial or all_excluded")
         statement = select(FeishuReviewPackage).where(FeishuReviewPackage.source_id == source_id)
         if risk_level:
             statement = statement.where(FeishuReviewPackage.risk_level == risk_level)
@@ -151,12 +159,19 @@ class ReviewPackageService:
             )
         )
         items_by_package = await self._items_by_package([package.package_id for package in packages])
+        if completion_result:
+            unit_service = KnowledgeUnitService(self.session)
+            for package in packages:
+                await unit_service.ensure_for_package(package)
+            items_by_package = await self._items_by_package([package.package_id for package in packages])
         filtered_packages = []
         for package in packages:
             items = items_by_package[package.package_id]
             if review_types and not any(item.review_type in review_types for item in items):
                 continue
             if problem_tag and not any(problem_tag in (item.problem_tags or []) for item in items):
+                continue
+            if completion_result and self._completion_result(items) != completion_result:
                 continue
             filtered_packages.append(package)
 
@@ -195,6 +210,16 @@ class ReviewPackageService:
                 )
             ).one_or_none()
         item_ids = [item.review_item_id for item in items]
+        reopened_by_item_id: dict[str, str] = {}
+        if item_ids:
+            reopened_items = list(
+                await self.session.scalars(
+                    select(FeishuReviewItem).where(FeishuReviewItem.reopened_from_item_id.in_(item_ids))
+                )
+            )
+            reopened_by_item_id = {
+                item.reopened_from_item_id: item.review_item_id for item in reopened_items if item.reopened_from_item_id
+            }
         relation_ids = sorted({relation_id for item in items for relation_id in (item.relation_ids or [])})
         change_requests = []
         if item_ids:
@@ -304,7 +329,10 @@ class ReviewPackageService:
             else None,
             "draft": package.draft_json or {},
             "lock_version": package.lock_version,
-            "items": [self._item_dict(item) for item in display_items],
+            "items": [
+                self._item_dict(item, reopened_by_item_id=reopened_by_item_id.get(item.review_item_id))
+                for item in display_items
+            ],
             "relations": [self._relation_dict(relation, relation_sources) for relation in relations],
             "change_requests": [self._change_request_dict(request) for request in change_requests],
             "events": [self._event_dict(event) for event in events],
@@ -568,6 +596,303 @@ class ReviewPackageService:
             "idempotent_replay": False,
         }
 
+    async def bulk_exclude(
+        self,
+        package_id: str,
+        payload: ReviewPackageBulkExcludeRequest,
+        *,
+        operator_id: str,
+    ) -> dict:
+        package = await self._load_package(package_id, lock=True)
+        self._claim_or_assert_assignee(package, operator_id)
+        items = await self._load_items(package.package_id, lock=True)
+        items_by_id = {item.review_item_id: item for item in items}
+        target_items = [items_by_id.get(item_id) for item_id in payload.review_item_ids]
+
+        if all(
+            item is not None
+            and item.outcome == ReviewOutcome.EXCLUDE
+            and (item.decision_payload or {}).get("request_id") == payload.request_id
+            for item in target_items
+        ):
+            return {
+                "package_id": package.package_id,
+                "workflow_status": package.workflow_status,
+                "lock_version": package.lock_version,
+                "publish_version_ids": [],
+                "unit_publish_version_ids": [],
+                "reject_candidates": [],
+                **self._unit_progress(items),
+                "affected_unit_titles": [],
+                "closed_change_request_count": 0,
+                "idempotent_replay": True,
+            }
+
+        self._assert_not_terminal(package)
+        self._check_lock_version(package, payload.lock_version)
+        missing_ids = [item_id for item_id, item in zip(payload.review_item_ids, target_items) if item is None]
+        if missing_ids:
+            raise LookupError(f"Review items do not belong to package: {', '.join(missing_ids)}")
+
+        eligible_statuses = {
+            ReviewItemStatus.PENDING,
+            ReviewItemStatus.WAITING_SOURCE_CHANGE,
+            ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION,
+        }
+        for item in target_items:
+            cancelled_source_change = (
+                item.item_status == ReviewItemStatus.INVALIDATED and item.outcome == ReviewOutcome.REQUEST_SOURCE_CHANGE
+            )
+            if (
+                item.subject_type != ReviewSubjectType.KNOWLEDGE_UNIT
+                or ReviewOutcome.EXCLUDE not in OUTCOME_ACTIONS.get(item.review_type, {})
+                or (item.item_status not in eligible_statuses and not cancelled_source_change)
+            ):
+                raise ValueError(f"Review item cannot be batch excluded: {item.review_item_id}")
+
+        now = utc_now_naive()
+        active_requests = list(
+            await self.session.scalars(
+                select(FeishuSourceChangeRequest)
+                .where(
+                    FeishuSourceChangeRequest.review_item_id.in_(payload.review_item_ids),
+                    FeishuSourceChangeRequest.status.in_(
+                        {
+                            SourceChangeRequestStatus.OPEN,
+                            SourceChangeRequestStatus.NEW_VERSION_RECEIVED,
+                        }
+                    ),
+                )
+                .with_for_update()
+            )
+        )
+        active_item_ids = {request.review_item_id for request in active_requests}
+        waiting_without_request = [
+            item.review_item_id
+            for item in target_items
+            if item.item_status == ReviewItemStatus.WAITING_SOURCE_CHANGE and item.review_item_id not in active_item_ids
+        ]
+        if waiting_without_request:
+            raise ValueError(
+                "Waiting review items have no active source-change request: " + ", ".join(waiting_without_request)
+            )
+
+        requests_by_item: dict[str, list[str]] = defaultdict(list)
+        for request in active_requests:
+            previous_status = request.status
+            request.status = SourceChangeRequestStatus.CANCELLED
+            request.resolved_at = now
+            request.updated_at = now
+            requests_by_item[request.review_item_id].append(request.change_request_id)
+            self.session.add(
+                FeishuProcessingEvent(
+                    source_id=package.source_id,
+                    item_id=package.source_item_id,
+                    version_id=package.source_version_id,
+                    event_type="source_change_request_cancelled",
+                    from_status=previous_status,
+                    to_status=SourceChangeRequestStatus.CANCELLED,
+                    operator_id=operator_id,
+                    message=payload.decision_comment,
+                    payload_json={
+                        "package_id": package.package_id,
+                        "review_item_id": request.review_item_id,
+                        "change_request_id": request.change_request_id,
+                        "reason": "batch_excluded",
+                    },
+                )
+            )
+
+        affected_unit_titles: list[str] = []
+        for item in target_items:
+            item.outcome = ReviewOutcome.EXCLUDE
+            item.internal_action = OUTCOME_ACTIONS[item.review_type][ReviewOutcome.EXCLUDE]
+            item.decision_comment = payload.decision_comment
+            item.decision_payload = {
+                "request_id": payload.request_id,
+                "outcome": ReviewOutcome.EXCLUDE,
+                "ended_change_request_ids": requests_by_item[item.review_item_id],
+            }
+            item.item_status = ReviewItemStatus.DECIDED
+            item.decided_by = operator_id
+            item.decided_at = now
+            item.updated_at = now
+            await KnowledgeUnitService(self.session).apply_decision(item, ReviewOutcome.EXCLUDE)
+            await self._resolve_item_relations(item, operator_id=operator_id, now=now)
+            affected_unit_titles.append(item.title or "未命名知识单元")
+            self._append_event(
+                package,
+                "review_item_decided",
+                operator_id=operator_id,
+                message=payload.decision_comment,
+                payload={
+                    "review_item_id": item.review_item_id,
+                    "outcome": ReviewOutcome.EXCLUDE,
+                    "internal_action": item.internal_action,
+                    "request_id": payload.request_id,
+                    "ended_change_request_count": len(requests_by_item[item.review_item_id]),
+                },
+            )
+
+        previous_status = package.workflow_status
+        package.workflow_status = self._aggregate_status(items)
+        package.completed_at = now if package.workflow_status == ReviewPackageStatus.COMPLETED else None
+        package.draft_json = {}
+        package.lock_version += 1
+
+        reject_candidates: list[dict[str, str]] = []
+        if package.workflow_status == ReviewPackageStatus.COMPLETED and package.source_version_id:
+            publish_items = [item for item in items if item.outcome in UNIT_PUBLISH_OUTCOMES]
+            rejected_items = [item for item in items if item.outcome in REJECT_CANDIDATE_OUTCOMES]
+            await self._complete_unit_legacy_review(
+                package,
+                items,
+                publish=bool(publish_items),
+                operator_id=operator_id,
+                now=now,
+            )
+            if not publish_items and rejected_items:
+                reject_candidates.append(
+                    {
+                        "version_id": package.source_version_id,
+                        "reason": payload.decision_comment,
+                    }
+                )
+        if package.workflow_status == ReviewPackageStatus.COMPLETED and previous_status != package.workflow_status:
+            self._append_event(package, "review_package_completed", operator_id=operator_id)
+
+        await self.session.flush()
+        return {
+            "package_id": package.package_id,
+            "workflow_status": package.workflow_status,
+            "lock_version": package.lock_version,
+            "publish_version_ids": [],
+            "unit_publish_version_ids": [],
+            "reject_candidates": reject_candidates,
+            **self._unit_progress(items),
+            "affected_unit_titles": affected_unit_titles,
+            "closed_change_request_count": len(active_requests),
+            "idempotent_replay": False,
+        }
+
+    async def reopen_excluded_item(self, review_item_id: str, *, operator_id: str) -> dict:
+        original = await self.session.scalar(
+            select(FeishuReviewItem).where(FeishuReviewItem.review_item_id == review_item_id).with_for_update()
+        )
+        if original is None:
+            raise LookupError(f"Review item not found: {review_item_id}")
+
+        existing = await self.session.scalar(
+            select(FeishuReviewItem).where(FeishuReviewItem.reopened_from_item_id == review_item_id)
+        )
+        if existing is not None:
+            existing_package = await self._load_package(existing.package_id)
+            return {
+                "package_id": existing.package_id,
+                "review_item_id": existing.review_item_id,
+                "workflow_status": existing_package.workflow_status,
+                "idempotent_replay": True,
+            }
+
+        if (
+            original.subject_type != ReviewSubjectType.KNOWLEDGE_UNIT
+            or original.item_status != ReviewItemStatus.DECIDED
+            or original.outcome != ReviewOutcome.EXCLUDE
+        ):
+            raise ValueError("Only excluded knowledge units can be reopened")
+
+        original_package = await self._load_package(original.package_id)
+        unit = await self.session.scalar(
+            select(FeishuKnowledgeUnit).where(FeishuKnowledgeUnit.unit_id == original.subject_id).with_for_update()
+        )
+        if unit is None:
+            raise LookupError(f"Knowledge unit not found: {original.subject_id}")
+        if unit.publication_state not in {"EXCLUDED", "ALIAS"}:
+            raise ValueError("Knowledge unit is no longer excluded")
+
+        package_id = stable_review_id("review-package-reopen", original.review_item_id)
+        package = FeishuReviewPackage(
+            package_id=package_id,
+            package_key=f"reopen-exclusion:{original.review_item_id}",
+            source_id=original_package.source_id,
+            source_item_id=original_package.source_item_id,
+            source_version_id=original_package.source_version_id,
+            trigger_type=ReviewTriggerType.FEEDBACK,
+            title_snapshot=original_package.title_snapshot,
+            path_snapshot=original_package.path_snapshot,
+            source_url_snapshot=original_package.source_url_snapshot,
+            workflow_status=ReviewPackageStatus.OPEN,
+            assignee_id=operator_id,
+            risk_level=original_package.risk_level,
+            draft_json={},
+            lock_version=1,
+        )
+        self.session.add(package)
+        await self.session.flush([package])
+
+        evidence = dict(original.evidence_json or {})
+        recommended_outcome = (
+            ReviewOutcome.ADOPT_NEW_VERSION if original.review_type == ReviewType.UPDATE else ReviewOutcome.PUBLISH
+        )
+        evidence.update(
+            {
+                "reopened_exclusion": True,
+                "recommended_outcome": recommended_outcome,
+                "recommendation_reason": "已重新申请纳入，请重新审核。",
+                "manual_review_required": True,
+            }
+        )
+        reopened = FeishuReviewItem(
+            review_item_id=stable_review_id("review-item-reopen", original.review_item_id),
+            package_id=package.package_id,
+            candidate_key=f"reopen:{original.review_item_id}",
+            review_type=original.review_type,
+            subject_type=original.subject_type,
+            subject_id=original.subject_id,
+            title=original.title,
+            summary="已重新申请纳入，请重新审核。",
+            subject_locator_json=dict(original.subject_locator_json or {}),
+            evidence_json=evidence,
+            relation_ids=list(original.relation_ids or []),
+            problem_tags=list(original.problem_tags or []),
+            applicability_scope=dict(original.applicability_scope or {}),
+            item_status=ReviewItemStatus.PENDING,
+            decision_payload={},
+            reopened_from_item_id=original.review_item_id,
+        )
+        self.session.add(reopened)
+
+        segment_ids = list(unit.source_segment_ids or [])
+        if segment_ids:
+            segments = list(
+                await self.session.scalars(
+                    select(FeishuSourceSegment).where(FeishuSourceSegment.segment_id.in_(segment_ids)).with_for_update()
+                )
+            )
+            for segment in segments:
+                if segment.publication_state in {"EXCLUDED", "ALIAS"}:
+                    segment.publication_state = "PENDING"
+        unit.publication_state = "PENDING"
+
+        self._append_event(
+            package,
+            "review_item_reopened",
+            operator_id=operator_id,
+            message="已重新申请纳入知识库",
+            payload={
+                "review_item_id": reopened.review_item_id,
+                "reopened_from_item_id": original.review_item_id,
+                "reason": "reopen_exclusion",
+            },
+        )
+        await self.session.flush()
+        return {
+            "package_id": package.package_id,
+            "review_item_id": reopened.review_item_id,
+            "workflow_status": package.workflow_status,
+            "idempotent_replay": False,
+        }
+
     def _validate_decision(self, item: FeishuReviewItem, decision: ReviewItemDecisionRequest) -> str | None:
         actions = OUTCOME_ACTIONS.get(item.review_type)
         if actions is None or decision.outcome not in actions:
@@ -782,12 +1107,29 @@ class ReviewPackageService:
         packages = list(
             await self.session.scalars(select(FeishuReviewPackage).where(FeishuReviewPackage.source_id == source_id))
         )
+        mine_packages = [
+            package
+            for package in packages
+            if package.workflow_status not in {ReviewPackageStatus.COMPLETED, ReviewPackageStatus.INVALIDATED}
+            and package.assignee_id in {None, operator_id}
+        ]
+        source_update_package_ids = {
+            package.package_id for package in mine_packages if package.trigger_type == ReviewTriggerType.SOURCE_VERSION
+        }
+        if source_update_package_ids:
+            source_update_package_ids &= set(
+                await self.session.scalars(
+                    select(FeishuReviewItem.package_id)
+                    .where(
+                        FeishuReviewItem.package_id.in_(source_update_package_ids),
+                        FeishuReviewItem.review_type == ReviewType.UPDATE,
+                    )
+                    .distinct()
+                )
+            )
         return {
-            "mine": sum(
-                package.workflow_status not in {ReviewPackageStatus.COMPLETED, ReviewPackageStatus.INVALIDATED}
-                and package.assignee_id in {None, operator_id}
-                for package in packages
-            ),
+            "mine": len(mine_packages),
+            "source_updates": len(source_update_package_ids),
             "waiting_source_change": sum(
                 package.workflow_status == ReviewPackageStatus.WAITING_SOURCE_CHANGE for package in packages
             ),
@@ -870,6 +1212,7 @@ class ReviewPackageService:
         return {
             "package_id": package.package_id,
             "source_version_id": package.source_version_id,
+            "trigger_type": package.trigger_type,
             "title": package.title_snapshot or "未命名审核包",
             "wiki_path": package.path_snapshot,
             "workflow_status": package.workflow_status,
@@ -889,6 +1232,7 @@ class ReviewPackageService:
             ),
             "recommendation_counts": dict(recommendation_counts),
             **ReviewPackageService._unit_progress(items),
+            "completion_result": ReviewPackageService._completion_result(items),
             "created_at": _iso(package.created_at),
             "updated_at": _iso(package.updated_at),
         }
@@ -908,8 +1252,29 @@ class ReviewPackageService:
         }
 
     @staticmethod
-    def _item_dict(item: FeishuReviewItem) -> dict:
+    def _completion_result(items: list[FeishuReviewItem]) -> str | None:
+        knowledge_units = [item for item in items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT]
+        if not knowledge_units or any(item.item_status not in FINAL_ITEM_STATUSES for item in knowledge_units):
+            return None
+        included = sum(item.outcome in UNIT_PUBLISH_OUTCOMES for item in knowledge_units)
+        excluded = sum(item.outcome in REJECT_CANDIDATE_OUTCOMES for item in knowledge_units)
+        if included == len(knowledge_units):
+            return "all_included"
+        if excluded == len(knowledge_units):
+            return "all_excluded"
+        if included and excluded:
+            return "partial"
+        return None
+
+    @staticmethod
+    def _item_dict(item: FeishuReviewItem, *, reopened_by_item_id: str | None = None) -> dict:
         evidence = item.evidence_json or {}
+        can_reopen_exclusion = (
+            item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT
+            and item.item_status == ReviewItemStatus.DECIDED
+            and item.outcome == ReviewOutcome.EXCLUDE
+            and reopened_by_item_id is None
+        )
         return {
             "review_item_id": item.review_item_id,
             "review_type": item.review_type,
@@ -930,6 +1295,8 @@ class ReviewPackageService:
             "decided_by": item.decided_by,
             "decided_at": _iso(item.decided_at),
             "reopened_from_item_id": item.reopened_from_item_id,
+            "reopened_by_item_id": reopened_by_item_id,
+            "can_reopen_exclusion": can_reopen_exclusion,
             "knowledge_unit": bool(evidence.get("knowledge_unit")),
             "unit_type": evidence.get("unit_type"),
             "content": evidence.get("content"),

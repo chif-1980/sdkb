@@ -165,6 +165,8 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
     assert all(operation.__self__ is BusinessBase.metadata for operation in connection.run_sync_calls)
     assert {
         "feishu_user_bindings",
+        "feishu_department_bindings",
+        "feishu_user_department_memberships",
         "product_conversations",
         "product_messages",
         "message_citations",
@@ -187,9 +189,7 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         assert statement_counts[statement] == 2
 
     migration_statements = [
-        statement
-        for statement in connection.statements
-        if "ALTER COLUMN locator TYPE TEXT" in statement
+        statement for statement in connection.statements if "ALTER COLUMN locator TYPE TEXT" in statement
     ]
     assert len(migration_statements) == 2
     assert len(connection.statements) == 2 * (len(expected_indexes) + 1)
@@ -273,6 +273,23 @@ async def test_product_schema_is_idempotent_in_real_postgres():
                 "created_at",
                 "updated_at",
             },
+            "feishu_department_bindings": {
+                "id",
+                "tenant_key",
+                "feishu_department_id",
+                "department_id",
+                "display_name",
+                "created_at",
+                "updated_at",
+            },
+            "feishu_user_department_memberships": {
+                "id",
+                "user_id",
+                "department_binding_id",
+                "position",
+                "created_at",
+                "updated_at",
+            },
             "product_conversations": {
                 "id",
                 "conversation_id",
@@ -315,9 +332,7 @@ async def test_product_schema_is_idempotent_in_real_postgres():
         assert schema["table_names"] >= set(expected_columns)
         assert schema["columns"] == expected_columns
         assert schema["locator_type"] == "TEXT"
-        assert schema["indexes"]["product_conversations"] >= {
-            "ix_product_conversations_owner_status_updated"
-        }
+        assert schema["indexes"]["product_conversations"] >= {"ix_product_conversations_owner_status_updated"}
         assert schema["indexes"]["product_messages"] >= {"ix_product_messages_conversation_created"}
         assert schema["indexes"]["message_citations"] >= {
             "ix_message_citations_message_id",
@@ -325,12 +340,24 @@ async def test_product_schema_is_idempotent_in_real_postgres():
         }
         assert schema["unique_columns"] == {
             "feishu_user_bindings": {("feishu_open_id",), ("feishu_user_id",), ("user_id",)},
+            "feishu_department_bindings": {
+                ("department_id",),
+                ("tenant_key", "feishu_department_id"),
+            },
+            "feishu_user_department_memberships": {
+                ("user_id", "department_binding_id"),
+            },
             "product_conversations": {("conversation_id",)},
             "product_messages": {("message_id",)},
             "message_citations": {("citation_id",)},
         }
         assert schema["foreign_keys"] == {
             "feishu_user_bindings": {("user_id",): ("users", ("id",))},
+            "feishu_department_bindings": {("department_id",): ("departments", ("id",))},
+            "feishu_user_department_memberships": {
+                ("user_id",): ("users", ("id",)),
+                ("department_binding_id",): ("feishu_department_bindings", ("id",)),
+            },
             "product_conversations": {("owner_user_id",): ("users", ("id",))},
             "product_messages": {("conversation_id",): ("product_conversations", ("conversation_id",))},
             "message_citations": {("message_id",): ("product_messages", ("message_id",))},
@@ -410,9 +437,7 @@ async def test_product_schema_migrates_legacy_locator_to_text(legacy_locator_typ
         async with engine.connect() as connection:
             column, index_names = await _inspect_legacy_product_migration(connection, schema_name)
             locator_rows = (
-                await connection.execute(
-                    text(f'SELECT message_id, locator FROM "{schema_name}".message_citations')
-                )
+                await connection.execute(text(f'SELECT message_id, locator FROM "{schema_name}".message_citations'))
             ).all()
 
         locator_by_message = {row.message_id: row.locator for row in locator_rows}
@@ -498,7 +523,7 @@ async def test_product_schema_does_not_exclusively_lock_an_existing_text_locator
             column, index_names = await _inspect_legacy_product_migration(connection, schema_name)
             locator = (
                 await connection.execute(
-                    text(f'SELECT locator FROM "{schema_name}".message_citations WHERE message_id = \'string\'')
+                    text(f"SELECT locator FROM \"{schema_name}\".message_citations WHERE message_id = 'string'")
                 )
             ).scalar_one()
 
@@ -588,7 +613,7 @@ async def test_product_schema_concurrent_legacy_migrations_are_serialized():
             column, index_names = await _inspect_legacy_product_migration(connection, schema_name)
             locator = (
                 await connection.execute(
-                    text(f'SELECT locator FROM "{schema_name}".message_citations WHERE message_id = \'string\'')
+                    text(f"SELECT locator FROM \"{schema_name}\".message_citations WHERE message_id = 'string'")
                 )
             ).scalar_one()
 
@@ -623,19 +648,17 @@ def _inspect_product_schema(connection, schema_name: str) -> dict:
     inspector = sqlalchemy_inspect(connection)
     table_names = {
         "feishu_user_bindings",
+        "feishu_department_bindings",
+        "feishu_user_department_memberships",
         "product_conversations",
         "product_messages",
         "message_citations",
     }
-    columns = {
-        table_name: inspector.get_columns(table_name, schema=schema_name)
-        for table_name in table_names
-    }
+    columns = {table_name: inspector.get_columns(table_name, schema=schema_name) for table_name in table_names}
     return {
         "table_names": set(inspector.get_table_names(schema=schema_name)),
         "columns": {
-            table_name: {column["name"] for column in table_columns}
-            for table_name, table_columns in columns.items()
+            table_name: {column["name"] for column in table_columns} for table_name, table_columns in columns.items()
         },
         "locator_type": str(
             next(column["type"] for column in columns["message_citations"] if column["name"] == "locator")
@@ -663,8 +686,7 @@ def _inspect_product_schema(connection, schema_name: str) -> dict:
         },
         "checks": {
             table_name: "\n".join(
-                constraint["sqltext"]
-                for constraint in inspector.get_check_constraints(table_name, schema=schema_name)
+                constraint["sqltext"] for constraint in inspector.get_check_constraints(table_name, schema=schema_name)
             ).upper()
             for table_name in table_names
         },

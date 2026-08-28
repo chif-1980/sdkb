@@ -15,6 +15,13 @@
 - `PRODUCT_FEISHU_SOURCE_ID`：企业知识助手唯一允许检索的、处于启用状态的飞书知识源 ID。
 - `YUXI_CORS_ORIGINS`：前后端跨域部署时允许访问 API 的前端来源；同源部署可留空。
 
+飞书企业自建应用还必须开通以下通讯录权限，并将权限范围覆盖需要使用知识助手的员工及其部门：
+
+- `contact:user.base:readonly`：读取员工基本信息和在职状态；
+- `contact:department.base:readonly`：读取部门基础信息。
+
+登录服务使用企业 `tenant_access_token` 查询通讯录，因此其他企业、已停用、已离职或不在应用通讯录可见范围内的账号不会被自动开户。权限缺失时登录页会提示管理员检查通讯录权限。
+
 本地开发时，产品回调地址应使用用户实际访问的 React 地址：
 
 ```text
@@ -75,15 +82,16 @@ npm run dev:web -- --host 127.0.0.1 --port 5174
 
 企业知识助手不会从其他知识源回退检索。变量缺失、记录不存在或知识源停用时，接口应明确返回知识源不可用。
 
-## 6. 预绑定用户与部门
+## 6. 自动开户与组织同步
 
-在 Yuxi 管理后台的用户管理中预先创建或更新用户：
+无需在 Yuxi 管理后台预先创建普通员工。员工首次完成飞书登录时，系统会使用企业通讯录确认账号与在职状态，然后自动：
 
-- `User.uid` 必须与飞书返回的 `user_id` 完全一致；
-- 用户必须归属一个有效部门；
-- 不要用姓名、手机号、`open_id` 或 `union_id` 代替 `user_id`。
+- 创建角色固定为 `user` 的内部账号，并以飞书 `user_id` 作为稳定 UID；
+- 建立 `open_id`、`user_id`、`union_id` 和企业租户绑定；
+- 创建或复用对应的本地部门，并保存员工的全部飞书部门成员关系；
+- 后续每次登录刷新姓名、头像、在职状态及部门关系。
 
-首次成功登录时系统会建立飞书身份绑定。UID 不匹配、用户被删除或没有部门时，登录会被拒绝，不会自动映射到其他账号。
+已有预绑定账号会继续复用，不会重复创建。已软删除用户、已撤销绑定、企业不一致、停用或离职员工仍按默认拒绝处理；管理员和超级管理员角色不会通过飞书首次登录自动授予。
 
 ## 7. 健康与功能检查
 
@@ -92,7 +100,7 @@ npm run dev:web -- --host 127.0.0.1 --port 5174
 ```bash
 docker compose --project-name quickdone-kb-yuxi \
   -f compose.phase1.yml --env-file .env ps
-curl --fail --silent http://127.0.0.1:5050/api/system/health
+curl --fail --silent http://127.0.0.1:5050/api/system/healthz
 curl --fail --silent http://127.0.0.1:5174/login >/dev/null
 ```
 

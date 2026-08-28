@@ -52,6 +52,23 @@
             <span v-if="view.countKey">{{ packageResponse.counts?.[view.countKey] || 0 }}</span>
           </button>
         </div>
+        <div
+          v-if="queueView === 'completed'"
+          class="queue-result-filter"
+          role="group"
+          aria-label="已完成任务处理结果"
+        >
+          <button
+            v-for="result in completionResultOptions"
+            :key="result.value"
+            type="button"
+            :aria-pressed="completionResultFilter === result.value"
+            :class="{ active: completionResultFilter === result.value }"
+            @click="completionResultFilter = result.value"
+          >
+            {{ result.label }}
+          </button>
+        </div>
         <div class="queue-filters">
           <a-select
             v-model:value="reviewTypeFilter"
@@ -96,6 +113,7 @@
             >
             <span class="queue-unit-attention">待处理 {{ item.remaining_unit_count || 0 }}</span>
             <span class="queue-unit-ready">已纳入 {{ item.included_unit_count || 0 }}</span>
+            <span class="queue-unit-excluded">不纳入 {{ item.excluded_unit_count || 0 }}</span>
           </div>
           <div v-else class="queue-type-counts">
             <span v-for="(count, type) in item.review_type_counts" :key="type"
@@ -108,6 +126,17 @@
               :class="`status-${String(item.workflow_status).toLowerCase()}`"
             />
             <span>{{ workflowStatusLabel(item.workflow_status) }}</span>
+            <span
+              v-if="item.workflow_status === 'COMPLETED' && item.completion_result"
+              class="completion-result-badge"
+              :class="`completion-${item.completion_result}`"
+              >{{ completionResultLabel(item.completion_result) }}</span
+            >
+            <span
+              v-if="item.review_type_counts?.UPDATE && item.trigger_type !== 'FEEDBACK'"
+              class="source-update-badge"
+              >原文已更新</span
+            >
             <span class="queue-time">更新于 {{ formatTime(item.updated_at) }}</span>
           </div>
         </button>
@@ -132,6 +161,11 @@
           class="evidence-panel"
           :class="{ 'layout-focus-panel': documentPages.length || presentationSlides.length }"
         >
+          <div v-if="showSourceUpdateNotice" class="source-update-notice">
+            <RefreshCw :size="14" />
+            <span>发现 {{ sourceUpdateCount }} 份原文更新，已生成待审核任务</span>
+            <button type="button" @click="showSourceUpdates">查看更新</button>
+          </div>
           <div v-if="publishBlocked" class="content-quality-alert">
             <CircleAlert :size="16" />
             <div>
@@ -214,7 +248,15 @@
                 <ClipboardCheck :size="14" />整篇批量审核
               </a-button>
               <a-button
-                v-if="!currentItem?.knowledge_unit || (!isDocumentLayoutReview && !isPptxReview)"
+                v-if="currentItem?.can_reopen_exclusion && !isDocumentLayoutReview && !isPptxReview"
+                size="small"
+                :loading="reopening"
+                @click="confirmReopenExcludedItem"
+              >
+                <RotateCcw :size="14" />重新申请纳入
+              </a-button>
+              <a-button
+                v-else-if="!currentItem?.knowledge_unit || (!isDocumentLayoutReview && !isPptxReview)"
                 type="primary"
                 size="small"
                 @click="decisionPanelOpen = true"
@@ -225,7 +267,7 @@
                 v-if="knowledgeUnitMode"
                 type="button"
                 class="batch-action-secondary"
-                :disabled="!bulkOutcomeItems('EXCLUDE').length || batchResolving"
+                :disabled="!bulkExcludeItems.length || batchResolving"
                 @click="confirmBulkOutcome('EXCLUDE')"
               >
                 批量不纳入
@@ -429,7 +471,7 @@
                         <header class="layout-sidebar-heading">
                           <span>审核信息</span>
                           <a-tag :color="statusColor(currentItem?.item_status || packageDetail.workflow_status)">
-                            {{ itemStatusLabel(currentItem?.item_status) || workflowStatusLabel(packageDetail.workflow_status) }}
+                            {{ itemStatusLabel(currentItem?.item_status, currentItem) || workflowStatusLabel(packageDetail.workflow_status) }}
                           </a-tag>
                         </header>
                         <h3 :title="packageDetail.title">{{ packageDetail.title }}</h3>
@@ -469,7 +511,16 @@
                           {{ currentItem.summary }}
                         </p>
                         <button
-                          v-if="knowledgeUnitMode"
+                          v-if="currentItem?.can_reopen_exclusion"
+                          type="button"
+                          class="layout-sidebar-primary is-reopen"
+                          :disabled="reopening"
+                          @click.stop="confirmReopenExcludedItem"
+                        >
+                          <RotateCcw :size="14" />重新申请纳入
+                        </button>
+                        <button
+                          v-else-if="knowledgeUnitMode"
                           type="button"
                           class="layout-sidebar-primary"
                           :disabled="!itemActionable"
@@ -636,7 +687,7 @@
                         <header class="layout-sidebar-heading">
                           <span>审核信息</span>
                           <a-tag :color="statusColor(currentItem?.item_status || packageDetail.workflow_status)">
-                            {{ itemStatusLabel(currentItem?.item_status) || workflowStatusLabel(packageDetail.workflow_status) }}
+                            {{ itemStatusLabel(currentItem?.item_status, currentItem) || workflowStatusLabel(packageDetail.workflow_status) }}
                           </a-tag>
                         </header>
                         <h3 :title="packageDetail.title">{{ packageDetail.title }}</h3>
@@ -676,7 +727,16 @@
                             {{ currentItem.summary }}
                           </p>
                         <button
-                          v-if="knowledgeUnitMode"
+                          v-if="currentItem?.can_reopen_exclusion"
+                          type="button"
+                          class="layout-sidebar-primary is-reopen"
+                          :disabled="reopening"
+                          @click.stop="confirmReopenExcludedItem"
+                        >
+                          <RotateCcw :size="14" />重新申请纳入
+                        </button>
+                        <button
+                          v-else-if="knowledgeUnitMode"
                           type="button"
                           class="layout-sidebar-primary"
                           :disabled="!itemActionable"
@@ -1273,7 +1333,7 @@
             </div>
             <div v-if="!itemActionable" class="decision-readonly">
               <CircleCheck :size="20" /><strong>{{
-                itemStatusLabel(currentItem.item_status)
+                itemStatusLabel(currentItem.item_status, currentItem)
               }}</strong>
               <p>{{ currentItem.decision_comment || '当前审核项无需继续处理。' }}</p>
             </div>
@@ -1374,6 +1434,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
+  RotateCcw,
   UserRoundCog,
   X
 } from 'lucide-vue-next'
@@ -1396,6 +1457,7 @@ const reviewers = ref([])
 const selectedPackageId = ref('')
 const selectedItemId = ref('')
 const queueView = ref('mine')
+const completionResultFilter = ref('all')
 const reviewTypeFilter = ref('')
 const problemFilter = ref('')
 const activeEvidenceView = ref('content')
@@ -1410,6 +1472,7 @@ const resolving = ref(false)
 const batchResolving = ref(false)
 const savingDraft = ref(false)
 const transferring = ref(false)
+const reopening = ref(false)
 const transferOpen = ref(false)
 const duplicateCandidates = reactive({})
 const duplicateLoading = reactive({})
@@ -1476,6 +1539,12 @@ const queueViews = [
   { value: 'transferred', label: '已转交' },
   { value: 'completed', label: '已完成', countKey: 'completed' }
 ]
+const completionResultOptions = [
+  { value: 'all', label: '全部' },
+  { value: 'all_included', label: '全部纳入' },
+  { value: 'partial', label: '部分纳入' },
+  { value: 'all_excluded', label: '全部不纳入' }
+]
 const reviewTypeOptions = [
   { label: '全部审核类型', value: '' },
   { label: '新增知识', value: 'NEW' },
@@ -1511,6 +1580,10 @@ const commentRequiredOutcomes = new Set([
 
 const currentItem = computed(() =>
   packageDetail.value?.items.find((item) => item.review_item_id === selectedItemId.value)
+)
+const sourceUpdateCount = computed(() => Number(packageResponse.value.counts?.source_updates || 0))
+const showSourceUpdateNotice = computed(
+  () => sourceUpdateCount.value > 0 && reviewTypeFilter.value !== 'UPDATE'
 )
 const knowledgeUnitMode = computed(() => Boolean(packageDetail.value?.knowledge_unit_count))
 const visibleItems = computed(() => {
@@ -1737,6 +1810,19 @@ const bulkActionableItems = computed(() =>
     (item) => ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
   )
 )
+const bulkExcludeItems = computed(() =>
+  (packageDetail.value?.items || []).filter((item) => {
+    const cancelledSourceChange =
+      item.item_status === 'INVALIDATED' && item.outcome === 'REQUEST_SOURCE_CHANGE'
+    return (
+      item.knowledge_unit &&
+      item.allowed_outcomes?.includes('EXCLUDE') &&
+      (['PENDING', 'WAITING_SOURCE_CHANGE', 'WAITING_BUSINESS_CONFIRMATION'].includes(
+        item.item_status
+      ) || cancelledSourceChange)
+    )
+  })
+)
 const wholeReviewButtonTitle = computed(() => {
   if (batchResolving.value) return '正在批量处理整篇资料'
   if (!bulkActionableItems.value.length) {
@@ -1813,7 +1899,13 @@ const hasMorePackages = computed(
 )
 
 watch(
-  () => [props.sourceId, queueView.value, reviewTypeFilter.value, problemFilter.value],
+  () => [
+    props.sourceId,
+    queueView.value,
+    completionResultFilter.value,
+    reviewTypeFilter.value,
+    problemFilter.value
+  ],
   loadPackages,
   { immediate: true }
 )
@@ -1940,8 +2032,19 @@ function packageQuery() {
     return { ...params, view: 'all', workflow_status: 'WAITING_SOURCE_CHANGE' }
   if (queueView.value === 'transferred') return { ...params, view: 'transferred_by_me' }
   if (queueView.value === 'completed')
-    return { ...params, view: 'all', workflow_status: 'COMPLETED' }
+    return {
+      ...params,
+      view: 'all',
+      workflow_status: 'COMPLETED',
+      completion_result:
+        completionResultFilter.value === 'all' ? undefined : completionResultFilter.value
+    }
   return { ...params, view: 'mine' }
+}
+function showSourceUpdates() {
+  queueView.value = 'mine'
+  reviewTypeFilter.value = 'UPDATE'
+  problemFilter.value = ''
 }
 async function selectPackage(packageId, relationId = '') {
   selectedPackageId.value = packageId
@@ -1983,8 +2086,12 @@ async function selectPackage(packageId, relationId = '') {
     const actionable = response.items?.find((item) =>
       ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
     )
+    const waitingSourceItem = response.items?.find(
+      (item) => item.item_status === 'WAITING_SOURCE_CHANGE'
+    )
     selectItem(
       relationItem?.review_item_id ||
+        waitingSourceItem?.review_item_id ||
         attentionItem?.review_item_id ||
         actionable?.review_item_id ||
         response.items?.[0]?.review_item_id ||
@@ -2626,6 +2733,44 @@ async function resolveItem() {
     resolving.value = false
   }
 }
+function confirmReopenExcludedItem() {
+  if (!currentItem.value?.can_reopen_exclusion || reopening.value) return
+  const itemTitle = currentItem.value.title || '该知识单元'
+  Modal.confirm({
+    title: '重新申请纳入',
+    content: `将为“${itemTitle}”创建新的待审核任务，原“不纳入”记录仍会保留。本操作不会直接发布到正式知识。`,
+    okText: '创建待审核任务',
+    cancelText: '取消',
+    async onOk() {
+      await reopenExcludedItem()
+    }
+  })
+}
+async function reopenExcludedItem() {
+  if (!currentItem.value?.review_item_id || reopening.value) return
+  const reviewItemId = currentItem.value.review_item_id
+  const itemTitle = currentItem.value.title || '该知识单元'
+  const filtersChanged =
+    queueView.value !== 'mine' || reviewTypeFilter.value !== '' || problemFilter.value !== ''
+  reopening.value = true
+  try {
+    const response = await governanceApi.reopenExcludedReviewItem(reviewItemId)
+    selectedPackageId.value = response.package_id
+    queueView.value = 'mine'
+    reviewTypeFilter.value = ''
+    problemFilter.value = ''
+    message.success(
+      response.idempotent_replay
+        ? `“${itemTitle}”已有待审核任务，已为你定位`
+        : `“${itemTitle}”已重新提交审核`
+    )
+    if (!filtersChanged) await loadPackages()
+  } catch (error) {
+    message.error(governanceApi.getErrorMessage(error, '重新申请纳入失败'))
+  } finally {
+    reopening.value = false
+  }
+}
 function confirmWholePackage() {
   if (!bulkActionableItems.value.length || batchResolving.value) return
   const safeCount = bulkSafeItems.value.length
@@ -2654,15 +2799,22 @@ function confirmWholePackage() {
   })
 }
 function confirmBulkOutcome(outcome) {
-  const items = bulkOutcomeItems(outcome)
+  const items = outcome === 'EXCLUDE' ? bulkExcludeItems.value : bulkOutcomeItems(outcome)
   if (!items.length || batchResolving.value) return
   const actionLabel = bulkOutcomeLabel(outcome)
   const needsComment = commentRequiredOutcomes.has(outcome)
+  const sourceChangeCount = items.filter(
+    (item) =>
+      item.item_status === 'WAITING_SOURCE_CHANGE' ||
+      (item.item_status === 'INVALIDATED' && item.outcome === 'REQUEST_SOURCE_CHANGE')
+  ).length
   Modal.confirm({
     title: `批量${actionLabel}`,
     content: needsComment
       ? `将对 ${items.length} 个允许该结果的知识单元批量退回资料修改。系统会保留每个单元的原审核依据，资料提供人修改后将重新进入审核。`
-      : `将对 ${items.length} 个允许该结果的知识单元标记为“不纳入知识库”。这些内容会保留来源记录，但不会发布到正式知识。`,
+      : sourceChangeCount
+        ? `将对 ${items.length} 个知识单元标记为“不纳入知识库”，其中 ${sourceChangeCount} 个来自资料修改流程。仍在进行的修改任务会一并结束，且这些内容不会发布到正式知识。`
+        : `将对 ${items.length} 个允许该结果的知识单元标记为“不纳入知识库”。这些内容会保留来源记录，但不会发布到正式知识。`,
     okText: `确认${actionLabel}`,
     cancelText: '取消',
     async onOk() {
@@ -2674,22 +2826,28 @@ async function resolveBulkItems(items, outcomeOverride = '') {
   if (!packageDetail.value || !items?.length) return
   batchResolving.value = true
   try {
-    const response = await governanceApi.resolveReviewPackage(packageDetail.value.package_id, {
-      request_id: newRequestId(),
-      lock_version: packageDetail.value.lock_version,
-      decisions: items.map((item) => ({
-        review_item_id: item.review_item_id,
-        outcome: outcomeOverride || bulkRecommendedOutcome(item),
-        problem_tags: item.problem_tags || [],
-        decision_comment:
-          outcomeOverride === 'EXCLUDE'
-            ? '整篇资料批量标记为不纳入知识库。'
-            : outcomeOverride === 'REQUEST_SOURCE_CHANGE'
-              ? '整篇资料批量退回，等待资料修改后重新审核。'
-              : item.recommendation_reason || undefined,
-        applicability_scope: {}
-      }))
-    })
+    const response =
+      outcomeOverride === 'EXCLUDE'
+        ? await governanceApi.bulkExcludeReviewPackage(packageDetail.value.package_id, {
+            request_id: newRequestId(),
+            lock_version: packageDetail.value.lock_version,
+            review_item_ids: items.map((item) => item.review_item_id),
+            decision_comment: '整篇资料批量标记为不纳入知识库。'
+          })
+        : await governanceApi.resolveReviewPackage(packageDetail.value.package_id, {
+            request_id: newRequestId(),
+            lock_version: packageDetail.value.lock_version,
+            decisions: items.map((item) => ({
+              review_item_id: item.review_item_id,
+              outcome: outcomeOverride || bulkRecommendedOutcome(item),
+              problem_tags: item.problem_tags || [],
+              decision_comment:
+                outcomeOverride === 'REQUEST_SOURCE_CHANGE'
+                  ? '整篇资料批量退回，等待资料修改后重新审核。'
+                  : item.recommendation_reason || undefined,
+              applicability_scope: {}
+            }))
+          })
     const remaining = response.remaining_unit_count || 0
     const itemCount = items.length
     if (!outcomeOverride) {
@@ -3114,7 +3272,13 @@ function changeTypeLabel(value) {
     }[value] || '知识单元'
   )
 }
-function itemStatusLabel(value) {
+function itemStatusLabel(value, item = null) {
+  if (value === 'INVALIDATED' && item?.decision_payload?.replaced_by_knowledge_units) {
+    return '已拆分为知识单元'
+  }
+  if (value === 'INVALIDATED' && item?.outcome === 'REQUEST_SOURCE_CHANGE') {
+    return '修改任务已结束'
+  }
   return (
     {
       PENDING: '待审核',
@@ -3135,6 +3299,15 @@ function workflowStatusLabel(value) {
       COMPLETED: '已完成',
       INVALIDATED: '已失效'
     }[value] || value
+  )
+}
+function completionResultLabel(value) {
+  return (
+    {
+      all_included: '全部纳入',
+      partial: '部分纳入',
+      all_excluded: '全部不纳入'
+    }[value] || ''
   )
 }
 function statusColor(value) {
@@ -3376,11 +3549,68 @@ loadReviewers()
 .queue-views button span {
   color: inherit;
 }
+.queue-result-filter {
+  display: flex;
+  gap: 3px;
+  margin-top: 7px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.queue-result-filter::-webkit-scrollbar {
+  display: none;
+}
+.queue-result-filter button {
+  min-height: 24px;
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border: 1px solid var(--gray-150);
+  border-radius: 4px;
+  background: var(--gray-0);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 10px;
+}
+.queue-result-filter button:hover {
+  border-color: var(--main-200);
+  color: var(--main-700);
+}
+.queue-result-filter button.active {
+  border-color: var(--main-100);
+  background: var(--main-30);
+  color: var(--main-700);
+  font-weight: 600;
+}
 .queue-filters {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
   margin-top: 8px;
+}
+.source-update-notice {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--color-warning-100);
+  background: var(--color-warning-50);
+  color: var(--color-warning-900);
+  font-size: 11px;
+}
+.source-update-notice span {
+  flex: 1;
+}
+.source-update-notice button {
+  padding: 2px 5px;
+  border: 0;
+  background: transparent;
+  color: var(--main-700);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+.source-update-notice button:hover {
+  text-decoration: underline;
 }
 .queue-empty {
   padding: 54px 10px;
@@ -3476,8 +3706,16 @@ loadReviewers()
   color: var(--color-text-secondary);
   font-size: 10px;
 }
+.queue-meta .source-update-badge {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--color-warning-50);
+  color: var(--color-warning-700);
+  font-size: 9px;
+}
 .queue-unit-summary {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   color: var(--color-text-tertiary);
@@ -3504,6 +3742,25 @@ loadReviewers()
 }
 .queue-unit-summary .queue-unit-ready {
   color: var(--color-success-700);
+}
+.queue-unit-summary .queue-unit-excluded {
+  background: var(--gray-100);
+  color: var(--color-text-secondary);
+}
+.queue-meta .completion-result-badge {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--gray-100);
+  color: var(--color-text-secondary);
+  font-size: 9px;
+}
+.queue-meta .completion-all_included {
+  background: var(--color-success-50);
+  color: var(--color-success-700);
+}
+.queue-meta .completion-partial {
+  background: var(--color-warning-50);
+  color: var(--color-warning-700);
 }
 .queue-meta {
   display: flex;
@@ -4703,6 +4960,11 @@ loadReviewers()
   border-color: var(--main-700);
   background: var(--main-700);
   box-shadow: 0 3px 10px color-mix(in srgb, var(--main-color) 22%, transparent);
+}
+.layout-sidebar-primary.is-reopen {
+  border-color: var(--main-200);
+  background: var(--main-30);
+  color: var(--main-700);
 }
 .layout-sidebar-primary:focus-visible {
   outline: 2px solid var(--main-300);

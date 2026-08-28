@@ -39,8 +39,9 @@ RUN pnpm install --frozen-lockfile --registry=https://registry.npmmirror.com
 COPY ./web .
 RUN pnpm run build
 
-# 生产环境运行阶段
-FROM nginx:alpine AS production
+# 生产环境运行阶段。使用 Alpine 维护分支安装 Nginx 与 headers-more，避免暴露 Server 指纹。
+FROM alpine:3.22 AS production
+RUN apk add --no-cache nginx nginx-mod-http-headers-more
 COPY --from=build-stage /app/dist /usr/share/nginx/html
 COPY ./docker/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY ./docker/nginx/default.conf /etc/nginx/conf.d/default.conf

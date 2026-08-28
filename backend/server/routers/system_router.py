@@ -3,7 +3,7 @@ from pathlib import Path
 
 import aiofiles
 import yaml
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from yuxi import config, get_version
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
@@ -11,15 +11,22 @@ from yuxi.utils.logging_config import logger
 from server.utils.auth_middleware import get_admin_user, get_required_user
 
 system = APIRouter(prefix="/system", tags=["system"])
+REDACTED_LOG_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})
 
 # =============================================================================
 # === 健康检查分组 ===
 # =============================================================================
 
 
+@system.get("/healthz")
+async def healthz_check():
+    """供容器和登录页使用的最小健康检查。"""
+    return {"status": "ok"}
+
+
 @system.get("/health")
-async def health_check():
-    """系统健康检查接口（公开接口）"""
+async def health_check(_current_user: User = Depends(get_required_user)):
+    """登录后可见的系统健康详情。"""
     return {"status": "ok", "message": "服务正常运行", "version": get_version()}
 
 
@@ -40,7 +47,7 @@ async def discovery():
             }
         },
         "endpoints": {
-            "health": "/api/system/health",
+            "health": "/api/system/healthz",
             "auth_me": "/api/auth/me",
             "cli_auth_sessions": "/api/auth/cli/sessions",
             "cli_auth_authorize": "/auth/cli/authorize",
@@ -86,7 +93,14 @@ async def update_config_batch(items: dict = Body(...), current_user: User = Depe
 
 
 @system.get("/logs")
-async def get_system_logs(levels: str | None = None, current_user: User = Depends(get_admin_user)):
+async def get_system_logs(
+    levels: str | None = Query(
+        default=None,
+        max_length=64,
+        pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)(,(DEBUG|INFO|WARNING|ERROR|CRITICAL))*$",
+    ),
+    current_user: User = Depends(get_admin_user),
+):
     """获取系统日志
 
     Args:
@@ -106,12 +120,15 @@ async def get_system_logs(levels: str | None = None, current_user: User = Depend
             lines = []
             async for line in f:
                 filtered_line = line.rstrip("\n\r")
+                parts = filtered_line.split(" - ", 3)
+                log_level = parts[1].strip() if len(parts) >= 2 else None
+                if log_level in REDACTED_LOG_LEVELS and len(parts) == 4:
+                    filtered_line = " - ".join((*parts[:3], "[details redacted]"))
                 # 如果指定了日志级别过滤，则按级别过滤
                 if level_filter:
                     # 日志格式: 2025-03-10 08:26:37,269 - INFO - module - message
                     # 提取日志级别
-                    parts = filtered_line.split(" - ")
-                    if len(parts) >= 2 and parts[1].strip() in level_filter:
+                    if log_level in level_filter:
                         lines.append(filtered_line + "\n")
                     # 继续读取以保持行数统计准确
                     if len(lines) > 1000:
@@ -122,10 +139,10 @@ async def get_system_logs(levels: str | None = None, current_user: User = Depend
                         lines.pop(0)
 
         log = "".join(lines)
-        return {"log": log, "message": "success", "log_file": LOG_FILE}
-    except Exception as e:
-        logger.error(f"获取系统日志失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取系统日志失败: {str(e)}")
+        return {"log": log, "message": "success"}
+    except Exception as exc:
+        logger.error("获取系统日志失败")
+        raise HTTPException(status_code=500, detail="获取系统日志失败") from exc
 
 
 # =============================================================================

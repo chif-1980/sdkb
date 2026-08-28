@@ -1,7 +1,7 @@
 import re
 from yuxi.utils import logger
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status, UploadFile, File
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status, UploadFile, File
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
@@ -44,6 +44,11 @@ from yuxi.services.oidc_service import (
 
 # 创建路由器
 auth = APIRouter(prefix="/auth", tags=["authentication"])
+MAX_PAGINATION_OFFSET = 1_000_000
+INVALID_LOGIN_DETAIL = "登录标识或密码错误"
+DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$ZxoO9XYRSCD06mgAfA3ETg$lDkAPPFgvL7z+qE2gp7lJDQ1cBmmPCHyq01Nvw9Z0KQ"
+)
 
 
 # 请求和响应模型
@@ -191,6 +196,14 @@ def _raise_cli_auth_error(exc: CLIAuthError) -> None:
     ) from exc
 
 
+def _raise_invalid_login() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=INVALID_LOGIN_DETAIL,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 # 路由：登录获取令牌
 # =============================================================================
 # === 认证分组 ===
@@ -202,42 +215,23 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     # 查找用户 - 支持user_id和phone_number登录
     login_identifier = form_data.username  # OAuth2表单中的username字段作为登录标识符
 
-    # 尝试通过user_id查找
-    result = await db.execute(select(User).filter(User.uid == login_identifier))
-    user = result.scalar_one_or_none()
+    # 两种标识始终执行相同数量的查询，避免通过响应时序推断账号是否存在。
+    uid_result = await db.execute(select(User).filter(User.uid == login_identifier))
+    phone_result = await db.execute(select(User).filter(User.phone_number == login_identifier))
+    user = uid_result.scalar_one_or_none() or phone_result.scalar_one_or_none()
 
-    # 如果通过user_id没找到，尝试通过phone_number查找
     if not user:
-        result = await db.execute(select(User).filter(User.phone_number == login_identifier))
-        user = result.scalar_one_or_none()
+        AuthUtils.verify_password(DUMMY_PASSWORD_HASH, form_data.password)
+        _raise_invalid_login()
 
-    # 如果用户不存在，为防止用户名枚举攻击，返回通用错误信息
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="登录标识或密码错误",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    password_matches = AuthUtils.verify_password(user.password_hash, form_data.password)
 
-    # 检查用户是否已被删除
-    if user.is_deleted:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="该账户已注销",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # 检查用户是否处于登录锁定状态
-    if user.is_login_locked():
-        remaining_time = user.get_remaining_lock_time()
-        raise HTTPException(
-            status_code=status.HTTP_423_LOCKED,
-            detail=f"登录被锁定，请等待 {remaining_time} 秒后再试",
-            headers={"WWW-Authenticate": "Bearer", "X-Lock-Remaining": str(remaining_time)},
-        )
+    # 注销和锁定状态不对外暴露，所有认证失败保持完全一致。
+    if user.is_deleted or user.is_login_locked():
+        _raise_invalid_login()
 
     # 验证密码
-    if not AuthUtils.verify_password(user.password_hash, form_data.password):
+    if not password_matches:
         # 密码错误，增加失败次数
         user.increment_failed_login()
         await db.commit()
@@ -245,20 +239,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         # 记录失败操作
         await log_operation(db, user.id if user else None, "登录失败", f"密码错误，失败次数: {user.login_failed_count}")
 
-        # 检查是否需要锁定
-        if user.is_login_locked():
-            remaining_time = user.get_remaining_lock_time()
-            raise HTTPException(
-                status_code=status.HTTP_423_LOCKED,
-                detail=f"由于多次登录失败，账户已被锁定 {remaining_time} 秒",
-                headers={"WWW-Authenticate": "Bearer", "X-Lock-Remaining": str(remaining_time)},
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="用户名或密码错误",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        _raise_invalid_login()
 
     # 登录成功，重置失败计数器
     user.reset_failed_login()
@@ -615,7 +596,10 @@ async def create_user(
 # 路由：获取所有用户（管理员权限）
 @auth.get("/users", response_model=list[UserResponse])
 async def read_users(
-    skip: int = 0, limit: int = 100, current_user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)
+    skip: int = Query(0, ge=0, le=MAX_PAGINATION_OFFSET),
+    limit: int = Query(100, ge=1, le=500),
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
 ):
     user_repo = UserRepository()
 
@@ -649,8 +633,8 @@ def _ensure_user_in_current_department(current_user: User, target_user: User) ->
 
 @auth.get("/users/access-options", response_model=list[UserAccessOption])
 async def read_user_access_options(
-    skip: int = 0,
-    limit: int = 1000,
+    skip: int = Query(0, ge=0, le=MAX_PAGINATION_OFFSET),
+    limit: int = Query(1000, ge=1, le=5000),
     current_user: User = Depends(get_admin_user),
 ):
     user_repo = UserRepository()

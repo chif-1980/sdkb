@@ -7,13 +7,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.product_chat.auth_service import ProductAuthError
 from yuxi.product_chat.source_policy_service import ProductKnowledgeScope, ProductSourcePolicyService
-from yuxi.storage.postgres.models_business import Base
+from yuxi.storage.postgres.models_business import Base, Department, User
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuMaterialVersion,
     FeishuSource,
     FeishuSourceItem,
     KnowledgeBase,
+)
+from yuxi.storage.postgres.models_product import (
+    FeishuDepartmentBinding,
+    FeishuUserDepartmentMembership,
 )
 
 
@@ -55,6 +59,11 @@ class _FailingPolicyManager:
         raise ProductAuthError("AUTH_SERVICE_UNAVAILABLE", 503)
 
 
+class _DepartmentPolicyManager:
+    async def check_policy_accessible(self, user, kb_id):
+        return kb_id == "kb-1" and user.get("department_id") == 8
+
+
 async def test_resolve_scope_rejects_a_missing_source(db_session):
     with pytest.raises(ProductAuthError) as exc_info:
         await ProductSourcePolicyService(
@@ -64,6 +73,76 @@ async def test_resolve_scope_rejects_a_missing_source(db_session):
 
     assert exc_info.value.code == "PRODUCT_SOURCE_UNAVAILABLE"
     assert exc_info.value.status_code == 503
+
+
+async def test_resolve_scope_accepts_any_current_feishu_department_membership(db_session):
+    user = User(
+        username="Employee",
+        uid="employee-001",
+        password_hash="not-used",
+        role="user",
+        department=Department(id=7, name="Engineering"),
+    )
+    product = Department(id=8, name="Product")
+    db_session.add_all(
+        [
+            user,
+            product,
+            FeishuSource(
+                source_id="source-1",
+                name="Wiki",
+                wiki_root_token="root",
+                target_kb_id="kb-1",
+                credential_env_name="FEISHU_TOKEN",
+                enabled=True,
+            ),
+        ]
+    )
+    await db_session.flush()
+    department_binding = FeishuDepartmentBinding(
+        tenant_key="tenant-a",
+        feishu_department_id="od_product",
+        department_id=product.id,
+        display_name="Product",
+    )
+    db_session.add(department_binding)
+    await db_session.flush()
+    db_session.add(
+        FeishuUserDepartmentMembership(
+            user_id=user.id,
+            department_binding_id=department_binding.id,
+            position=1,
+        )
+    )
+    await db_session.commit()
+
+    scope = await ProductSourcePolicyService(
+        db=db_session,
+        knowledge_base=_DepartmentPolicyManager(),
+    ).resolve_scope(user)
+
+    assert scope.kb_id == "kb-1"
+
+
+async def test_resolve_scope_keeps_user_policy_without_a_primary_department(db_session):
+    db_session.add(
+        FeishuSource(
+            source_id="source-1",
+            name="Wiki",
+            wiki_root_token="root",
+            target_kb_id="kb-1",
+            credential_env_name="FEISHU_TOKEN",
+            enabled=True,
+        )
+    )
+    await db_session.commit()
+
+    scope = await ProductSourcePolicyService(
+        db=db_session,
+        knowledge_base=_PolicyManager(True),
+    ).resolve_scope(_user(department_id=None))
+
+    assert scope.kb_id == "kb-1"
 
 
 async def test_resolve_scope_rejects_a_disabled_source(db_session):

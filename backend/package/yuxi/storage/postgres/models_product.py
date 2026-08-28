@@ -4,7 +4,18 @@ from enum import StrEnum
 from secrets import token_bytes
 from time import time_ns
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 
 from yuxi.storage.postgres.models_business import Base
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -63,6 +74,50 @@ class FeishuUserBinding(Base):
     updated_at = Column(DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive)
 
 
+class FeishuDepartmentBinding(Base):
+    __tablename__ = "feishu_department_bindings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_key = Column(String(128), nullable=False)
+    feishu_department_id = Column(String(128), nullable=False)
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=False, unique=True)
+    display_name = Column(String(255), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_key",
+            "feishu_department_id",
+            name="uq_feishu_department_bindings_tenant_department",
+        ),
+    )
+
+
+class FeishuUserDepartmentMembership(Base):
+    __tablename__ = "feishu_user_department_memberships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    department_binding_id = Column(Integer, ForeignKey("feishu_department_bindings.id"), nullable=False)
+    position = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "department_binding_id",
+            name="uq_feishu_user_department_memberships_user_department",
+        ),
+        Index(
+            "ix_feishu_user_department_memberships_user_position",
+            "user_id",
+            "position",
+        ),
+    )
+
+
 class ProductConversation(Base):
     __tablename__ = "product_conversations"
 
@@ -78,9 +133,7 @@ class ProductConversation(Base):
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
     updated_at = Column(DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive)
 
-    __table_args__ = (
-        Index("ix_product_conversations_owner_status_updated", "owner_user_id", "status", "updated_at"),
-    )
+    __table_args__ = (Index("ix_product_conversations_owner_status_updated", "owner_user_id", "status", "updated_at"),)
 
 
 class ProductMessage(Base):

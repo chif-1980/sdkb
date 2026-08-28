@@ -9,7 +9,7 @@ PYTEST_CMD=("docker" "compose" "exec" "api" "uv" "run" "--group" "test" "pytest"
 
 check_server() {
     echo "检查测试服务器状态..."
-    if curl -s http://localhost:5050/api/system/health > /dev/null 2>&1; then
+    if curl -s http://localhost:5050/api/system/healthz > /dev/null 2>&1; then
         echo "✓ 测试服务器运行正常"
         return 0
     fi

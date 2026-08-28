@@ -13,6 +13,7 @@ if sys.platform == "win32":
 
 import time
 from collections import defaultdict, deque
+from ipaddress import ip_address
 
 import uvicorn
 from fastapi import FastAPI, Request, status
@@ -86,7 +87,11 @@ app.add_middleware(
 def _extract_client_ip(request: Request) -> str:
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+        candidate = forwarded_for.split(",")[0].strip()
+        try:
+            return str(ip_address(candidate))
+        except ValueError:
+            pass
     if request.client:
         return request.client.host
     return "unknown"
@@ -142,6 +147,7 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=5050,
         reload=True,
+        server_header=False,
         # 与 docker-compose 开发环境保持一致，避免 package 下代码变更不触发热重载。
         reload_dirs=["server", "package"],
     )

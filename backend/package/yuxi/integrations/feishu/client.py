@@ -108,6 +108,32 @@ class FeishuClient:
         node = self._as_mapping(data.get("node"), "node")
         return self._node_from_payload(node)
 
+    async def get_employee(self, user_id: str) -> dict[str, Any]:
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must not be blank")
+        payload = await self._get(
+            f"/open-apis/contact/v3/users/{user_id}",
+            params={
+                "user_id_type": "user_id",
+                "department_id_type": "open_department_id",
+            },
+        )
+        data = self._as_mapping(payload.get("data"), "data")
+        return dict(self._as_mapping(data.get("user"), "user"))
+
+    async def get_department(self, department_id: str) -> dict[str, Any]:
+        if not isinstance(department_id, str) or not department_id.strip():
+            raise ValueError("department_id must not be blank")
+        payload = await self._get(
+            f"/open-apis/contact/v3/departments/{department_id}",
+            params={
+                "user_id_type": "user_id",
+                "department_id_type": "open_department_id",
+            },
+        )
+        data = self._as_mapping(payload.get("data"), "data")
+        return dict(self._as_mapping(data.get("department"), "department"))
+
     async def list_nodes(self, space_id: str, parent_node_token: str | None = None) -> list[FeishuNode]:
         """List nodes in a Wiki space, optionally below one parent node.
 

@@ -132,6 +132,31 @@ class ReviewPackageResolveRequest(BaseModel):
         return self
 
 
+class ReviewPackageBulkExcludeRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    lock_version: int = Field(ge=1)
+    review_item_ids: list[str] = Field(min_length=1, max_length=500)
+    decision_comment: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("request_id", "decision_comment")
+    @classmethod
+    def normalize_bulk_exclude_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value is required")
+        return normalized
+
+    @field_validator("review_item_ids")
+    @classmethod
+    def review_item_ids_must_be_unique(cls, value: list[str]) -> list[str]:
+        normalized = [item_id.strip() for item_id in value]
+        if any(not item_id for item_id in normalized):
+            raise ValueError("review_item_id is required")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("review_item_id must be unique within one request")
+        return normalized
+
+
 class ReviewPackageTransferRequest(BaseModel):
     lock_version: int = Field(ge=1)
     assignee_id: str = Field(min_length=1, max_length=64)

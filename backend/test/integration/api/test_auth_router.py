@@ -76,7 +76,22 @@ async def _cleanup_department(test_client, headers, department_id: int) -> None:
 async def test_login_with_invalid_credentials(test_client):
     response = await test_client.post("/api/auth/token", data={"username": "invalid", "password": "invalid"})
     assert response.status_code == 401
-    assert "detail" in response.json()
+    assert response.json()["detail"] == "登录标识或密码错误"
+
+
+async def test_unknown_user_and_wrong_password_have_identical_responses(test_client, standard_user):
+    unknown_response = await test_client.post(
+        "/api/auth/token",
+        data={"username": f"missing-{uuid.uuid4().hex}", "password": "wrong-password"},
+    )
+    wrong_password_response = await test_client.post(
+        "/api/auth/token",
+        data={"username": standard_user["user"]["uid"], "password": "wrong-password"},
+    )
+
+    assert unknown_response.status_code == wrong_password_response.status_code == 401
+    assert unknown_response.json() == wrong_password_response.json() == {"detail": "登录标识或密码错误"}
+    assert unknown_response.headers.get("www-authenticate") == wrong_password_response.headers.get("www-authenticate")
 
 
 async def test_user_is_locked_after_repeated_failed_logins(test_client, standard_user):
@@ -85,20 +100,35 @@ async def test_user_is_locked_after_repeated_failed_logins(test_client, standard
     for attempt in range(1, 5):
         response = await test_client.post("/api/auth/token", data={"username": uid, "password": "wrong-password"})
         assert response.status_code == 401, response.text
-        assert response.json()["detail"] == "用户名或密码错误"
+        assert response.json()["detail"] == "登录标识或密码错误"
 
     locked_response = await test_client.post("/api/auth/token", data={"username": uid, "password": "wrong-password"})
-    assert locked_response.status_code == 423, locked_response.text
-    assert "X-Lock-Remaining" in locked_response.headers
-    assert "账户已被锁定" in locked_response.json()["detail"]
+    assert locked_response.status_code == 401, locked_response.text
+    assert locked_response.json()["detail"] == "登录标识或密码错误"
+    assert "X-Lock-Remaining" not in locked_response.headers
 
     still_locked_response = await test_client.post(
         "/api/auth/token",
         data={"username": uid, "password": standard_user["password"]},
     )
-    assert still_locked_response.status_code == 423, still_locked_response.text
-    assert "X-Lock-Remaining" in still_locked_response.headers
-    assert "登录被锁定" in still_locked_response.json()["detail"]
+    assert still_locked_response.status_code == 401, still_locked_response.text
+    assert still_locked_response.json()["detail"] == "登录标识或密码错误"
+    assert "X-Lock-Remaining" not in still_locked_response.headers
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "limit=25000",
+        "limit=99999999999999999999",
+        "skip=99999999999999999999",
+    ],
+)
+async def test_user_list_rejects_oversized_pagination(test_client, admin_headers, query):
+    response = await test_client.get(f"/api/auth/users?{query}", headers=admin_headers)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["type"] in {"less_than_equal", "int_parsing", "int_type"}
 
 
 async def test_admin_can_login_and_fetch_profile(test_client, admin_headers):

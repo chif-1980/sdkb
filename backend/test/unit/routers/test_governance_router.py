@@ -336,6 +336,40 @@ async def test_review_package_list_backfills_pending_material_and_returns_real_c
     ]
 
 
+async def test_review_package_counts_only_pending_source_update_tasks(governance_api_fixture):
+    client, session, _, _ = governance_api_fixture
+    source_item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
+    session.add(
+        FeishuMaterialVersion(
+            version_id="version-previous",
+            item_id="item-1",
+            revision="0",
+            content_hash="hash-previous",
+            processing_status="published",
+            review_status="published",
+            yuxi_file_id="file-previous",
+            published_at=datetime.now(UTC),
+        )
+    )
+    source_item.active_version_id = "version-previous"
+    await session.commit()
+
+    listed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
+    package_id = listed.json()["items"][0]["package_id"]
+    package = await session.scalar(select(FeishuReviewPackage).where(FeishuReviewPackage.package_id == package_id))
+
+    assert listed.status_code == 200
+    assert listed.json()["counts"]["source_updates"] == 1
+    assert listed.json()["items"][0]["trigger_type"] == "SOURCE_VERSION"
+    assert listed.json()["items"][0]["review_type_counts"] == {"UPDATE": 1}
+
+    package.workflow_status = "COMPLETED"
+    await session.commit()
+    completed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
+
+    assert completed.json()["counts"]["source_updates"] == 0
+
+
 async def test_review_package_segments_return_stable_locator_and_publication_state(governance_api_fixture):
     client, session, _, _ = governance_api_fixture
     session.add(
@@ -602,6 +636,116 @@ async def test_source_change_request_can_be_listed_opened_and_cancelled(governan
     assert cancelled.json()["workflow_status"] == "COMPLETED"
     assert cancelled_again.status_code == 409
     assert event.message == "资料负责人确认无需修改"
+
+
+async def test_bulk_exclude_closes_active_source_changes_and_rejects_material(governance_api_fixture):
+    client, session, _, _ = governance_api_fixture
+    session.add_all(
+        [
+            FeishuSourceSegment(
+                segment_id="segment-install",
+                segment_key="segment-install",
+                version_id="version-1",
+                item_id="item-1",
+                yuxi_file_id="file-1",
+                segment_index=0,
+                segment_type="text",
+                title_path=["安装步骤"],
+                locator_json={"page": 1},
+                content="安装前需要准备管理员账号和服务地址，然后按步骤完成部署。",
+                content_hash="segment-install-hash",
+                token_count=30,
+                publication_state="PENDING",
+                status="ACTIVE",
+            ),
+            FeishuSourceSegment(
+                segment_id="segment-check",
+                segment_key="segment-check",
+                version_id="version-1",
+                item_id="item-1",
+                yuxi_file_id="file-1",
+                segment_index=1,
+                segment_type="text",
+                title_path=["验收检查"],
+                locator_json={"page": 2},
+                content="部署完成后检查登录、检索和权限隔离功能是否符合验收要求。",
+                content_hash="segment-check-hash",
+                token_count=28,
+                publication_state="PENDING",
+                status="ACTIVE",
+            ),
+        ]
+    )
+    await session.commit()
+    listed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
+    package_id = listed.json()["items"][0]["package_id"]
+    detail = (await client.get(f"/api/governance/review-packages/{package_id}")).json()
+    review_item_ids = [item["review_item_id"] for item in detail["items"]]
+    requested = await client.post(
+        f"/api/governance/review-packages/{package_id}/resolve",
+        json={
+            "request_id": "request-source-changes",
+            "lock_version": detail["lock_version"],
+            "decisions": [
+                {
+                    "review_item_id": review_item_id,
+                    "outcome": "REQUEST_SOURCE_CHANGE",
+                    "decision_comment": "请补充原始资料",
+                }
+                for review_item_id in review_item_ids
+            ],
+        },
+    )
+    exclude_request = {
+        "request_id": "request-bulk-exclude",
+        "lock_version": requested.json()["lock_version"],
+        "review_item_ids": review_item_ids,
+        "decision_comment": "结束资料修改任务并批量不纳入知识库",
+    }
+
+    excluded = await client.post(
+        f"/api/governance/review-packages/{package_id}/bulk-exclude",
+        json=exclude_request,
+    )
+    replayed = await client.post(
+        f"/api/governance/review-packages/{package_id}/bulk-exclude",
+        json=exclude_request,
+    )
+    version = await session.scalar(select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-1"))
+    review_items = list(
+        await session.scalars(select(FeishuReviewItem).where(FeishuReviewItem.review_item_id.in_(review_item_ids)))
+    )
+    change_requests = list(await session.scalars(select(FeishuSourceChangeRequest)))
+    segments = list(await session.scalars(select(FeishuSourceSegment)))
+
+    assert requested.status_code == 200
+    assert requested.json()["workflow_status"] == "WAITING_SOURCE_CHANGE"
+    assert excluded.status_code == 200
+    assert excluded.json()["workflow_status"] == "COMPLETED"
+    assert excluded.json()["closed_change_request_count"] == 2
+    assert replayed.status_code == 200
+    assert replayed.json()["idempotent_replay"] is True
+    assert version.review_status == "rejected"
+    assert version.review_comment == "结束资料修改任务并批量不纳入知识库"
+    assert all(item.item_status == "DECIDED" and item.outcome == "EXCLUDE" for item in review_items)
+    assert all(request.status == "CANCELLED" for request in change_requests)
+    assert all(segment.publication_state == "EXCLUDED" for segment in segments)
+
+    reopened = await client.post(f"/api/governance/review-items/{review_item_ids[0]}/reopen-exclusion")
+    replayed_reopen = await client.post(f"/api/governance/review-items/{review_item_ids[0]}/reopen-exclusion")
+    original_detail = (await client.get(f"/api/governance/review-packages/{package_id}")).json()
+    reopened_detail = (await client.get(f"/api/governance/review-packages/{reopened.json()['package_id']}")).json()
+
+    assert reopened.status_code == 200
+    assert reopened.json()["idempotent_replay"] is False
+    assert replayed_reopen.status_code == 200
+    assert replayed_reopen.json()["idempotent_replay"] is True
+    assert reopened_detail["trigger_type"] == "FEEDBACK"
+    assert reopened_detail["knowledge_unit_count"] == 1
+    assert reopened_detail["items"][0]["reopened_from_item_id"] == review_item_ids[0]
+    original_items = {item["review_item_id"]: item for item in original_detail["items"]}
+    assert original_items[review_item_ids[0]]["can_reopen_exclusion"] is False
+    assert original_items[review_item_ids[1]]["can_reopen_exclusion"] is True
 
 
 async def test_review_package_publish_uses_existing_material_publish_chain(governance_api_fixture, monkeypatch):
@@ -951,9 +1095,7 @@ async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
         select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-layout")
     )
     source_item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
-    target_item = await session.scalar(
-        select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-layout")
-    )
+    target_item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-layout"))
 
     async def fake_version_source(version_id, _db):
         if version_id == "version-1":
@@ -962,9 +1104,7 @@ async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
 
     async def fake_build(filename, _content, *, segments=()):
         block_id = "source-block" if filename.startswith("source") else "target-block"
-        unrelated_block_id = (
-            "source-block-unrelated" if filename.startswith("source") else "target-block-unrelated"
-        )
+        unrelated_block_id = "source-block-unrelated" if filename.startswith("source") else "target-block-unrelated"
         return {
             "supported": True,
             "file_type": ".docx" if filename.startswith("source") else ".pptx",

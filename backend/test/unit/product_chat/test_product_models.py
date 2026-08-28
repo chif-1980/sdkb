@@ -25,7 +25,9 @@ from yuxi.storage.postgres.models_product import (
     AuthorizationStatus,
     CitationKind,
     ConversationStatus,
+    FeishuDepartmentBinding,
     FeishuUserBinding,
+    FeishuUserDepartmentMembership,
     MessageCitation,
     MessageRole,
     ProductConversation,
@@ -48,11 +50,20 @@ def _foreign_key_target(table, column_name: str) -> str:
 
 
 def test_product_models_share_business_metadata_and_define_required_tables():
-    models = (FeishuUserBinding, ProductConversation, ProductMessage, MessageCitation)
+    models = (
+        FeishuUserBinding,
+        FeishuDepartmentBinding,
+        FeishuUserDepartmentMembership,
+        ProductConversation,
+        ProductMessage,
+        MessageCitation,
+    )
 
     assert all(model.metadata is BusinessBase.metadata for model in models)
     assert {model.__tablename__ for model in models} == {
         "feishu_user_bindings",
+        "feishu_department_bindings",
+        "feishu_user_department_memberships",
         "product_conversations",
         "product_messages",
         "message_citations",
@@ -61,6 +72,8 @@ def test_product_models_share_business_metadata_and_define_required_tables():
 
 def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
     binding = FeishuUserBinding.__table__
+    department_binding = FeishuDepartmentBinding.__table__
+    membership = FeishuUserDepartmentMembership.__table__
     conversation = ProductConversation.__table__
     message = ProductMessage.__table__
     citation = MessageCitation.__table__
@@ -85,6 +98,23 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
         "owner_user_id",
         "title",
         "status",
+        "created_at",
+        "updated_at",
+    }
+    assert set(department_binding.columns.keys()) == {
+        "id",
+        "tenant_key",
+        "feishu_department_id",
+        "department_id",
+        "display_name",
+        "created_at",
+        "updated_at",
+    }
+    assert set(membership.columns.keys()) == {
+        "id",
+        "user_id",
+        "department_binding_id",
+        "position",
         "created_at",
         "updated_at",
     }
@@ -137,6 +167,9 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
     assert "citation_id" in _unique_column_names(citation)
 
     assert _foreign_key_target(binding, "user_id") == "users.id"
+    assert _foreign_key_target(department_binding, "department_id") == "departments.id"
+    assert _foreign_key_target(membership, "user_id") == "users.id"
+    assert _foreign_key_target(membership, "department_binding_id") == "feishu_department_bindings.id"
     assert _foreign_key_target(conversation, "owner_user_id") == "users.id"
     assert _foreign_key_target(message, "conversation_id") == "product_conversations.conversation_id"
     assert _foreign_key_target(citation, "message_id") == "product_messages.message_id"
@@ -218,9 +251,7 @@ def test_product_response_contract_uses_literals_and_string_timestamps():
         Literal["SUPPORTED", "INSUFFICIENT", "CONFLICTING"] | None
     )
     assert MessageResponse.model_fields["feedback_rating"].annotation == (Literal["LIKE", "DISLIKE"] | None)
-    assert MessageFeedbackResponse.model_fields["feedback_rating"].annotation == (
-        Literal["LIKE", "DISLIKE"] | None
-    )
+    assert MessageFeedbackResponse.model_fields["feedback_rating"].annotation == (Literal["LIKE", "DISLIKE"] | None)
     assert ConversationSummaryResponse.model_fields["created_at"].annotation is str
     assert ConversationSummaryResponse.model_fields["updated_at"].annotation is str
     assert MessageResponse.model_fields["created_at"].annotation is str

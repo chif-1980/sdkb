@@ -1201,6 +1201,144 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.decision-panel').classes()).not.toContain('open')
   })
 
+  it('集中提醒原文更新并一键筛选对应任务', async () => {
+    const updatePackage = {
+      ...packages[0],
+      trigger_type: 'SOURCE_VERSION',
+      review_type_counts: { UPDATE: 1 }
+    }
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [updatePackage],
+          total: 1,
+          counts: { mine: 1, source_updates: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') {
+        return Promise.resolve(packageDetail('package-first'))
+      }
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.source-update-notice').text()).toContain(
+      '发现 1 份原文更新，已生成待审核任务'
+    )
+    expect(wrapper.get('.source-update-badge').text()).toBe('原文已更新')
+
+    await wrapper.get('.source-update-notice button').trigger('click')
+    await flushPromises()
+
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/review-packages?source_id=source-1&review_type=UPDATE&view=mine'
+    )
+    expect(wrapper.find('.source-update-notice').exists()).toBe(false)
+  })
+
+  it('已排除知识单元可重新生成待审核任务并定位新任务', async () => {
+    const excludedDetail = knowledgeUnitPackageDetail()
+    excludedDetail.workflow_status = 'COMPLETED'
+    excludedDetail.knowledge_unit_count = 1
+    excludedDetail.items = [
+      {
+        ...excludedDetail.items[0],
+        item_status: 'DECIDED',
+        outcome: 'EXCLUDE',
+        decision_comment: '此前确认不纳入',
+        can_reopen_exclusion: true,
+        reopened_by_item_id: null
+      }
+    ]
+    const reopenedSummary = {
+      ...packages[0],
+      package_id: 'package-reopened',
+      trigger_type: 'FEEDBACK',
+      review_type_counts: { NEW: 1 }
+    }
+    const reopenedDetail = {
+      ...excludedDetail,
+      ...reopenedSummary,
+      workflow_status: 'OPEN',
+      items: [
+        {
+          ...excludedDetail.items[0],
+          review_item_id: 'unit-reopened',
+          item_status: 'PENDING',
+          outcome: null,
+          decision_comment: null,
+          can_reopen_exclusion: false,
+          reopened_from_item_id: 'unit-safe'
+        }
+      ]
+    }
+    let reopened = false
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [reopened ? reopenedSummary : packages[0]],
+          total: 1,
+          counts: { mine: 1, source_updates: 0 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') {
+        return Promise.resolve(excludedDetail)
+      }
+      if (url === '/api/governance/review-packages/package-reopened') {
+        return Promise.resolve(reopenedDetail)
+      }
+      if (url.endsWith('/segments')) return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockImplementation((url) => {
+      if (url === '/api/governance/review-items/unit-safe/reopen-exclusion') {
+        reopened = true
+        return Promise.resolve({
+          package_id: 'package-reopened',
+          review_item_id: 'unit-reopened',
+          workflow_status: 'OPEN',
+          idempotent_replay: false
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    const reopenButton = wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('重新申请纳入'))
+
+    expect(reopenButton).toBeTruthy()
+    await reopenButton.trigger('click')
+    expect(Modal.confirm.mock.calls[0][0].content).toContain('原“不纳入”记录仍会保留')
+    expect(Modal.confirm.mock.calls[0][0].content).toContain('不会直接发布到正式知识')
+
+    await Modal.confirm.mock.calls[0][0].onOk()
+    await flushPromises()
+
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/governance/review-items/unit-safe/reopen-exclusion',
+      {}
+    )
+    expect(wrapper.get('.queue-item.active').text()).toContain('第一份资料')
+    expect(wrapper.findAll('.record-actions button').some((button) => button.text().includes('重新申请纳入'))).toBe(false)
+    expect(message.success).toHaveBeenCalledWith('“产品能力”已重新提交审核')
+  })
+
   it('跨文档证据一次聚焦一条并支持前后切换', async () => {
     const detail = packageDetail('package-target')
     detail.items[0].relation_ids = ['relation-1', 'relation-2']
@@ -1831,11 +1969,9 @@ describe('FeishuReviewWorkspace', () => {
     await Modal.confirm.mock.calls[0][0].onOk()
     await flushPromises()
     expect(apiAdminPost).toHaveBeenCalledWith(
-      '/api/governance/review-packages/package-first/resolve',
+      '/api/governance/review-packages/package-first/bulk-exclude',
       expect.objectContaining({
-        decisions: expect.arrayContaining([
-          expect.objectContaining({ outcome: 'EXCLUDE' })
-        ])
+        review_item_ids: ['unit-safe', 'unit-updated']
       })
     )
 
@@ -1853,11 +1989,106 @@ describe('FeishuReviewWorkspace', () => {
     )
   })
 
+  it('等资料状态优先定位可处理单元并允许结束修改后批量不纳入', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    detail.workflow_status = 'WAITING_SOURCE_CHANGE'
+    detail.items[0] = {
+      ...detail.items[0],
+      item_status: 'INVALIDATED',
+      outcome: 'REQUEST_SOURCE_CHANGE',
+      decision_comment: '人工取消资料修改任务'
+    }
+    detail.items[1] = {
+      ...detail.items[1],
+      item_status: 'WAITING_SOURCE_CHANGE',
+      outcome: 'REQUEST_SOURCE_CHANGE',
+      decision_comment: '请补充部署要求'
+    }
+    detail.items[2] = {
+      ...detail.items[2],
+      item_status: 'PENDING',
+      outcome: null
+    }
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [packages[0]], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockResolvedValue({ remaining_unit_count: 0 })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.decision-readonly').text()).toContain('等待资料修改')
+    expect(wrapper.get('.decision-heading').text()).toContain('知识单元 2 / 3')
+    expect(wrapper.get('.decision-readonly').text()).not.toContain('已失效')
+
+    const excludeButton = wrapper
+      .findAll('.batch-action-secondary')
+      .find((button) => button.text() === '批量不纳入')
+    expect(excludeButton.attributes('disabled')).toBeUndefined()
+    await excludeButton.trigger('click')
+
+    expect(Modal.confirm.mock.calls[0][0].content).toContain('2 个来自资料修改流程')
+    expect(Modal.confirm.mock.calls[0][0].content).toContain('修改任务会一并结束')
+    await Modal.confirm.mock.calls[0][0].onOk()
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-first/bulk-exclude',
+      expect.objectContaining({
+        review_item_ids: ['unit-safe', 'unit-updated']
+      })
+    )
+  })
+
+  it('已取消修改的知识单元显示明确状态', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    detail.items = [
+      {
+        ...detail.items[0],
+        item_status: 'INVALIDATED',
+        outcome: 'REQUEST_SOURCE_CHANGE',
+        decision_comment: '人工取消资料修改任务'
+      }
+    ]
+    detail.knowledge_unit_count = 1
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [packages[0]], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.decision-readonly').text()).toContain('修改任务已结束')
+    expect(wrapper.get('.decision-readonly').text()).not.toContain('已失效')
+  })
+
   it('已处理知识单元数量仍在审核任务列表显示', async () => {
     const detail = knowledgeUnitPackageDetail()
     detail.decided_unit_count = 1
     detail.remaining_unit_count = 2
     detail.included_unit_count = 1
+    detail.excluded_unit_count = 0
     detail.items[0] = {
       ...detail.items[0],
       item_status: 'DECIDED',
@@ -1873,7 +2104,8 @@ describe('FeishuReviewWorkspace', () => {
               knowledge_unit_count: 3,
               decided_unit_count: 1,
               remaining_unit_count: 2,
-              included_unit_count: 1
+              included_unit_count: 1,
+              excluded_unit_count: 0
             }
           ],
           total: 1,
@@ -1897,7 +2129,70 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.queue-unit-summary').text()).toContain('1/3 已处理')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('待处理 2')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 1')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('不纳入 0')
     expect(wrapper.find('.item-navigation').exists()).toBe(false)
+  })
+
+  it('已完成任务可按最终结果筛选并在卡片显示处理构成', async () => {
+    const completedSummary = {
+      ...packages[0],
+      workflow_status: 'COMPLETED',
+      knowledge_unit_count: 3,
+      decided_unit_count: 3,
+      remaining_unit_count: 0,
+      included_unit_count: 2,
+      excluded_unit_count: 1,
+      completion_result: 'partial'
+    }
+    const completedDetail = knowledgeUnitPackageDetail()
+    completedDetail.workflow_status = 'COMPLETED'
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [completedSummary],
+          total: 1,
+          counts: { mine: 0, completed: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') {
+        return Promise.resolve(completedDetail)
+      }
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-first/content')) {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    await wrapper
+      .findAll('.queue-views button')
+      .find((button) => button.text().includes('已完成'))
+      .trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.queue-result-filter').text()).toContain('全部纳入')
+    expect(wrapper.get('.queue-result-filter').text()).toContain('部分纳入')
+    expect(wrapper.get('.queue-result-filter').text()).toContain('全部不纳入')
+
+    await wrapper
+      .findAll('.queue-result-filter button')
+      .find((button) => button.text() === '部分纳入')
+      .trigger('click')
+    await flushPromises()
+
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/review-packages?source_id=source-1&view=all&workflow_status=COMPLETED&completion_result=partial'
+    )
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('3/3 已处理')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 2')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('不纳入 1')
+    expect(wrapper.get('.completion-result-badge').text()).toBe('部分纳入')
   })
 
   it('发布单个知识单元时明确提示正在加入正式知识和剩余数量', async () => {

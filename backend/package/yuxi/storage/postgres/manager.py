@@ -8,6 +8,7 @@ import yuxi.storage.postgres.models_product  # noqa: F401
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES
@@ -996,9 +997,12 @@ class PostgresManager(metaclass=SingletonMeta):
         try:
             yield session
             await session.commit()
-        except Exception as exc:
+        except SQLAlchemyError as exc:
             await session.rollback()
             logger.error("PostgreSQL async operation failed: {}", type(exc).__name__)
+            raise
+        except Exception:
+            await session.rollback()
             raise
         finally:
             await session.close()

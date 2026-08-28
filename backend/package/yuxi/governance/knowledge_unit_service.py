@@ -18,6 +18,7 @@ from yuxi.governance.domain import (
     ReviewOutcome,
     ReviewPackageStatus,
     ReviewSubjectType,
+    ReviewTriggerType,
     ReviewType,
 )
 from yuxi.storage.postgres.models_knowledge import (
@@ -222,6 +223,8 @@ class KnowledgeUnitService:
         return await self.ensure_for_package(package)
 
     async def ensure_for_package(self, package: FeishuReviewPackage) -> list[FeishuKnowledgeUnit]:
+        if package.trigger_type == ReviewTriggerType.FEEDBACK:
+            return await self._active_units(package.source_version_id)
         if not package.source_version_id or package.workflow_status in {
             ReviewPackageStatus.COMPLETED,
             ReviewPackageStatus.INVALIDATED,

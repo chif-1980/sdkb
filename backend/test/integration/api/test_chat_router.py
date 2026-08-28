@@ -20,6 +20,20 @@ async def test_chat_endpoints_require_authentication(test_client):
     assert (await test_client.get("/api/agent")).status_code == 401
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/chat/threads?offset=99999999999999999999",
+        "/api/chat/threads/search?q=test&offset=99999999999999999999",
+    ],
+)
+async def test_thread_endpoints_reject_oversized_offsets(test_client, admin_headers, path):
+    response = await test_client.get(path, headers=admin_headers)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["type"] in {"less_than_equal", "int_parsing", "int_type"}
+
+
 async def test_image_upload_composites_transparent_png_pixels_on_white(test_client, admin_headers):
     image = Image.new("RGBA", (2, 2), (255, 255, 255, 0))
     image.putpixel((0, 0), (50, 87, 244, 0))
