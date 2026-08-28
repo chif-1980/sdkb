@@ -689,6 +689,63 @@ async def test_get_node_returns_page_details() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_employee_reads_current_tenant_directory_identity() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/open-apis/contact/v3/users/employee-001"
+        assert request.url.params["user_id_type"] == "user_id"
+        assert request.url.params["department_id_type"] == "open_department_id"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "user": {
+                        "user_id": "employee-001",
+                        "open_id": "ou_employee",
+                        "department_ids": ["od_engineering"],
+                        "status": {"is_activated": True},
+                    }
+                },
+            },
+        )
+
+    client = _client(handler)
+
+    employee = await client.get_employee("employee-001")
+
+    assert employee["open_id"] == "ou_employee"
+    assert employee["department_ids"] == ["od_engineering"]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_department_reads_name_by_open_department_id() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/open-apis/contact/v3/departments/od_engineering"
+        assert request.url.params["department_id_type"] == "open_department_id"
+        assert request.url.params["user_id_type"] == "user_id"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "department": {
+                        "department_id": "od_engineering",
+                        "name": "Engineering",
+                    }
+                },
+            },
+        )
+
+    client = _client(handler)
+
+    department = await client.get_department("od_engineering")
+
+    assert department == {"department_id": "od_engineering", "name": "Engineering"}
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_list_children_follows_page_token() -> None:
     requested_tokens: list[str | None] = []
 

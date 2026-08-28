@@ -53,3 +53,27 @@ async def test_session_context_does_not_log_integrity_error_parameters(monkeypat
     assert secret_content not in logged_output
     assert secret_url not in logged_output
     assert session.events == ["commit", "rollback", "close"]
+
+
+@pytest.mark.asyncio
+async def test_session_context_does_not_label_application_error_as_database_failure(monkeypatch: pytest.MonkeyPatch):
+    error = RuntimeError("route failed")
+    session = _FailingSession(error)
+    manager = object.__new__(PostgresManager)
+    PostgresManager.__init__(manager)
+    manager.AsyncSession = lambda: session
+    logged_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+    monkeypatch.setattr(manager, "initialize", lambda: None)
+    monkeypatch.setattr(
+        postgres_manager_module.logger,
+        "error",
+        lambda message, *args, **kwargs: logged_calls.append((message, args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="route failed"):
+        async with manager.get_async_session_context():
+            pass
+
+    assert logged_calls == []
+    assert session.events == ["commit", "rollback", "close"]

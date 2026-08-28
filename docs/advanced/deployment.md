@@ -116,20 +116,32 @@ END {
 
 ### 2. 启动服务
 
-使用生产环境配置文件启动：
+生产环境必须使用受信任的 HTTPS 证书。先在 `.env.prod` 中配置证书链和私钥在宿主机上的绝对路径：
+
+```dotenv
+YUXI_TLS_CERT_PATH=/etc/letsencrypt/live/your-domain/fullchain.pem
+YUXI_TLS_KEY_PATH=/etc/letsencrypt/live/your-domain/privkey.pem
+```
+
+证书文件不得复制进仓库或镜像。使用生产配置和 TLS 覆盖配置启动：
 
 ```bash
 # 仅启动核心服务（CPU 模式）
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.prod \
+  -f docker-compose.prod.yml -f docker-compose.tls.yml up -d --build
 
 # 启动所有服务（包含 GPU OCR）
-docker compose --env-file .env.prod -f docker-compose.prod.yml --profile all up -d --build
+docker compose --env-file .env.prod \
+  -f docker-compose.prod.yml -f docker-compose.tls.yml --profile all up -d --build
 ```
+
+TLS 配置会监听 443，并把 80 端口的所有请求永久跳转到同主机的 HTTPS 地址。内网 IP 部署也必须使用终端设备信任的企业 CA 证书；不能用自签名证书代替生产传输保护。
 
 ### 3. 验证部署
 
-- Web 访问：http://localhost（直接通过 80 端口）
-- API 健康检查：`curl http://localhost/api/system/health`
+- Web 访问：`https://your-domain`
+- 公开最小健康检查：`curl https://your-domain/api/system/healthz`
+- 登录后健康详情：`GET /api/system/health`（需要 Bearer Token）
 
 公开头像和 Agent 图片通过前端同源路径 `/minio/public/...` 读取，由 Nginx 只读代理到 MinIO 的 `public` bucket。无需也不应向公网开放 MinIO 的 `9000` 对象 API 或 `9001` 管理控制台；知识库等私有 bucket 不经过这个代理。需要使用独立静态资源域名时，可在 `.env.prod` 中设置 `MINIO_PUBLIC_URL=https://assets.example.com`，并在该域名侧保持同等的只读 bucket 限制。
 
@@ -169,7 +181,8 @@ Neo4j 应使用 `cypher-shell` 的当前用户密码修改流程；MinIO 应使�
 git pull
 
 # 重新构建并启动
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.prod \
+  -f docker-compose.prod.yml -f docker-compose.tls.yml up -d --build
 ```
 
 生产 Compose 不再向宿主机发布 PostgreSQL 和文档解析服务端口。确需从宿主机维护时，优先使用 `docker compose exec`；不要为了临时调试把这些端口重新暴露到公网。

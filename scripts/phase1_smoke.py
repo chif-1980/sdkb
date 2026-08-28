@@ -53,7 +53,7 @@ def compose_exec(service: str, *args: str):
 
 
 def main():
-    api_health = fetch_json("http://127.0.0.1:5050/api/system/health")
+    api_health = fetch_json("http://127.0.0.1:5050/api/system/healthz")
     if not isinstance(api_health, dict) or api_health.get("status") != "ok":
         raise SmokeCheckError("API health check failed")
     marker = compose_exec(

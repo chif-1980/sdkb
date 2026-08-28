@@ -2,6 +2,7 @@
 
 import time
 import logging
+from ipaddress import ip_address
 from collections.abc import Callable
 
 from fastapi import Request, Response
@@ -9,13 +10,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 # 创建专用的访问日志记录器
 access_logger = logging.getLogger("access_logger")
-_QUERY_REDACTED_PATHS = frozenset(
-    {
-        "/api/auth/feishu/callback",
-        "/api/auth/feishu/callback/",
-    }
-)
-
 # 设置访问日志记录器
 if not access_logger.handlers:
     handler = logging.StreamHandler()
@@ -31,7 +25,11 @@ def _extract_client_ip(request: Request) -> str:
     """提取客户端IP地址"""
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+        candidate = forwarded_for.split(",")[0].strip()
+        try:
+            return str(ip_address(candidate))
+        except ValueError:
+            pass
     if request.client:
         return request.client.host
     return "unknown"
@@ -49,8 +47,6 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         # 记录请求开始时间
         start_time = time.perf_counter()
         request_target = request.url.path
-        if request.url.query and request.url.path not in _QUERY_REDACTED_PATHS:
-            request_target = f"{request_target}?{request.url.query}"
 
         # 获取客户端IP
         client_ip = _extract_client_ip(request)

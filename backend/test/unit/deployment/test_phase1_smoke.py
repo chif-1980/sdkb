@@ -128,7 +128,7 @@ def test_main_checks_live_services_and_existing_marker(monkeypatch, capsys):
 
     module.main()
 
-    fetch_json.assert_called_once_with("http://127.0.0.1:5050/api/system/health")
+    fetch_json.assert_called_once_with("http://127.0.0.1:5050/api/system/healthz")
     assert compose_exec.call_args_list == [
         (
             (

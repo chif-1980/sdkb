@@ -25,6 +25,8 @@ function errorMessage(error, fallback) {
     'Review package is already completed or invalidated': '该审核包已经完成或失效',
     'Only open or newly received source-change requests can be cancelled':
       '该资料修改任务已结束，不能重复取消',
+    'Only excluded knowledge units can be reopened': '只有已标记为不纳入的知识单元可以重新申请',
+    'Knowledge unit is no longer excluded': '该知识单元当前已不是不纳入状态，请刷新后重试',
     'Assignee is not an active knowledge administrator': '请选择有效的知识管理员',
     'publish requires CREATE, UPDATE or SPLIT_BY_SCOPE action': '当前处理方式不能直接发布'
   }
@@ -70,6 +72,12 @@ export const governanceApi = {
 
   resolveReviewPackage: (packageId, payload) =>
     apiAdminPost(`${BASE_URL}/review-packages/${encoded(packageId)}/resolve`, payload),
+
+  bulkExcludeReviewPackage: (packageId, payload) =>
+    apiAdminPost(`${BASE_URL}/review-packages/${encoded(packageId)}/bulk-exclude`, payload),
+
+  reopenExcludedReviewItem: (reviewItemId) =>
+    apiAdminPost(`${BASE_URL}/review-items/${encoded(reviewItemId)}/reopen-exclusion`, {}),
 
   transferReviewPackage: (packageId, payload) =>
     apiAdminPost(`${BASE_URL}/review-packages/${encoded(packageId)}/transfer`, payload),

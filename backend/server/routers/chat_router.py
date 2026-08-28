@@ -57,6 +57,7 @@ class ImageUploadResponse(BaseModel):
 
 
 chat = APIRouter(prefix="/chat", tags=["chat"])
+MAX_PAGINATION_OFFSET = 1_000_000
 
 
 @chat.post("/call")
@@ -287,7 +288,7 @@ async def create_thread(
 async def list_threads(
     agent_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_PAGINATION_OFFSET),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_required_user),
 ):
@@ -302,7 +303,7 @@ async def search_threads(
     q: str = Query(..., min_length=1, max_length=200),
     agent_id: str | None = Query(None),
     limit: int = Query(20, ge=1, le=50),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_PAGINATION_OFFSET),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_required_user),
 ):
@@ -457,7 +458,7 @@ async def list_thread_files(
 async def read_thread_file_content(
     thread_id: str,
     path: str = Query(...),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_PAGINATION_OFFSET),
     limit: int = Query(2000, ge=1, le=5000),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_required_user),

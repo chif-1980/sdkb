@@ -75,13 +75,16 @@ describe('governanceApi', () => {
     )
   })
 
-  it('审核包草稿、裁决和转交使用对应方法及请求体', () => {
+  it('审核包草稿、裁决、批量不纳入、重新申请和转交使用对应方法及请求体', () => {
     const draft = { outcome: 'REQUEST_SOURCE_CHANGE', comment: '请补充版本信息' }
     const decision = { decision: 'REQUEST_CHANGES', action: 'MARK_INSUFFICIENT' }
+    const bulkExclude = { review_item_ids: ['item-1'], decision_comment: '不纳入' }
     const transfer = { assignee_id: 'admin-2', comment: '转交产品负责人' }
 
     governanceApi.saveReviewPackageDraft('package-1', draft)
     governanceApi.resolveReviewPackage('package-1', decision)
+    governanceApi.bulkExcludeReviewPackage('package-1', bulkExclude)
+    governanceApi.reopenExcludedReviewItem('item/1')
     governanceApi.transferReviewPackage('package-1', transfer)
 
     expect(apiAdminPatch).toHaveBeenCalledWith(
@@ -95,6 +98,16 @@ describe('governanceApi', () => {
     )
     expect(apiAdminPost).toHaveBeenNthCalledWith(
       2,
+      '/api/governance/review-packages/package-1/bulk-exclude',
+      bulkExclude
+    )
+    expect(apiAdminPost).toHaveBeenNthCalledWith(
+      3,
+      '/api/governance/review-items/item%2F1/reopen-exclusion',
+      {}
+    )
+    expect(apiAdminPost).toHaveBeenNthCalledWith(
+      4,
       '/api/governance/review-packages/package-1/transfer',
       transfer
     )

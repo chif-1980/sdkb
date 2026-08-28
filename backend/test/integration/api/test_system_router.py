@@ -9,10 +9,16 @@ import pytest
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 
-async def test_health_endpoint_is_public(test_client):
-    response = await test_client.get("/api/system/health")
+async def test_public_healthz_endpoint_returns_minimal_status(test_client):
+    response = await test_client.get("/api/system/healthz")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.json() == {"status": "ok"}
+
+
+async def test_detailed_health_endpoint_requires_authentication(test_client):
+    response = await test_client.get("/api/system/health")
+
+    assert response.status_code == 401
 
 
 async def test_info_endpoint_is_public(test_client):
@@ -37,6 +43,10 @@ async def test_config_get_requires_login_and_update_requires_admin(test_client, 
 
 
 async def test_admin_can_fetch_config_and_reload_info(test_client, admin_headers):
+    health_response = await test_client.get("/api/system/health", headers=admin_headers)
+    assert health_response.status_code == 200, health_response.text
+    assert health_response.json()["status"] == "ok"
+
     config_response = await test_client.get("/api/system/config", headers=admin_headers)
     assert config_response.status_code == 200, config_response.text
     assert isinstance(config_response.json(), dict)
@@ -46,6 +56,19 @@ async def test_admin_can_fetch_config_and_reload_info(test_client, admin_headers
     reload_payload = reload_response.json()
     assert reload_payload["success"] is True
     assert "data" in reload_payload
+
+
+async def test_system_logs_reject_invalid_levels_and_hide_internal_path(test_client, admin_headers):
+    invalid_response = await test_client.get(
+        "/api/system/logs?levels=AINFO%2CERROR%2CDEBUG%2CWARNINGB",
+        headers=admin_headers,
+    )
+    assert invalid_response.status_code == 422, invalid_response.text
+
+    response = await test_client.get("/api/system/logs?levels=INFO,ERROR,DEBUG,WARNING", headers=admin_headers)
+    assert response.status_code == 200, response.text
+    assert "log" in response.json()
+    assert "log_file" not in response.json()
 
 
 async def test_sandbox_config_is_environment_only(test_client, admin_headers):

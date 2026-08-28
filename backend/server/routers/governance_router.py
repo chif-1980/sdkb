@@ -33,6 +33,7 @@ from yuxi.governance.document_layout_service import (
 from yuxi.governance.review_package_service import ReviewPackageService
 from yuxi.governance.schemas import (
     DuplicateRelationResolutionRequest,
+    ReviewPackageBulkExcludeRequest,
     ReviewPackageDraftRequest,
     ReviewLayoutEditRequest,
     ReviewPackageResolveRequest,
@@ -75,9 +76,7 @@ _RELATION_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
 _RELATION_PAGE_CACHE: OrderedDict[tuple[str, str, int], tuple[bytes, str]] = OrderedDict()
 _OFFICE_PDF_CACHE: OrderedDict[str, bytes] = OrderedDict()
 _OFFICE_PDF_LOCKS: dict[str, asyncio.Lock] = {}
-_PREVIEW_PDF_CACHE_DIR = Path(
-    os.getenv("YUXI_GOVERNANCE_PREVIEW_CACHE_DIR", "saves/cache/governance-preview-pdf")
-)
+_PREVIEW_PDF_CACHE_DIR = Path(os.getenv("YUXI_GOVERNANCE_PREVIEW_CACHE_DIR", "saves/cache/governance-preview-pdf"))
 _PREVIEW_PDF_DISK_LIMIT = 32
 _PREVIEW_PDF_DISK_MAX_BYTES = 4 * 1024**3
 _OFFICE_PDF_MEMORY_LIMIT = 16
@@ -321,6 +320,7 @@ async def list_review_packages(
     review_type: Annotated[list[str] | None, Query()] = None,
     problem_tag: Annotated[str | None, Query()] = None,
     risk_level: Annotated[str | None, Query()] = None,
+    completion_result: Annotated[str | None, Query()] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     db: AsyncSession = Depends(get_db),
@@ -335,6 +335,7 @@ async def list_review_packages(
             review_types=review_type,
             problem_tag=problem_tag,
             risk_level=risk_level,
+            completion_result=completion_result,
             page=page,
             page_size=page_size,
         )
@@ -617,6 +618,56 @@ async def resolve_review_package(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@governance.post("/review-packages/{package_id}/bulk-exclude")
+async def bulk_exclude_review_package(
+    package_id: str,
+    payload: ReviewPackageBulkExcludeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        result = await ReviewPackageService(db).bulk_exclude(
+            package_id,
+            payload,
+            operator_id=current_user.uid,
+        )
+        if not result["idempotent_replay"]:
+            review_service = FeishuReviewService(db)
+            for candidate in result["reject_candidates"]:
+                await review_service.reject(
+                    candidate["version_id"],
+                    operator_id=current_user.uid,
+                    reason=candidate["reason"],
+                )
+        await db.commit()
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@governance.post("/review-items/{review_item_id}/reopen-exclusion")
+async def reopen_excluded_review_item(
+    review_item_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        result = await ReviewPackageService(db).reopen_excluded_item(
+            review_item_id,
+            operator_id=current_user.uid,
+        )
+        await db.commit()
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @governance.get("/reviewers")
 async def list_reviewers(db: AsyncSession = Depends(get_db)):
     reviewers = list(
@@ -839,18 +890,11 @@ def _comparison_block_ids(layout: dict, match: dict, side: str) -> tuple[int | N
                 if (normalized_block := _comparison_text(block.get("content")))
                 and (
                     normalized_excerpt in normalized_block
-                    or (
-                        len(normalized_block) >= 4
-                        and normalized_block in normalized_excerpt
-                    )
+                    or (len(normalized_block) >= 4 and normalized_block in normalized_excerpt)
                 )
             ]
         if not matched and segment_id:
-            matched = [
-                block
-                for block in blocks
-                if segment_id in (block.get("source_segment_ids") or [])
-            ]
+            matched = [block for block in blocks if segment_id in (block.get("source_segment_ids") or [])]
         if matched:
             return page.get("page_number"), [str(block.get("block_id")) for block in matched]
     return page_number, []

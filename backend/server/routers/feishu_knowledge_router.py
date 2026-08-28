@@ -473,8 +473,9 @@ class FeishuReviewService:
             raise ValueError("Reject reason is required")
         async with self._transaction():
             version, item, _ = await self._get_material(version_id, lock=True)
-            if version.review_status != "pending":
-                raise ValueError("Only pending material can be rejected")
+            if version.review_status not in {"pending", "changes_requested"}:
+                raise ValueError("Only pending or changes-requested material can be rejected")
+            previous_status = version.review_status
             await SourceSegmentService(self.session).transition_pending_publication_state(
                 version.version_id,
                 target_state="EXCLUDED",
@@ -488,7 +489,7 @@ class FeishuReviewService:
                 item_id=item.item_id,
                 version_id=version.version_id,
                 event_type="rejected",
-                from_status="pending",
+                from_status=previous_status,
                 to_status="rejected",
                 operator_id=operator_id,
                 message=reason,

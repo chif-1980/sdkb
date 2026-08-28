@@ -7,17 +7,24 @@ import json
 import os
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.storage.postgres.models_business import User
-from yuxi.storage.postgres.models_product import AuthorizationStatus, FeishuUserBinding
+from yuxi.integrations.feishu import FeishuClient, FeishuClientError, FeishuNotFoundError
+from yuxi.storage.postgres.models_business import Department, User
+from yuxi.storage.postgres.models_product import (
+    AuthorizationStatus,
+    FeishuDepartmentBinding,
+    FeishuUserBinding,
+    FeishuUserDepartmentMembership,
+)
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -31,6 +38,14 @@ FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
 FEISHU_PROFILE_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 _STATE_KEY_PREFIX = "enterprise-assistant:oauth-state:"
 _DEFAULT_RETURN_PATH = "/chat"
+_FEISHU_ROOT_DEPARTMENT_ID = "0"
+_FEISHU_ROOT_DEPARTMENT_NAME = "企业根部门"
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectoryIdentity:
+    display_name: str
+    departments: tuple[tuple[str, str], ...]
 
 
 class ProductAuthError(Exception):
@@ -49,10 +64,12 @@ class ProductAuthService:
         db: AsyncSession,
         redis_client: Any | None,
         http_client: httpx.AsyncClient | None = None,
+        directory_client: FeishuClient | None = None,
     ):
         self._db = db
         self._redis = redis_client
         self._http_client = http_client
+        self._directory_client = directory_client
         self._app_id = os.environ.get("FEISHU_APP_ID", "").strip()
         self._app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
         self._redirect_uri = os.environ.get("FEISHU_PRODUCT_REDIRECT_URI", "").strip()
@@ -101,46 +118,59 @@ class ProductAuthService:
         open_id = self._profile_string(profile, "open_id")
         feishu_user_id = self._profile_string(profile, "user_id")
         tenant_key = self._profile_string(profile, "tenant_key")
-        if not open_id or not tenant_key:
+        if not open_id or not feishu_user_id or not tenant_key:
             raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
 
-        result = await self._db.execute(
-            select(FeishuUserBinding).where(FeishuUserBinding.feishu_open_id == open_id)
-        )
+        result = await self._db.execute(select(FeishuUserBinding).where(FeishuUserBinding.feishu_open_id == open_id))
         binding = result.scalar_one_or_none()
-        if binding is not None:
-            return await self._resolve_existing_binding(binding, profile, feishu_user_id, tenant_key)
-
-        if not feishu_user_id:
-            raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
-
-        result = await self._db.execute(
-            select(User).where(User.uid == feishu_user_id, User.is_deleted == 0)
-        )
-        user = result.scalar_one_or_none()
-        if user is None or user.department_id is None:
-            raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
-
-        result = await self._db.execute(
-            select(FeishuUserBinding).where(FeishuUserBinding.user_id == user.id)
-        )
-        if result.scalar_one_or_none() is not None:
-            raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
-
-        binding = FeishuUserBinding(
-            user_id=user.id,
-            feishu_open_id=open_id,
+        identity = await self._resolve_directory_identity(
             feishu_user_id=feishu_user_id,
-            feishu_union_id=self._profile_string(profile, "union_id"),
-            tenant_key=tenant_key,
-            display_name=self._profile_string(profile, "name") or user.username,
-            avatar_url=self._profile_string(profile, "avatar_url"),
-            authorization_status=AuthorizationStatus.ACTIVE,
-            last_login_at=utc_now_naive(),
+            open_id=open_id,
+            fallback_name=self._profile_string(profile, "name") or feishu_user_id,
         )
-        self._db.add(binding)
-        user.last_login = utc_now_naive()
+        if binding is not None:
+            return await self._resolve_existing_binding(
+                binding,
+                profile,
+                feishu_user_id,
+                tenant_key,
+                identity,
+            )
+
+        result = await self._db.execute(select(User).where(User.uid == feishu_user_id))
+        user = result.scalar_one_or_none()
+        if user is not None and user.is_deleted != 0:
+            raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
+
         try:
+            if user is None:
+                user = User(
+                    username=await self._available_username(identity.display_name, feishu_user_id),
+                    uid=feishu_user_id,
+                    avatar=self._profile_string(profile, "avatar_url"),
+                    password_hash=AuthUtils.hash_password(secrets.token_urlsafe(32)),
+                    role="user",
+                )
+                self._db.add(user)
+                await self._db.flush()
+            else:
+                result = await self._db.execute(select(FeishuUserBinding).where(FeishuUserBinding.user_id == user.id))
+                if result.scalar_one_or_none() is not None:
+                    raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
+
+            binding = FeishuUserBinding(
+                user_id=user.id,
+                feishu_open_id=open_id,
+                feishu_user_id=feishu_user_id,
+                feishu_union_id=self._profile_string(profile, "union_id"),
+                tenant_key=tenant_key,
+                display_name=identity.display_name,
+                avatar_url=self._profile_string(profile, "avatar_url"),
+                authorization_status=AuthorizationStatus.ACTIVE,
+                last_login_at=utc_now_naive(),
+            )
+            self._db.add(binding)
+            await self._sync_user(user, binding, profile, tenant_key, identity)
             await self._db.commit()
         except IntegrityError as exc:
             await self._db.rollback()
@@ -154,6 +184,7 @@ class ProductAuthService:
                     profile,
                     feishu_user_id,
                     tenant_key,
+                    identity,
                 )
             raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403) from exc
         return user
@@ -164,27 +195,192 @@ class ProductAuthService:
         profile: dict[str, Any],
         feishu_user_id: str | None,
         tenant_key: str,
+        identity: _DirectoryIdentity,
     ) -> User:
         if binding.authorization_status != AuthorizationStatus.ACTIVE or binding.tenant_key != tenant_key:
             raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
         if binding.feishu_user_id and binding.feishu_user_id != feishu_user_id:
             raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
 
-        result = await self._db.execute(
-            select(User).where(User.id == binding.user_id, User.is_deleted == 0)
-        )
+        result = await self._db.execute(select(User).where(User.id == binding.user_id, User.is_deleted == 0))
         user = result.scalar_one_or_none()
-        if user is None or user.department_id is None:
+        if user is None:
             raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
 
         binding.feishu_user_id = binding.feishu_user_id or feishu_user_id
         binding.feishu_union_id = self._profile_string(profile, "union_id")
-        binding.display_name = self._profile_string(profile, "name") or binding.display_name
-        binding.avatar_url = self._profile_string(profile, "avatar_url")
-        binding.last_login_at = utc_now_naive()
-        user.last_login = utc_now_naive()
+        await self._sync_user(user, binding, profile, tenant_key, identity)
         await self._db.commit()
         return user
+
+    async def _sync_user(
+        self,
+        user: User,
+        binding: FeishuUserBinding,
+        profile: dict[str, Any],
+        tenant_key: str,
+        identity: _DirectoryIdentity,
+    ) -> None:
+        user.username = await self._available_username(identity.display_name, user.uid, user_id=user.id)
+        user.avatar = self._profile_string(profile, "avatar_url")
+        user.last_login = utc_now_naive()
+        binding.display_name = identity.display_name
+        binding.avatar_url = user.avatar
+        binding.last_login_at = utc_now_naive()
+        await self._sync_departments(user, tenant_key, identity.departments)
+
+    async def _sync_departments(
+        self,
+        user: User,
+        tenant_key: str,
+        departments: tuple[tuple[str, str], ...],
+    ) -> None:
+        department_bindings: list[FeishuDepartmentBinding] = []
+        for feishu_department_id, display_name in departments:
+            result = await self._db.execute(
+                select(FeishuDepartmentBinding).where(
+                    FeishuDepartmentBinding.tenant_key == tenant_key,
+                    FeishuDepartmentBinding.feishu_department_id == feishu_department_id,
+                )
+            )
+            department_binding = result.scalar_one_or_none()
+            if department_binding is None:
+                department = await self._resolve_local_department(
+                    tenant_key,
+                    feishu_department_id,
+                    display_name,
+                )
+                department_binding = FeishuDepartmentBinding(
+                    tenant_key=tenant_key,
+                    feishu_department_id=feishu_department_id,
+                    department_id=department.id,
+                    display_name=display_name,
+                )
+                self._db.add(department_binding)
+                await self._db.flush()
+            else:
+                department_binding.display_name = display_name
+            department_bindings.append(department_binding)
+
+        await self._db.execute(
+            delete(FeishuUserDepartmentMembership).where(FeishuUserDepartmentMembership.user_id == user.id)
+        )
+        for position, department_binding in enumerate(department_bindings):
+            self._db.add(
+                FeishuUserDepartmentMembership(
+                    user_id=user.id,
+                    department_binding_id=department_binding.id,
+                    position=position,
+                )
+            )
+        primary_binding = next(
+            (binding for binding in department_bindings if binding.feishu_department_id != _FEISHU_ROOT_DEPARTMENT_ID),
+            department_bindings[0],
+        )
+        user.department_id = primary_binding.department_id
+
+    async def _resolve_local_department(
+        self,
+        tenant_key: str,
+        feishu_department_id: str,
+        display_name: str,
+    ) -> Department:
+        result = await self._db.execute(select(Department).where(Department.name == display_name))
+        department = result.scalar_one_or_none()
+        if department is not None:
+            mapped = await self._db.scalar(
+                select(FeishuDepartmentBinding.id).where(FeishuDepartmentBinding.department_id == department.id)
+            )
+            if mapped is None:
+                return department
+
+        suffix = hashlib.sha256(f"{tenant_key}\0{feishu_department_id}".encode()).hexdigest()[:8]
+        unique_name = f"{display_name[:39]} ({suffix})"
+        existing = await self._db.scalar(select(Department).where(Department.name == unique_name))
+        if existing is not None:
+            return existing
+
+        department = Department(name=unique_name)
+        self._db.add(department)
+        await self._db.flush()
+        return department
+
+    async def _available_username(
+        self,
+        display_name: str,
+        feishu_user_id: str,
+        *,
+        user_id: int | None = None,
+    ) -> str:
+        query = select(User.id).where(User.username == display_name)
+        if user_id is not None:
+            query = query.where(User.id != user_id)
+        if await self._db.scalar(query) is None:
+            return display_name
+        suffix = hashlib.sha256(feishu_user_id.encode()).hexdigest()[:8]
+        return f"{display_name} ({suffix})"
+
+    async def _resolve_directory_identity(
+        self,
+        *,
+        feishu_user_id: str,
+        open_id: str,
+        fallback_name: str,
+    ) -> _DirectoryIdentity:
+        owns_client = self._directory_client is None
+        directory_client = self._directory_client or FeishuClient()
+        try:
+            employee = await directory_client.get_employee(feishu_user_id)
+            employee_user_id = self._profile_string(employee, "user_id")
+            employee_open_id = self._profile_string(employee, "open_id")
+            if employee_user_id != feishu_user_id or (employee_open_id and employee_open_id != open_id):
+                raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
+
+            status = employee.get("status")
+            if not isinstance(status, dict):
+                raise ProductAuthError("FEISHU_DIRECTORY_UNAVAILABLE", 503)
+            blocked = any(status.get(key) is True for key in ("is_frozen", "is_resigned", "is_exited", "is_unjoin"))
+            if status.get("is_activated") is not True or blocked:
+                raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
+
+            raw_department_ids = employee.get("department_ids")
+            if not isinstance(raw_department_ids, list):
+                raise ProductAuthError("FEISHU_DIRECTORY_UNAVAILABLE", 503)
+            department_ids = tuple(
+                dict.fromkeys(value.strip() for value in raw_department_ids if isinstance(value, str) and value.strip())
+            )
+            if not department_ids:
+                raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
+
+            departments: list[tuple[str, str]] = []
+            for department_id in department_ids:
+                department = await directory_client.get_department(department_id)
+                returned_id = self._profile_string(
+                    department,
+                    "open_department_id",
+                ) or self._profile_string(department, "department_id")
+                display_name = self._profile_string(department, "name")
+                if returned_id and returned_id != department_id:
+                    raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403)
+                if not display_name and department_id == _FEISHU_ROOT_DEPARTMENT_ID:
+                    display_name = _FEISHU_ROOT_DEPARTMENT_NAME
+                if not display_name:
+                    raise ProductAuthError("FEISHU_DIRECTORY_UNAVAILABLE", 503)
+                departments.append((department_id, display_name))
+
+            return _DirectoryIdentity(
+                display_name=self._profile_string(employee, "name") or fallback_name,
+                departments=tuple(departments),
+            )
+        except ProductAuthError:
+            raise
+        except FeishuNotFoundError as exc:
+            raise ProductAuthError("IDENTITY_MAPPING_REQUIRED", 403) from exc
+        except (FeishuClientError, ValueError) as exc:
+            raise ProductAuthError("FEISHU_DIRECTORY_UNAVAILABLE", 503) from exc
+        finally:
+            if owns_client:
+                await directory_client.aclose()
 
     async def _consume_state(self, state: str | None) -> dict[str, Any]:
         if not state:

@@ -47,7 +47,7 @@ class YuxiClient:
         self.close()
 
     def health(self) -> dict:
-        return self._request("GET", "/system/health", auth=False)
+        return self._request("GET", "/system/healthz", auth=False)
 
     def discovery(self) -> dict:
         return self._request("GET", "/system/discovery", auth=False)

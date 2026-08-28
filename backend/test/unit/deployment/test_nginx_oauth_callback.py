@@ -22,7 +22,7 @@ def test_feishu_callback_uses_safe_logging_and_preserves_proxying(callback_path)
     assert "error_log /dev/null;" in callback_location
     assert "proxy_pass http://api:5050;" in callback_location
     assert "proxy_set_header Host $host;" in callback_location
-    assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in callback_location
+    assert "proxy_set_header X-Forwarded-For $remote_addr;" in callback_location
 
 
 def test_feishu_callback_log_format_excludes_query_and_headers():
