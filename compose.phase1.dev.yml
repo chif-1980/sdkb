@@ -1,0 +1,7 @@
+services:
+  web:
+    volumes: !override
+      - ./web/src:/app/src
+      - ./web/public:/app/public
+      - ./web/index.html:/app/index.html
+      - ./web/vite.config.js:/app/vite.config.js

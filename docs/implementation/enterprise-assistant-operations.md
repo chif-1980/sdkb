@@ -48,6 +48,16 @@ docker compose --project-name quickdone-kb-yuxi \
   up -d --build api worker
 ```
 
+本地开发管理端时，叠加开发覆盖文件启动 `web`：
+
+```bash
+docker compose --project-name quickdone-kb-yuxi \
+  -f compose.phase1.yml -f compose.phase1.dev.yml \
+  --env-file .env up -d --build --no-deps web
+```
+
+该覆盖文件会把 `web/src`、`web/public`、`web/index.html` 和 `web/vite.config.js` 映射进开发容器。之后修改前端源码会由 Vite 自动热更新，刷新 `http://127.0.0.1:5173` 即可看到最新内容。`compose.phase1.dev.yml` 仅用于本地开发；生产环境继续使用 `docker-compose.prod.yml` 构建固定镜像，不挂载前端源码。
+
 ## 3. 启动独立问答前端
 
 在 React 企业知识助手仓库执行：
