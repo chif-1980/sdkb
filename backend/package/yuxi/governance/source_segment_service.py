@@ -224,7 +224,7 @@ def _split_pdf_pages(text: str) -> list[StructuralBlock]:
         blocks.extend(_generic_blocks("\n".join(lines), base_locator=locator))
         lines = []
     if lines:
-        locator = {"page": len({block.locator.get('page') for block in blocks if block.locator.get('page')}) + 1}
+        locator = {"page": len({block.locator.get("page") for block in blocks if block.locator.get("page")}) + 1}
         blocks.extend(_generic_blocks("\n".join(lines), base_locator=locator if found_marker else None))
     return blocks
 
@@ -566,8 +566,11 @@ class SourceSegmentService:
         *,
         file_id: str,
         document_title: str,
+        excluded_segment_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         segments = await self.list_active(version_id)
+        if excluded_segment_ids:
+            segments = [segment for segment in segments if segment.segment_id not in excluded_segment_ids]
         return build_retrieval_chunks(segments, file_id=file_id, document_title=document_title)
 
 

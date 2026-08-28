@@ -21,6 +21,7 @@ from server.routers.feishu_knowledge_router import (
 from server.utils.auth_middleware import get_admin_user, get_db
 from yuxi.governance.domain import ReviewAction, ReviewDecision
 from yuxi.governance.duplicate_knowledge_service import DuplicateKnowledgeService
+from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
 from yuxi.governance.presentation_layout_service import (
     extract_pptx_layout,
     render_pptx_slide,
@@ -33,12 +34,16 @@ from yuxi.governance.document_layout_service import (
 from yuxi.governance.review_package_service import ReviewPackageService
 from yuxi.governance.schemas import (
     DuplicateRelationResolutionRequest,
+    KnowledgeRevisionRequest,
+    KnowledgeUnitLifecycleRequest,
+    KnowledgeUnitMetadataRequest,
     ReviewPackageBulkExcludeRequest,
     ReviewPackageDraftRequest,
     ReviewLayoutEditRequest,
     ReviewPackageResolveRequest,
     ReviewPackageTransferRequest,
     ReviewResolveRequest,
+    SourceLifecycleRequest,
     SourceChangeRequestCancelRequest,
 )
 from yuxi.governance.service import GovernanceService
@@ -1099,3 +1104,212 @@ async def list_knowledge_versions(knowledge_id: str, db: AsyncSession = Depends(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"items": items}
+
+
+async def _enqueue_lifecycle_publish(
+    db: AsyncSession,
+    version_id: str,
+    *,
+    operator_id: str,
+):
+    try:
+        return await _enqueue_publish(version_id, operator_id=operator_id)
+    except Exception as exc:
+        await FeishuReviewService(db).mark_publish_failed(version_id, message=str(exc))
+        await db.commit()
+        raise HTTPException(status_code=503, detail="知识索引任务启动失败，原状态已恢复") from exc
+
+
+@governance.patch("/knowledge-units/{unit_id}/metadata")
+async def update_knowledge_unit_metadata(
+    unit_id: str,
+    payload: KnowledgeUnitMetadataRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        unit = await KnowledgeLifecycleService(db).update_unit_metadata(
+            unit_id,
+            owner_id=payload.owner_id,
+            owner_name=payload.owner_name,
+            valid_from=payload.valid_from,
+            valid_until=payload.valid_until,
+            review_due_at=payload.review_due_at,
+            operator_id=current_user.uid,
+        )
+        await db.commit()
+        return {"unit_id": unit.unit_id, "status": "updated"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+async def _transition_knowledge_unit(
+    unit_id: str,
+    *,
+    target: str,
+    payload: KnowledgeUnitLifecycleRequest,
+    db: AsyncSession,
+    current_user: User,
+):
+    try:
+        result = await KnowledgeLifecycleService(db).queue_unit_transition(
+            unit_id,
+            target=target,
+            reason=payload.reason,
+            operator_id=current_user.uid,
+        )
+        await db.commit()
+        task = None
+        if result["enqueue_required"]:
+            task = await _enqueue_lifecycle_publish(
+                db,
+                result["version_id"],
+                operator_id=current_user.uid,
+            )
+        return {**result, "publish_task_id": task.id if task else None}
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@governance.post("/knowledge-units/{unit_id}/offline", status_code=202)
+async def offline_knowledge_unit(
+    unit_id: str,
+    payload: KnowledgeUnitLifecycleRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    return await _transition_knowledge_unit(
+        unit_id,
+        target="OFFLINE",
+        payload=payload,
+        db=db,
+        current_user=current_user,
+    )
+
+
+@governance.post("/knowledge-units/{unit_id}/restore", status_code=202)
+async def restore_knowledge_unit(
+    unit_id: str,
+    payload: KnowledgeUnitLifecycleRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    return await _transition_knowledge_unit(
+        unit_id,
+        target="ACTIVE",
+        payload=payload,
+        db=db,
+        current_user=current_user,
+    )
+
+
+@governance.post("/knowledge-units/{unit_id}/revision", status_code=201)
+async def create_knowledge_unit_revision(
+    unit_id: str,
+    payload: KnowledgeRevisionRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        result = await KnowledgeLifecycleService(db).create_revision_request(
+            unit_id,
+            trigger_type="LIFECYCLE",
+            reason=payload.reason,
+            operator_id=current_user.uid,
+        )
+        await db.commit()
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@governance.post("/knowledge/{item_id}/offline")
+async def offline_knowledge_source(
+    item_id: str,
+    payload: SourceLifecycleRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        item = await FeishuReviewService(db).offline_source(
+            item_id,
+            operator_id=current_user.uid,
+            reason=payload.reason,
+        )
+        return {"item_id": item.item_id, "publication_status": item.publication_status}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"知识索引下架失败：{exc}") from exc
+
+
+@governance.post("/knowledge/{item_id}/restore", status_code=202)
+async def restore_knowledge_source(
+    item_id: str,
+    payload: SourceLifecycleRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        version = await FeishuReviewService(db).queue_source_restore(
+            item_id,
+            operator_id=current_user.uid,
+            reason=payload.reason,
+        )
+        await db.commit()
+        task = None
+        if version.processing_status == "publish_queued":
+            task = await _enqueue_lifecycle_publish(db, version.version_id, operator_id=current_user.uid)
+        return {
+            "item_id": item_id,
+            "version_id": version.version_id,
+            "publish_task_id": task.id if task else None,
+        }
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@governance.post("/knowledge/{item_id}/versions/{version_id}/rollback", status_code=202)
+async def rollback_knowledge_source(
+    item_id: str,
+    version_id: str,
+    payload: SourceLifecycleRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        version = await FeishuReviewService(db).queue_source_rollback(
+            item_id,
+            version_id,
+            operator_id=current_user.uid,
+            reason=payload.reason,
+        )
+        await db.commit()
+        task = None
+        if version.processing_status == "publish_queued":
+            task = await _enqueue_lifecycle_publish(db, version.version_id, operator_id=current_user.uid)
+        return {
+            "item_id": item_id,
+            "version_id": version.version_id,
+            "publish_task_id": task.id if task else None,
+        }
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

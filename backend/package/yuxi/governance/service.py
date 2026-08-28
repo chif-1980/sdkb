@@ -21,9 +21,12 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuKnowledgeUnit,
     FeishuMaterialVersion,
     FeishuProcessingEvent,
+    FeishuReviewItem,
+    FeishuReviewPackage,
     FeishuSource,
     FeishuSourceItem,
 )
+from yuxi.utils.datetime_utils import coerce_datetime
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -259,15 +262,54 @@ class GovernanceService:
             .where(
                 FeishuSourceItem.source_id == source_id,
                 FeishuSourceItem.source_validity == "valid",
-                FeishuMaterialVersion.processing_status == "published",
                 FeishuMaterialVersion.review_status == "approved",
                 FeishuMaterialVersion.published_at.is_not(None),
-                FeishuMaterialVersion.yuxi_file_id.is_not(None),
             )
             .order_by(FeishuMaterialVersion.published_at.desc())
         )
         rows = (await self.session.execute(statement)).all()
         version_ids = [version.version_id for _, version, _ in rows]
+        item_ids = [item.item_id for item, _, _ in rows]
+        pending_updates_by_item: dict[str, dict] = {}
+        if item_ids:
+            pending_update_rows = (
+                await self.session.execute(
+                    select(FeishuReviewPackage, FeishuMaterialVersion)
+                    .join(
+                        FeishuMaterialVersion,
+                        FeishuMaterialVersion.version_id == FeishuReviewPackage.source_version_id,
+                    )
+                    .join(FeishuReviewItem, FeishuReviewItem.package_id == FeishuReviewPackage.package_id)
+                    .where(
+                        FeishuReviewPackage.source_item_id.in_(item_ids),
+                        FeishuReviewPackage.workflow_status.not_in({"COMPLETED", "INVALIDATED"}),
+                        FeishuMaterialVersion.version_id.not_in(version_ids),
+                        FeishuMaterialVersion.review_status.in_({"pending", "changes_requested"}),
+                        FeishuReviewItem.review_type == "UPDATE",
+                        FeishuReviewItem.item_status.in_(
+                            {
+                                "PENDING",
+                                "WAITING_SOURCE_CHANGE",
+                                "WAITING_BUSINESS_CONFIRMATION",
+                                "SOURCE_UPDATED",
+                            }
+                        ),
+                    )
+                    .order_by(FeishuReviewPackage.created_at.desc())
+                )
+            ).unique().all()
+            source_updated_at_by_item = {item.item_id: item.source_updated_at for item, _, _ in rows}
+            for package, pending_version in pending_update_rows:
+                pending_updates_by_item.setdefault(
+                    package.source_item_id,
+                    {
+                        "version_id": pending_version.version_id,
+                        "revision": pending_version.revision,
+                        "detected_at": _iso(pending_version.created_at),
+                        "source_updated_at": _iso(source_updated_at_by_item.get(package.source_item_id)),
+                        "review_package_id": package.package_id,
+                    },
+                )
         units_by_version: dict[str, list[FeishuKnowledgeUnit]] = {}
         if version_ids:
             units = list(
@@ -289,6 +331,12 @@ class GovernanceService:
             units = units_by_version.get(version.version_id, [])
             if units:
                 for unit in units:
+                    lifecycle_status = self._unit_lifecycle_status(unit, item.publication_status)
+                    indexed = (
+                        item.publication_status == "ACTIVE"
+                        and unit.lifecycle_status == "ACTIVE"
+                        and bool(version.yuxi_file_id)
+                    )
                     result.append(
                         {
                             "knowledge_id": unit.matched_logical_knowledge_id or f"{item.item_id}:{unit.lineage_key}",
@@ -309,12 +357,24 @@ class GovernanceService:
                             "source_segment_count": len(unit.source_segment_ids or []),
                             "source_locator": dict(unit.locator_json or {}),
                             "applicability_scope": (version.processing_params or {}).get("applicability_scope", {}),
-                            "index_status": "INDEXED",
+                            "index_status": "INDEXED" if indexed else "OFFLINE",
+                            "lifecycle_status": lifecycle_status,
+                            "stored_lifecycle_status": unit.lifecycle_status,
+                            "source_publication_status": item.publication_status,
+                            "owner_id": unit.owner_id,
+                            "owner_name": unit.owner_name,
+                            "valid_from": _iso(unit.valid_from),
+                            "valid_until": _iso(unit.valid_until),
+                            "review_due_at": _iso(unit.review_due_at),
+                            "lifecycle_note": unit.lifecycle_note,
+                            "lifecycle_updated_by": unit.lifecycle_updated_by,
+                            "lifecycle_updated_at": _iso(unit.lifecycle_updated_at),
                             "yuxi_file_id": version.yuxi_file_id,
                             "chunk_count": version.chunk_count or 0,
                             "published_at": _iso(version.published_at),
                             "updated_at": _iso(unit.updated_at or version.updated_at),
                             "target_kb_id": source.target_kb_id,
+                            "pending_update": pending_updates_by_item.get(item.item_id),
                         }
                     )
                 continue
@@ -339,15 +399,34 @@ class GovernanceService:
                     "source_segment_count": 0,
                     "source_locator": {},
                     "applicability_scope": (version.processing_params or {}).get("applicability_scope", {}),
-                    "index_status": "INDEXED",
+                    "index_status": (
+                        "INDEXED" if item.publication_status == "ACTIVE" and version.yuxi_file_id else "OFFLINE"
+                    ),
+                    "lifecycle_status": "ACTIVE" if item.publication_status == "ACTIVE" else "OFFLINE",
+                    "stored_lifecycle_status": "ACTIVE",
+                    "source_publication_status": item.publication_status,
                     "yuxi_file_id": version.yuxi_file_id,
                     "chunk_count": version.chunk_count or 0,
                     "published_at": _iso(version.published_at),
                     "updated_at": _iso(version.updated_at),
                     "target_kb_id": source.target_kb_id,
+                    "pending_update": pending_updates_by_item.get(item.item_id),
                 }
             )
         return result
+
+    @staticmethod
+    def _unit_lifecycle_status(unit: FeishuKnowledgeUnit, source_status: str | None) -> str:
+        if source_status != "ACTIVE" or unit.lifecycle_status == "OFFLINE":
+            return "OFFLINE"
+        now = datetime.now(UTC)
+        valid_until = coerce_datetime(unit.valid_until)
+        if valid_until and valid_until <= now:
+            return "EXPIRED"
+        review_due_at = coerce_datetime(unit.review_due_at)
+        if review_due_at and review_due_at <= now:
+            return "REVIEW_DUE"
+        return "ACTIVE"
 
     async def list_knowledge_versions(self, knowledge_id: str) -> list[dict]:
         item = await self.session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == knowledge_id))
@@ -367,6 +446,12 @@ class GovernanceService:
                 "processing_status": version.processing_status,
                 "review_status": version.review_status,
                 "active": item.active_version_id == version.version_id,
+                "rollback_available": (
+                    item.active_version_id != version.version_id
+                    and version.review_status == "approved"
+                    and version.published_at is not None
+                    and bool(version.source_object_path)
+                ),
                 "yuxi_file_id": version.yuxi_file_id,
                 "published_at": _iso(version.published_at),
                 "created_at": _iso(version.created_at),

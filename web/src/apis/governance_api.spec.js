@@ -152,4 +152,53 @@ describe('governanceApi', () => {
       'blob'
     )
   })
+
+  it('正式知识治理接口编码标识并保留操作原因', () => {
+    const metadata = {
+      owner_id: 'admin-1',
+      owner_name: '知识负责人',
+      valid_from: '2026-08-01T00:00:00Z',
+      valid_until: null,
+      review_due_at: '2026-12-01T00:00:00Z'
+    }
+
+    governanceApi.updateKnowledgeUnitMetadata('unit/1', metadata)
+    governanceApi.offlineKnowledgeUnit('unit/1', '内容已过时')
+    governanceApi.restoreKnowledgeUnit('unit/1', '内容已确认有效')
+    governanceApi.createKnowledgeRevision('unit/1', '原文需要修正')
+    governanceApi.offlineKnowledgeSource('item/1', '整篇内容过时')
+    governanceApi.restoreKnowledgeSource('item/1', '整篇重新启用')
+    governanceApi.rollbackKnowledgeSource('item/1', 'version/2', '恢复稳定版本')
+
+    expect(apiAdminPatch).toHaveBeenCalledWith(
+      '/api/governance/knowledge-units/unit%2F1/metadata',
+      metadata
+    )
+    expect(apiAdminPost).toHaveBeenNthCalledWith(
+      1,
+      '/api/governance/knowledge-units/unit%2F1/offline',
+      { reason: '内容已过时' }
+    )
+    expect(apiAdminPost).toHaveBeenNthCalledWith(
+      2,
+      '/api/governance/knowledge-units/unit%2F1/restore',
+      { reason: '内容已确认有效' }
+    )
+    expect(apiAdminPost).toHaveBeenNthCalledWith(
+      3,
+      '/api/governance/knowledge-units/unit%2F1/revision',
+      { reason: '原文需要修正' }
+    )
+    expect(apiAdminPost).toHaveBeenNthCalledWith(4, '/api/governance/knowledge/item%2F1/offline', {
+      reason: '整篇内容过时'
+    })
+    expect(apiAdminPost).toHaveBeenNthCalledWith(5, '/api/governance/knowledge/item%2F1/restore', {
+      reason: '整篇重新启用'
+    })
+    expect(apiAdminPost).toHaveBeenNthCalledWith(
+      6,
+      '/api/governance/knowledge/item%2F1/versions/version%2F2/rollback',
+      { reason: '恢复稳定版本' }
+    )
+  })
 })

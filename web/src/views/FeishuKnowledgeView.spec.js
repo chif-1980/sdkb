@@ -108,11 +108,17 @@ function mountView() {
         FeishuMaterialDetailDrawer: true,
         FeishuReviewWorkspace: {
           name: 'FeishuReviewWorkspace',
+          props: ['sourceId', 'targetReviewId'],
           emits: ['knowledge-change'],
           template: '<div data-testid="review-workspace" />'
         },
         FeishuRelationsPanel: true,
-        FeishuFormalKnowledgePanel: true
+        FeishuFormalKnowledgePanel: {
+          name: 'FeishuFormalKnowledgePanel',
+          props: ['sourceId'],
+          emits: ['count-change', 'open-update-review'],
+          template: '<div data-testid="formal-knowledge-panel" />'
+        }
       }
     }
   })
@@ -723,6 +729,29 @@ describe('FeishuKnowledgeView', () => {
     expect(relationTab.text()).toContain('838')
     expect(formalTab.text()).toContain('2')
     expect(apiAdminGet).toHaveBeenCalledWith('/api/governance/knowledge?source_id=source-1')
+    wrapper.unmount()
+  })
+
+  it('从正式知识的更新提示进入对应审核任务', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const formalTab = wrapper
+      .findAll('.governance-tab')
+      .find((tab) => tab.text().includes('正式知识'))
+    await formalTab.trigger('click')
+    await wrapper.vm.$nextTick()
+
+    wrapper.findComponent({ name: 'FeishuFormalKnowledgePanel' }).vm.$emit('open-update-review', {
+      packageId: 'package-update-13',
+      sourceVersionId: 'version-13'
+    })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findComponent({ name: 'FeishuReviewWorkspace' }).props('targetReviewId')).toEqual({
+      packageId: 'package-update-13',
+      sourceVersionId: 'version-13'
+    })
     wrapper.unmount()
   })
 

@@ -184,6 +184,7 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         "CREATE INDEX IF NOT EXISTS ix_message_citations_message_id ON message_citations (message_id)",
         "CREATE INDEX IF NOT EXISTS ix_message_citations_version_id ON message_citations (version_id)",
     }
+    chunk_id_migration = "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS chunk_id VARCHAR(128)"
     statement_counts = Counter(connection.statements)
     for statement in expected_indexes:
         assert statement_counts[statement] == 2
@@ -192,8 +193,10 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         statement for statement in connection.statements if "ALTER COLUMN locator TYPE TEXT" in statement
     ]
     assert len(migration_statements) == 2
-    assert len(connection.statements) == 2 * (len(expected_indexes) + 1)
-    assert connection.statements[0] == connection.statements[5] == migration_statements[0]
+    assert statement_counts[chunk_id_migration] == 2
+    assert len(connection.statements) == 2 * (len(expected_indexes) + 2)
+    statements_per_run = len(expected_indexes) + 2
+    assert connection.statements[0] == connection.statements[statements_per_run] == migration_statements[0]
     assert all(statement == migration_statements[0] for statement in migration_statements)
     locator_type_check = "data_type IN ('json', 'jsonb')"
     exclusive_lock = "LOCK TABLE message_citations IN ACCESS EXCLUSIVE MODE"
@@ -320,6 +323,7 @@ async def test_product_schema_is_idempotent_in_real_postgres():
                 "item_id",
                 "version_id",
                 "yuxi_file_id",
+                "chunk_id",
                 "title",
                 "source_url",
                 "path_text",

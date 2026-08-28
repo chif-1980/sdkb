@@ -169,6 +169,7 @@ class PostgresManager(metaclass=SingletonMeta):
             ),
             "CREATE INDEX IF NOT EXISTS ix_message_citations_message_id ON message_citations (message_id)",
             "CREATE INDEX IF NOT EXISTS ix_message_citations_version_id ON message_citations (version_id)",
+            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS chunk_id VARCHAR(128)",
         ]
 
         async with self.async_engine.begin() as conn:
@@ -532,6 +533,33 @@ class PostgresManager(metaclass=SingletonMeta):
             END $$;
             """,
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_source_items_item_key ON feishu_source_items(item_key)",
+            (
+                "ALTER TABLE IF EXISTS feishu_source_items "
+                "ADD COLUMN IF NOT EXISTS publication_status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE'"
+            ),
+            "ALTER TABLE IF EXISTS feishu_source_items ADD COLUMN IF NOT EXISTS lifecycle_note TEXT",
+            "ALTER TABLE IF EXISTS feishu_source_items ADD COLUMN IF NOT EXISTS lifecycle_updated_by VARCHAR(64)",
+            "ALTER TABLE IF EXISTS feishu_source_items ADD COLUMN IF NOT EXISTS lifecycle_updated_at TIMESTAMPTZ",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_source_items_publication_status "
+                "ON feishu_source_items(publication_status)"
+            ),
+            (
+                "ALTER TABLE IF EXISTS feishu_knowledge_units "
+                "ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE'"
+            ),
+            "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS owner_id VARCHAR(64)",
+            "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS owner_name VARCHAR(255)",
+            "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS review_due_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_note TEXT",
+            "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_updated_by VARCHAR(64)",
+            "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_updated_at TIMESTAMPTZ",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_knowledge_units_lifecycle_status "
+                "ON feishu_knowledge_units(lifecycle_status)"
+            ),
             (
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_feishu_material_versions_identity "
                 "ON feishu_material_versions(item_id, revision, content_hash)"

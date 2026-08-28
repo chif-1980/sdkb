@@ -282,14 +282,9 @@ class ProductChatRepository:
         message = result.scalar_one_or_none()
         if message is None:
             raise ProductMessageNotFoundError
-        try:
-            message.feedback_rating = rating
-            await self.session.commit()
-            await self.session.refresh(message)
-            return message
-        except Exception:
-            await self.session.rollback()
-            raise
+        message.feedback_rating = rating
+        await self.session.flush()
+        return message
 
     async def append_exchange(
         self,
@@ -338,6 +333,7 @@ class ProductChatRepository:
                 item_id=citation.item_id,
                 version_id=citation.version_id,
                 yuxi_file_id=citation.yuxi_file_id,
+                chunk_id=citation.chunk_id,
                 title=citation.title,
                 source_url=citation.source_url,
                 path_text=citation.path_text,
@@ -387,6 +383,7 @@ class ProductChatRepository:
                 FeishuSource.enabled.is_(True),
                 FeishuSourceItem.source_id == source_id,
                 FeishuSourceItem.source_validity == "valid",
+                FeishuSourceItem.publication_status == "ACTIVE",
                 FeishuMaterialVersion.processing_status == "published",
                 FeishuMaterialVersion.review_status == "approved",
                 FeishuMaterialVersion.published_at.is_not(None),
@@ -462,14 +459,20 @@ class ProductChatRepository:
             chunk_references = list(by_chunk.get(chunk.chunk_id, []))
             for segment_id in segment_ids_by_chunk.get(chunk.chunk_id, ()):
                 chunk_references.extend(by_segment.get(segment_id, []))
-            logical_ids = tuple(
-                dict.fromkeys(reference.logical_knowledge_id for reference in chunk_references)
-            )
+            logical_ids = tuple(dict.fromkeys(reference.logical_knowledge_id for reference in chunk_references))
             roles = {str(reference.source_role) for reference in chunk_references}
             role = "PRIMARY" if "PRIMARY" in roles else "ALIAS" if "ALIAS" in roles else None
             tags = chunk.tags if isinstance(chunk.tags, dict) else {}
             result[chunk.chunk_id] = {
                 "logical_knowledge_ids": logical_ids,
+                "source_segment_ids": tuple(
+                    dict.fromkeys(
+                        [
+                            *segment_ids_by_chunk.get(chunk.chunk_id, ()),
+                            *[reference.segment_id for reference in chunk_references if reference.segment_id],
+                        ]
+                    )
+                ),
                 "source_role": role,
                 "locator": dict(tags.get("locator") or {}) if isinstance(tags.get("locator"), dict) else {},
                 "title_path": list(tags.get("title_path") or []) if isinstance(tags.get("title_path"), list) else [],
