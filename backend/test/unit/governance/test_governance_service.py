@@ -23,6 +23,8 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuGovernanceReview,
     FeishuKnowledgeUnit,
     FeishuMaterialVersion,
+    FeishuReviewItem,
+    FeishuReviewPackage,
     FeishuSource,
     FeishuSourceItem,
 )
@@ -266,6 +268,92 @@ async def test_formal_knowledge_only_returns_active_published_approved_version(g
     assert items[0]["current_version_id"] == "version-current"
     assert items[0]["index_status"] == "INDEXED"
     assert items[0]["source_role"] == "PRIMARY"
+    assert items[0]["pending_update"] is None
+
+
+async def test_formal_knowledge_exposes_open_update_package_for_each_unit(governance_session):
+    detected_at = datetime(2026, 8, 28, 8, 43, 16, tzinfo=UTC)
+    source_item = await governance_session.scalar(
+        select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-current")
+    )
+    source_item.source_updated_at = detected_at
+    governance_session.add_all(
+        [
+            FeishuMaterialVersion(
+                version_id="version-pending-update",
+                item_id="item-current",
+                revision="13",
+                content_hash="pending-update-hash",
+                processing_status="awaiting_review",
+                review_status="pending",
+                yuxi_file_id="file-pending-update",
+                created_at=detected_at,
+            ),
+            FeishuReviewPackage(
+                package_id="package-pending-update",
+                package_key="SOURCE_VERSION:version-pending-update",
+                source_id="source-1",
+                source_item_id="item-current",
+                source_version_id="version-pending-update",
+                trigger_type="SOURCE_VERSION",
+                title_snapshot="Q900 部署指南",
+                workflow_status="OPEN",
+                created_at=detected_at,
+            ),
+            FeishuReviewItem(
+                review_item_id="review-item-pending-update",
+                package_id="package-pending-update",
+                candidate_key="UPDATE:version-pending-update",
+                review_type="UPDATE",
+                subject_type="MATERIAL_VERSION",
+                subject_id="version-pending-update",
+                title="版本 1 更新为版本 13",
+                item_status="PENDING",
+            ),
+            FeishuKnowledgeUnit(
+                unit_id="unit-update-1",
+                unit_key="section:update-1",
+                lineage_key="section:update-1",
+                version_id="version-current",
+                item_id="item-current",
+                unit_index=0,
+                unit_type="SECTION",
+                title="更新测试单元一",
+                content="第一条正式知识。",
+                content_hash="unit-update-1-hash",
+                recommended_outcome="PUBLISH",
+                recommendation_reason="内容完整。",
+                publication_state="INCLUDED",
+            ),
+            FeishuKnowledgeUnit(
+                unit_id="unit-update-2",
+                unit_key="section:update-2",
+                lineage_key="section:update-2",
+                version_id="version-current",
+                item_id="item-current",
+                unit_index=1,
+                unit_type="SECTION",
+                title="更新测试单元二",
+                content="第二条正式知识。",
+                content_hash="unit-update-2-hash",
+                recommended_outcome="PUBLISH",
+                recommendation_reason="内容完整。",
+                publication_state="INCLUDED",
+            ),
+        ]
+    )
+    await governance_session.commit()
+
+    items = await GovernanceService(governance_session).list_formal_knowledge("source-1")
+
+    assert len(items) == 2
+    assert {item["revision"] for item in items} == {"1"}
+    assert {item["pending_update"]["version_id"] for item in items} == {"version-pending-update"}
+    assert {item["pending_update"]["revision"] for item in items} == {"13"}
+    assert {item["pending_update"]["review_package_id"] for item in items} == {
+        "package-pending-update"
+    }
+    assert all(item["pending_update"]["detected_at"].startswith("2026-08-28T08:43:16") for item in items)
 
 
 async def test_formal_knowledge_prefers_included_units_and_keeps_source_trace(governance_session):

@@ -329,6 +329,7 @@
           v-else-if="activeModule === 'formal'"
           :source-id="currentSourceId"
           @count-change="governanceCounts.formal = $event"
+          @open-update-review="openFormalKnowledgeUpdate"
         />
       </template>
 
@@ -471,6 +472,14 @@ function openGovernanceReview(relation) {
     relationId: relation.relation_id || '',
     sourceVersionId: relation.source_version_id || '',
     targetVersionId: relation.target_version_id || ''
+  }
+  activeModule.value = 'reviews'
+}
+
+function openFormalKnowledgeUpdate(target) {
+  governanceReviewTarget.value = {
+    packageId: target.packageId || '',
+    sourceVersionId: target.sourceVersionId || ''
   }
   activeModule.value = 'reviews'
 }

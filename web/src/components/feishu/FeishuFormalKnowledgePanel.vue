@@ -26,8 +26,27 @@
         <header class="source-group-header">
           <div class="source-group-title">
             <span class="source-eyebrow">来源材料</span>
-            <strong :title="group.title">{{ group.title }}</strong>
-            <span v-if="group.path" class="source-path" :title="group.path">{{ group.path }}</span>
+            <div class="source-title-row">
+              <strong :title="group.title">{{ group.title }}</strong>
+              <a-tag v-if="group.pendingUpdate" class="source-update-tag" color="orange">
+                有更新
+              </a-tag>
+              <button
+                v-if="group.pendingUpdate"
+                type="button"
+                class="source-update-action"
+                @click.stop="openUpdateReview(group)"
+              >
+                查看变更 <ChevronRight :size="13" />
+              </button>
+            </div>
+            <div class="source-detail-row">
+              <span v-if="group.path" class="source-path" :title="group.path">{{ group.path }}</span>
+              <span v-if="group.pendingUpdate" class="source-update-meta">
+                版本 {{ group.currentRevision }} → {{ group.pendingUpdate.revision }} · 检测于
+                {{ formatDetectedAt(group.pendingUpdate.detected_at) }}
+              </span>
+            </div>
           </div>
           <div class="source-group-summary">
             <a-tag :color="sourceStatusColor(group.sourcePublicationStatus)">
@@ -308,7 +327,7 @@ import {
 import { governanceApi } from '@/apis/governance_api'
 
 const props = defineProps({ sourceId: { type: String, default: '' } })
-const emit = defineEmits(['count-change'])
+const emit = defineEmits(['count-change', 'open-update-review'])
 const knowledge = ref([])
 const versions = ref([])
 const loading = ref(false)
@@ -408,11 +427,14 @@ const groupedKnowledge = computed(() => {
         sourceUrl: record.source_url || '',
         sourceItemId: record.source_item_id || '',
         sourcePublicationStatus: record.source_publication_status || 'ACTIVE',
+        currentRevision: record.revision || '',
+        pendingUpdate: record.pending_update || null,
         items: [],
         fragmentCount: 0
       })
     }
     const group = groups.get(key)
+    if (!group.pendingUpdate && record.pending_update) group.pendingUpdate = record.pending_update
     group.items.push(record)
     group.fragmentCount += record.source_segment_count || record.chunk_count || 0
   })
@@ -427,7 +449,7 @@ async function loadKnowledge() {
   try {
     const response = await governanceApi.listFormalKnowledge(props.sourceId)
     knowledge.value = response.items || []
-    collapsedGroups.value = new Set()
+    collapsedGroups.value = new Set(groupedKnowledge.value.map((group) => group.key))
     emit('count-change', knowledge.value.length)
   } catch (error) {
     message.error(governanceApi.getErrorMessage(error, '加载正式知识失败'))
@@ -445,6 +467,13 @@ function toggleGroup(key) {
   if (next.has(key)) next.delete(key)
   else next.add(key)
   collapsedGroups.value = next
+}
+
+function openUpdateReview(group) {
+  emit('open-update-review', {
+    packageId: group.pendingUpdate?.review_package_id || '',
+    sourceVersionId: group.pendingUpdate?.version_id || ''
+  })
 }
 
 async function openVersions(record) {
@@ -599,6 +628,13 @@ function sourceStatusColor(status) {
   }[status]
 }
 
+function formatDetectedAt(value) {
+  const date = value ? new Date(value) : null
+  if (!date || Number.isNaN(date.getTime())) return '时间未知'
+  const pad = (part) => String(part).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 function scopeSummary(scope) {
   if (!scope || !Object.keys(scope).length) return '未限定范围'
   return Object.values(scope).filter(Boolean).join(' · ')
@@ -694,6 +730,7 @@ function sourceLocatorLabel(record) {
 }
 .source-group-title {
   display: grid;
+  flex: 1 1 360px;
   min-width: 0;
   gap: 3px;
 }
@@ -703,7 +740,15 @@ function sourceLocatorLabel(record) {
   font-weight: 650;
   letter-spacing: 0.04em;
 }
-.source-group-title strong {
+.source-title-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+}
+.source-title-row strong {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--color-text);
   font-size: 14px;
@@ -711,11 +756,49 @@ function sourceLocatorLabel(record) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.source-update-tag {
+  flex: 0 0 auto;
+  margin-inline-end: 0;
+}
+.source-update-action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--main-700);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+.source-update-action:hover,
+.source-update-action:focus-visible {
+  color: var(--main-900);
+}
+.source-update-action:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--main-500) 45%, transparent);
+  outline-offset: 2px;
+}
+.source-detail-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
 .source-path {
+  min-width: 0;
   overflow: hidden;
   color: var(--color-text-tertiary);
   font-size: 11px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-update-meta {
+  flex: 0 0 auto;
+  color: var(--color-warning-text, #ad6800);
+  font-size: 11px;
   white-space: nowrap;
 }
 .source-group-summary {
@@ -1080,6 +1163,11 @@ function sourceLocatorLabel(record) {
   .source-group-summary {
     flex-wrap: wrap;
     gap: 8px 12px;
+  }
+  .source-detail-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
   }
   .knowledge-list-head {
     display: none;

@@ -21,6 +21,8 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuKnowledgeUnit,
     FeishuMaterialVersion,
     FeishuProcessingEvent,
+    FeishuReviewItem,
+    FeishuReviewPackage,
     FeishuSource,
     FeishuSourceItem,
 )
@@ -267,6 +269,47 @@ class GovernanceService:
         )
         rows = (await self.session.execute(statement)).all()
         version_ids = [version.version_id for _, version, _ in rows]
+        item_ids = [item.item_id for item, _, _ in rows]
+        pending_updates_by_item: dict[str, dict] = {}
+        if item_ids:
+            pending_update_rows = (
+                await self.session.execute(
+                    select(FeishuReviewPackage, FeishuMaterialVersion)
+                    .join(
+                        FeishuMaterialVersion,
+                        FeishuMaterialVersion.version_id == FeishuReviewPackage.source_version_id,
+                    )
+                    .join(FeishuReviewItem, FeishuReviewItem.package_id == FeishuReviewPackage.package_id)
+                    .where(
+                        FeishuReviewPackage.source_item_id.in_(item_ids),
+                        FeishuReviewPackage.workflow_status.not_in({"COMPLETED", "INVALIDATED"}),
+                        FeishuMaterialVersion.version_id.not_in(version_ids),
+                        FeishuMaterialVersion.review_status.in_({"pending", "changes_requested"}),
+                        FeishuReviewItem.review_type == "UPDATE",
+                        FeishuReviewItem.item_status.in_(
+                            {
+                                "PENDING",
+                                "WAITING_SOURCE_CHANGE",
+                                "WAITING_BUSINESS_CONFIRMATION",
+                                "SOURCE_UPDATED",
+                            }
+                        ),
+                    )
+                    .order_by(FeishuReviewPackage.created_at.desc())
+                )
+            ).unique().all()
+            source_updated_at_by_item = {item.item_id: item.source_updated_at for item, _, _ in rows}
+            for package, pending_version in pending_update_rows:
+                pending_updates_by_item.setdefault(
+                    package.source_item_id,
+                    {
+                        "version_id": pending_version.version_id,
+                        "revision": pending_version.revision,
+                        "detected_at": _iso(pending_version.created_at),
+                        "source_updated_at": _iso(source_updated_at_by_item.get(package.source_item_id)),
+                        "review_package_id": package.package_id,
+                    },
+                )
         units_by_version: dict[str, list[FeishuKnowledgeUnit]] = {}
         if version_ids:
             units = list(
@@ -331,6 +374,7 @@ class GovernanceService:
                             "published_at": _iso(version.published_at),
                             "updated_at": _iso(unit.updated_at or version.updated_at),
                             "target_kb_id": source.target_kb_id,
+                            "pending_update": pending_updates_by_item.get(item.item_id),
                         }
                     )
                 continue
@@ -366,6 +410,7 @@ class GovernanceService:
                     "published_at": _iso(version.published_at),
                     "updated_at": _iso(version.updated_at),
                     "target_kb_id": source.target_kb_id,
+                    "pending_update": pending_updates_by_item.get(item.item_id),
                 }
             )
         return result

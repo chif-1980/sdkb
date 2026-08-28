@@ -80,7 +80,13 @@ describe('FeishuFormalKnowledgePanel', () => {
               source_segment_count: 2,
               source_locator: { page: 3 },
               applicability_scope: {},
-              chunk_count: 8
+              chunk_count: 8,
+              pending_update: {
+                version_id: 'version-13',
+                revision: '13',
+                detected_at: '2026-08-28T08:43:16+08:00',
+                review_package_id: 'package-update-13'
+              }
             }
           ]
         })
@@ -109,10 +115,21 @@ describe('FeishuFormalKnowledgePanel', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('正式知识单元')
-    expect(wrapper.text()).toContain('部署前置条件')
     expect(wrapper.text()).toContain('2 个来源片段')
     expect(wrapper.text()).toContain('Q900 部署指南')
     expect(wrapper.text()).toContain('按原始材料分组展示')
+    expect(wrapper.get('.source-update-tag').text()).toContain('有更新')
+    expect(wrapper.get('.source-update-meta').text()).toContain('版本 3 → 13')
+    expect(wrapper.get('.source-update-meta').text()).toContain('检测于 08-28 08:43')
+    expect(wrapper.find('.knowledge-row').exists()).toBe(false)
+    expect(wrapper.get('.group-toggle').text()).toContain('展开')
+
+    await wrapper.get('.source-update-action').trigger('click')
+    expect(wrapper.emitted('open-update-review')).toEqual([
+      [{ packageId: 'package-update-13', sourceVersionId: 'version-13' }]
+    ])
+
+    await wrapper.get('.group-toggle').trigger('click')
 
     await wrapper.get('.knowledge-row').trigger('click')
     await flushPromises()
@@ -127,6 +144,7 @@ describe('FeishuFormalKnowledgePanel', () => {
   it('下架知识单元时要求填写原因并调用治理接口', async () => {
     const wrapper = mountPanel()
     await flushPromises()
+    await wrapper.get('.group-toggle').trigger('click')
     await wrapper.get('.knowledge-row').trigger('click')
     await flushPromises()
 
