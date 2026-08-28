@@ -28,6 +28,16 @@ from yuxi.product_chat.answer_service import (
 from yuxi.product_chat.repository import ProductChatRepository
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Base, Department, User
+from yuxi.storage.postgres.models_knowledge import (
+    FeishuKnowledgeUnit,
+    FeishuMaterialVersion,
+    FeishuReviewItem,
+    FeishuReviewPackage,
+    FeishuSource,
+    FeishuSourceChangeRequest,
+    FeishuSourceItem,
+    KnowledgeChunk,
+)
 from yuxi.storage.postgres.models_product import (
     ConversationStatus,
     MessageCitation,
@@ -63,6 +73,7 @@ def _citation(index: int = 1) -> GroundedCitation:
         locator=f"第{index}段",
         excerpt=f"正式资料 {index}",
         source_version_at=datetime(2026, 8, 16, 8, 0, tzinfo=UTC),
+        chunk_id=f"chunk-{index}",
     )
 
 
@@ -462,6 +473,114 @@ async def test_assistant_feedback_can_be_set_switched_cleared_and_reloaded(
     async with context.factory() as session:
         stored = await session.scalar(select(ProductMessage).where(ProductMessage.message_id == assistant_id))
     assert stored.feedback_rating is None
+
+
+async def test_dislike_creates_one_unassigned_source_correction_task_from_cited_chunk(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation()
+    async with context.factory() as session:
+        session.add_all(
+            [
+                FeishuSource(
+                    source_id="source-1",
+                    name="善达知识库",
+                    wiki_root_token="root",
+                    target_kb_id="kb-1",
+                    credential_env_name="FEISHU_USER_OAUTH",
+                ),
+                FeishuSourceItem(
+                    item_id="item-1",
+                    source_id="source-1",
+                    item_key="page:item-1",
+                    item_type="docx",
+                    title="产品手册 1",
+                    source_url="https://quickdone.feishu.cn/wiki/item-1",
+                    source_validity="valid",
+                    active_version_id="version-1",
+                    publication_status="ACTIVE",
+                ),
+                FeishuMaterialVersion(
+                    version_id="version-1",
+                    item_id="item-1",
+                    revision="1",
+                    content_hash="version-hash",
+                    processing_status="published",
+                    review_status="approved",
+                    yuxi_file_id="file-1",
+                    published_at=datetime.now(UTC),
+                ),
+                FeishuKnowledgeUnit(
+                    unit_id="unit-1",
+                    unit_key="section:deployment",
+                    lineage_key="section:deployment",
+                    version_id="version-1",
+                    item_id="item-1",
+                    unit_index=0,
+                    unit_type="SECTION",
+                    title="部署要求",
+                    content="该产品支持私有部署。",
+                    content_hash="unit-hash",
+                    source_segment_ids=["segment-1"],
+                    recommended_outcome="PUBLISH",
+                    recommendation_reason="内容完整。",
+                    publication_state="INCLUDED",
+                    lifecycle_status="ACTIVE",
+                    status="ACTIVE",
+                ),
+                KnowledgeChunk(
+                    chunk_id="chunk-1",
+                    file_id="file-1",
+                    kb_id="kb-1",
+                    chunk_index=0,
+                    content="该产品支持私有部署。",
+                    tags={"source_segment_ids": ["segment-1"]},
+                ),
+            ]
+        )
+        await session.commit()
+
+    async def answer_question(*args, **kwargs):
+        return _answer("SUPPORTED")
+
+    monkeypatch.setattr(AnswerService, "answer", answer_question)
+    exchange = (
+        await context.client.post(
+            f"/api/chat/conversations/{conversation.conversation_id}/messages",
+            headers=context.owner_headers,
+            json={"content": "该产品支持私有部署吗？"},
+        )
+    ).json()
+    assistant_id = exchange["assistantMessage"]["id"]
+
+    first = await context.client.put(
+        f"/api/chat/messages/{assistant_id}/feedback",
+        headers=context.owner_headers,
+        json={"rating": "DISLIKE"},
+    )
+    repeated = await context.client.put(
+        f"/api/chat/messages/{assistant_id}/feedback",
+        headers=context.owner_headers,
+        json={"rating": "DISLIKE"},
+    )
+
+    assert first.status_code == 200
+    assert repeated.status_code == 200
+    async with context.factory() as session:
+        citation = await session.scalar(select(MessageCitation).where(MessageCitation.message_id == assistant_id))
+        packages = list(await session.scalars(select(FeishuReviewPackage)))
+        review_items = list(await session.scalars(select(FeishuReviewItem)))
+        change_requests = list(await session.scalars(select(FeishuSourceChangeRequest)))
+
+    assert citation.chunk_id == "chunk-1"
+    assert len(packages) == len(review_items) == len(change_requests) == 1
+    assert packages[0].trigger_type == "FEEDBACK"
+    assert packages[0].workflow_status == "WAITING_SOURCE_CHANGE"
+    assert packages[0].assignee_id is None
+    assert review_items[0].subject_id == "unit-1"
+    assert change_requests[0].source_url == "https://quickdone.feishu.cn/wiki/item-1"
 
 
 async def test_feedback_rejects_user_messages_cross_user_access_and_invalid_ratings(

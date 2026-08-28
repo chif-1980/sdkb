@@ -17,7 +17,9 @@
         placeholder="搜索知识标题、产品或版本"
         allow-clear
       />
-      <span class="toolbar-summary">共 <strong>{{ filteredKnowledge.length }}</strong> 条知识单元</span>
+      <span class="toolbar-summary"
+        >共 <strong>{{ filteredKnowledge.length }}</strong> 条知识单元</span
+      >
     </div>
     <div v-if="groupedKnowledge.length" class="knowledge-groups">
       <article v-for="group in groupedKnowledge" :key="group.key" class="source-group">
@@ -28,8 +30,30 @@
             <span v-if="group.path" class="source-path" :title="group.path">{{ group.path }}</span>
           </div>
           <div class="source-group-summary">
-            <span><strong>{{ group.items.length }}</strong> 个知识单元</span>
-            <span v-if="group.fragmentCount"><strong>{{ group.fragmentCount }}</strong> 个来源片段</span>
+            <a-tag :color="sourceStatusColor(group.sourcePublicationStatus)">
+              {{ sourceStatusLabel(group.sourcePublicationStatus) }}
+            </a-tag>
+            <span
+              ><strong>{{ group.items.length }}</strong> 个知识单元</span
+            >
+            <span v-if="group.fragmentCount"
+              ><strong>{{ group.fragmentCount }}</strong> 个来源片段</span
+            >
+            <a-button
+              v-if="group.sourcePublicationStatus === 'ACTIVE'"
+              size="small"
+              danger
+              @click.stop="startAction('source-offline', group)"
+            >
+              <Archive :size="13" />整篇下架
+            </a-button>
+            <a-button
+              v-else-if="group.sourcePublicationStatus === 'OFFLINE'"
+              size="small"
+              @click.stop="startAction('source-restore', group)"
+            >
+              <ArchiveRestore :size="13" />整篇恢复
+            </a-button>
             <a
               v-if="group.sourceUrl"
               class="source-link"
@@ -69,19 +93,34 @@
           >
             <div class="knowledge-main">
               <div class="knowledge-kicker">
-                <span class="knowledge-level" :class="{ legacy: record.knowledge_level !== 'UNIT' }">
+                <span
+                  class="knowledge-level"
+                  :class="{ legacy: record.knowledge_level !== 'UNIT' }"
+                >
                   {{ record.knowledge_level === 'UNIT' ? '知识单元' : '整份资料' }}
                 </span>
-                <span v-if="sourceLocatorLabel(record) !== sourceCountLabel(record)" class="locator-label">
+                <span
+                  v-if="sourceLocatorLabel(record) !== sourceCountLabel(record)"
+                  class="locator-label"
+                >
                   {{ sourceLocatorLabel(record) }}
                 </span>
               </div>
               <strong class="primary-cell" :title="record.title">{{ record.title }}</strong>
-              <span class="sub-line">当前版本 {{ record.revision }} · {{ sourceCountLabel(record) }}</span>
+              <span class="sub-line"
+                >当前版本 {{ record.revision }} · {{ sourceCountLabel(record) }}</span
+              >
             </div>
             <div class="knowledge-row-status">
-              <a-tag color="processing">{{ record.source_role === 'PRIMARY' ? '通用知识' : '条件变体' }}</a-tag>
-              <a-tag color="success">已索引</a-tag>
+              <a-tag color="processing">{{
+                record.source_role === 'PRIMARY' ? '通用知识' : '条件变体'
+              }}</a-tag>
+              <a-tag :color="lifecycleStatusColor(record.lifecycle_status)">
+                {{ lifecycleStatusLabel(record.lifecycle_status) }}
+              </a-tag>
+              <a-tag :color="record.index_status === 'INDEXED' ? 'success' : 'default'">
+                {{ record.index_status === 'INDEXED' ? '已索引' : '未参与检索' }}
+              </a-tag>
             </div>
             <span class="knowledge-action">查看详情 <ChevronRight :size="14" /></span>
           </article>
@@ -91,7 +130,7 @@
     <div v-else class="knowledge-empty"><a-empty description="暂无已发布知识单元" /></div>
     <div class="table-footer">共 {{ filteredKnowledge.length }} 条正式知识单元</div>
 
-    <a-modal v-model:open="versionModalOpen" title="知识单元详情" :footer="null" width="760px">
+    <a-modal v-model:open="versionModalOpen" title="知识单元详情" :footer="null" width="860px">
       <a-spin :spinning="loadingVersions">
         <div v-if="selectedKnowledge" class="source-trace" aria-label="正式知识来源层级">
           <div class="trace-step">
@@ -124,10 +163,77 @@
           </a>
         </div>
         <div v-if="selectedKnowledge" class="detail-facts">
-          <div><span>知识 ID</span><code :title="selectedKnowledge.knowledge_id">{{ selectedKnowledge.knowledge_id }}</code></div>
-          <div><span>知识类型</span><strong>{{ selectedKnowledge.source_role === 'PRIMARY' ? '通用知识' : '条件变体' }}</strong></div>
-          <div><span>来源片段</span><strong>{{ sourceCountLabel(selectedKnowledge) }}</strong></div>
-          <div><span>索引状态</span><a-tag color="success">已索引</a-tag></div>
+          <div>
+            <span>知识 ID</span
+            ><code :title="selectedKnowledge.knowledge_id">{{
+              selectedKnowledge.knowledge_id
+            }}</code>
+          </div>
+          <div>
+            <span>知识类型</span
+            ><strong>{{
+              selectedKnowledge.source_role === 'PRIMARY' ? '通用知识' : '条件变体'
+            }}</strong>
+          </div>
+          <div>
+            <span>来源片段</span><strong>{{ sourceCountLabel(selectedKnowledge) }}</strong>
+          </div>
+          <div>
+            <span>当前状态</span
+            ><a-tag :color="lifecycleStatusColor(selectedKnowledge.lifecycle_status)">{{
+              lifecycleStatusLabel(selectedKnowledge.lifecycle_status)
+            }}</a-tag>
+          </div>
+        </div>
+        <div v-if="selectedKnowledge?.unit_id" class="lifecycle-actions">
+          <div>
+            <strong>知识单元治理</strong>
+            <span>正文仍以飞书原文为准；修订将生成待处理任务。</span>
+          </div>
+          <a-button
+            v-if="selectedKnowledge.stored_lifecycle_status !== 'OFFLINE'"
+            size="small"
+            danger
+            @click="startAction('unit-offline', selectedKnowledge)"
+          >
+            <Archive :size="14" />下架单元
+          </a-button>
+          <a-button v-else size="small" @click="startAction('unit-restore', selectedKnowledge)">
+            <ArchiveRestore :size="14" />恢复单元
+          </a-button>
+          <a-button size="small" @click="startAction('unit-revision', selectedKnowledge)">
+            <PencilLine :size="14" />发起修订
+          </a-button>
+        </div>
+        <div v-if="selectedKnowledge?.unit_id" class="metadata-editor">
+          <div class="metadata-heading">
+            <div><strong>治理信息</strong><span>负责人、有效期和复核日期</span></div>
+            <a-button size="small" :loading="savingMetadata" @click="saveMetadata">
+              <Save :size="14" />保存
+            </a-button>
+          </div>
+          <div class="metadata-fields">
+            <label
+              ><span>负责人姓名</span
+              ><a-input v-model:value="metadataForm.owner_name" placeholder="未指定"
+            /></label>
+            <label
+              ><span>负责人 ID</span
+              ><a-input v-model:value="metadataForm.owner_id" placeholder="可选"
+            /></label>
+            <label
+              ><span>生效日期</span><a-input v-model:value="metadataForm.valid_from" type="date"
+            /></label>
+            <label
+              ><span>失效日期</span><a-input v-model:value="metadataForm.valid_until" type="date"
+            /></label>
+            <label
+              ><span>复核日期</span><a-input v-model:value="metadataForm.review_due_at" type="date"
+            /></label>
+          </div>
+        </div>
+        <div class="version-heading">
+          <strong>历史版本</strong><span>仅已审核且有归档原件的版本可回滚</span>
         </div>
         <a-table
           :columns="versionColumns"
@@ -147,9 +253,40 @@
                 record.review_status === 'approved' ? '已审核' : record.review_status
               }}</span></template
             >
+            <template v-else-if="column.key === 'operation'">
+              <a-button
+                v-if="record.rollback_available"
+                type="link"
+                size="small"
+                @click="startAction('source-rollback', record)"
+              >
+                <RotateCcw :size="13" />回滚到此版本
+              </a-button>
+              <span v-else class="operation-muted">—</span>
+            </template>
           </template>
         </a-table>
       </a-spin>
+    </a-modal>
+
+    <a-modal
+      v-model:open="actionModalOpen"
+      :title="actionTitle"
+      :ok-text="actionConfirmText"
+      cancel-text="取消"
+      :confirm-loading="submittingAction"
+      @ok="confirmAction"
+    >
+      <p class="action-description">{{ actionDescription }}</p>
+      <label class="reason-field">
+        <span>处理原因</span>
+        <a-textarea
+          v-model:value="actionReason"
+          :rows="4"
+          :maxlength="4000"
+          placeholder="请填写原因，便于后续追溯"
+        />
+      </label>
     </a-modal>
   </section>
 </template>
@@ -157,7 +294,17 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { ChevronDown, ChevronRight, ExternalLink, RefreshCw } from 'lucide-vue-next'
+import {
+  Archive,
+  ArchiveRestore,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  PencilLine,
+  RefreshCw,
+  RotateCcw,
+  Save
+} from 'lucide-vue-next'
 import { governanceApi } from '@/apis/governance_api'
 
 const props = defineProps({ sourceId: { type: String, default: '' } })
@@ -168,6 +315,13 @@ const loading = ref(false)
 const loadingVersions = ref(false)
 const versionModalOpen = ref(false)
 const selectedKnowledge = ref(null)
+const actionModalOpen = ref(false)
+const actionType = ref('')
+const actionTarget = ref(null)
+const actionReason = ref('')
+const submittingAction = ref(false)
+const savingMetadata = ref(false)
+const metadataForm = ref(emptyMetadataForm())
 const knowledgeType = ref('')
 const searchText = ref('')
 const collapsedGroups = ref(new Set())
@@ -180,8 +334,51 @@ const versionColumns = [
   { title: '版本', dataIndex: 'revision', key: 'revision', width: 100 },
   { title: '状态', key: 'status', width: 120 },
   { title: '审核', key: 'review', width: 120 },
-  { title: '发布时间', dataIndex: 'published_at', key: 'published_at' }
+  { title: '发布时间', dataIndex: 'published_at', key: 'published_at' },
+  { title: '操作', key: 'operation', width: 130 }
 ]
+const actionCopy = {
+  'unit-offline': {
+    title: '下架知识单元',
+    confirm: '确认下架',
+    description: '下架后该知识单元不再参与检索，来源材料中的其他知识单元不受影响。',
+    success: '知识单元下架任务已提交'
+  },
+  'unit-restore': {
+    title: '恢复知识单元',
+    confirm: '确认恢复',
+    description: '恢复后将重新构建索引；索引完成后该知识单元才会重新参与检索。',
+    success: '知识单元恢复任务已提交'
+  },
+  'unit-revision': {
+    title: '发起知识修订',
+    confirm: '发起修订',
+    description: '系统将生成飞书源文档修改任务，正文仍在原始飞书文档中修订。',
+    success: '知识修订任务已创建'
+  },
+  'source-offline': {
+    title: '整篇下架',
+    confirm: '确认整篇下架',
+    description: '该来源材料下的全部知识单元都将停止参与检索。',
+    success: '来源材料已下架'
+  },
+  'source-restore': {
+    title: '整篇恢复',
+    confirm: '确认整篇恢复',
+    description: '系统将从归档原件重建索引，完成后整篇知识恢复检索。',
+    success: '来源材料恢复任务已提交'
+  },
+  'source-rollback': {
+    title: '回滚历史版本',
+    confirm: '确认回滚',
+    description: '系统将以所选历史版本重建索引，成功后该版本成为当前有效版本。',
+    success: '历史版本回滚任务已提交'
+  }
+}
+const currentActionCopy = computed(() => actionCopy[actionType.value] || {})
+const actionTitle = computed(() => currentActionCopy.value.title || '知识治理操作')
+const actionConfirmText = computed(() => currentActionCopy.value.confirm || '确认')
+const actionDescription = computed(() => currentActionCopy.value.description || '')
 const filteredKnowledge = computed(() =>
   knowledge.value.filter((item) => {
     const matchType =
@@ -209,6 +406,8 @@ const groupedKnowledge = computed(() => {
         title: record.source_title || record.title || '未命名原始材料',
         path: record.wiki_path || '',
         sourceUrl: record.source_url || '',
+        sourceItemId: record.source_item_id || '',
+        sourcePublicationStatus: record.source_publication_status || 'ACTIVE',
         items: [],
         fragmentCount: 0
       })
@@ -250,6 +449,7 @@ function toggleGroup(key) {
 
 async function openVersions(record) {
   selectedKnowledge.value = record
+  metadataForm.value = metadataFormFromRecord(record)
   versionModalOpen.value = true
   loadingVersions.value = true
   try {
@@ -262,6 +462,141 @@ async function openVersions(record) {
   } finally {
     loadingVersions.value = false
   }
+}
+
+function startAction(type, target) {
+  actionType.value = type
+  actionTarget.value = target
+  actionReason.value = ''
+  actionModalOpen.value = true
+}
+
+async function confirmAction() {
+  const reason = actionReason.value.trim()
+  if (!reason) {
+    message.warning('请填写处理原因')
+    return
+  }
+  const target = actionTarget.value
+  submittingAction.value = true
+  try {
+    if (actionType.value === 'unit-offline') {
+      await governanceApi.offlineKnowledgeUnit(target.unit_id, reason)
+    } else if (actionType.value === 'unit-restore') {
+      await governanceApi.restoreKnowledgeUnit(target.unit_id, reason)
+    } else if (actionType.value === 'unit-revision') {
+      await governanceApi.createKnowledgeRevision(target.unit_id, reason)
+    } else if (actionType.value === 'source-offline') {
+      await governanceApi.offlineKnowledgeSource(target.sourceItemId, reason)
+    } else if (actionType.value === 'source-restore') {
+      await governanceApi.restoreKnowledgeSource(target.sourceItemId, reason)
+    } else if (actionType.value === 'source-rollback') {
+      await governanceApi.rollbackKnowledgeSource(
+        selectedKnowledge.value.source_item_id,
+        target.version_id,
+        reason
+      )
+    } else {
+      throw new Error('Unsupported governance action')
+    }
+    message.success(currentActionCopy.value.success)
+    actionModalOpen.value = false
+    if (actionType.value !== 'unit-revision') versionModalOpen.value = false
+    await loadKnowledge()
+  } catch (error) {
+    message.error(governanceApi.getErrorMessage(error, '知识治理操作失败'))
+  } finally {
+    submittingAction.value = false
+  }
+}
+
+async function saveMetadata() {
+  if (!selectedKnowledge.value?.unit_id) return
+  const payload = {
+    owner_name: normalizedOptionalText(metadataForm.value.owner_name),
+    owner_id: normalizedOptionalText(metadataForm.value.owner_id),
+    valid_from: datePayload(metadataForm.value.valid_from),
+    valid_until: datePayload(metadataForm.value.valid_until),
+    review_due_at: datePayload(metadataForm.value.review_due_at)
+  }
+  if (payload.valid_from && payload.valid_until && payload.valid_from > payload.valid_until) {
+    message.warning('失效日期不能早于生效日期')
+    return
+  }
+  savingMetadata.value = true
+  try {
+    await governanceApi.updateKnowledgeUnitMetadata(selectedKnowledge.value.unit_id, payload)
+    Object.assign(selectedKnowledge.value, payload)
+    const record = knowledge.value.find((item) => item.unit_id === selectedKnowledge.value.unit_id)
+    if (record) Object.assign(record, payload)
+    message.success('治理信息已保存')
+  } catch (error) {
+    message.error(governanceApi.getErrorMessage(error, '治理信息保存失败'))
+  } finally {
+    savingMetadata.value = false
+  }
+}
+
+function emptyMetadataForm() {
+  return { owner_name: '', owner_id: '', valid_from: '', valid_until: '', review_due_at: '' }
+}
+
+function metadataFormFromRecord(record) {
+  return {
+    owner_name: record.owner_name || '',
+    owner_id: record.owner_id || '',
+    valid_from: dateInputValue(record.valid_from),
+    valid_until: dateInputValue(record.valid_until),
+    review_due_at: dateInputValue(record.review_due_at)
+  }
+}
+
+function dateInputValue(value) {
+  return value ? String(value).slice(0, 10) : ''
+}
+
+function datePayload(value) {
+  return value ? `${value}T00:00:00Z` : null
+}
+
+function normalizedOptionalText(value) {
+  const normalized = String(value || '').trim()
+  return normalized || null
+}
+
+function lifecycleStatusLabel(status) {
+  return (
+    {
+      ACTIVE: '正常',
+      OFFLINE: '已下架',
+      EXPIRED: '已过有效期',
+      REVIEW_DUE: '待复核'
+    }[status] || '状态未知'
+  )
+}
+
+function lifecycleStatusColor(status) {
+  return { ACTIVE: 'success', OFFLINE: 'default', EXPIRED: 'error', REVIEW_DUE: 'warning' }[status]
+}
+
+function sourceStatusLabel(status) {
+  return (
+    {
+      ACTIVE: '正常',
+      OFFLINE: '整篇已下架',
+      OFFLINE_PENDING: '整篇下架中',
+      RESTORE_PENDING: '整篇恢复中'
+    }[status] || '状态处理中'
+  )
+}
+
+function sourceStatusColor(status) {
+  return {
+    ACTIVE: 'success',
+    OFFLINE: 'default',
+    OFFLINE_PENDING: 'warning',
+    RESTORE_PENDING: 'processing'
+  }[status]
 }
 
 function scopeSummary(scope) {
@@ -397,6 +732,11 @@ function sourceLocatorLabel(record) {
   font-size: 13px;
   font-weight: 650;
 }
+.source-group-summary :deep(.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .group-toggle {
   display: inline-flex;
   align-items: center;
@@ -444,7 +784,9 @@ function sourceLocatorLabel(record) {
   border-top: 1px solid var(--gray-100);
   background: var(--gray-0);
   text-align: left;
-  transition: background 140ms ease, box-shadow 140ms ease;
+  transition:
+    background 140ms ease,
+    box-shadow 140ms ease;
 }
 .knowledge-row:hover,
 .knowledge-row:focus-visible {
@@ -581,6 +923,87 @@ function sourceLocatorLabel(record) {
   margin: 0;
   font-size: 10px;
 }
+.lifecycle-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--main-color);
+  background: var(--main-30);
+}
+.lifecycle-actions > div {
+  display: grid;
+  min-width: 0;
+  margin-right: auto;
+  gap: 2px;
+}
+.lifecycle-actions strong,
+.metadata-heading strong,
+.version-heading strong {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+.lifecycle-actions span,
+.metadata-heading span,
+.version-heading span {
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+}
+.lifecycle-actions :deep(.ant-btn),
+.metadata-heading :deep(.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.metadata-editor {
+  margin-bottom: 14px;
+  padding: 11px 12px 12px;
+  border: 1px solid var(--gray-100);
+  border-radius: 7px;
+}
+.metadata-heading,
+.version-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.metadata-heading > div {
+  display: grid;
+  gap: 2px;
+}
+.metadata-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 10px;
+}
+.metadata-fields label,
+.reason-field {
+  display: grid;
+  gap: 5px;
+}
+.metadata-fields label > span,
+.reason-field > span {
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+}
+.version-heading {
+  margin: 2px 0 8px;
+}
+.operation-muted {
+  color: var(--color-text-tertiary);
+}
+.action-description {
+  margin: 0 0 14px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
 .source-trace {
   display: flex;
   align-items: center;
@@ -686,6 +1109,16 @@ function sourceLocatorLabel(record) {
   }
   .source-link {
     margin-left: 0;
+  }
+  .lifecycle-actions {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .lifecycle-actions > div {
+    width: 100%;
+  }
+  .metadata-fields {
+    grid-template-columns: 1fr;
   }
 }
 </style>

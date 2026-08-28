@@ -139,6 +139,7 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
         "item_id",
         "version_id",
         "yuxi_file_id",
+        "chunk_id",
         "title",
         "source_url",
         "path_text",

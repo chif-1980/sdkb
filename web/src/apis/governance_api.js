@@ -140,5 +140,29 @@ export const governanceApi = {
   listKnowledgeVersions: (knowledgeId) =>
     apiAdminGet(`${BASE_URL}/knowledge/${encoded(knowledgeId)}/versions`),
 
+  updateKnowledgeUnitMetadata: (unitId, payload) =>
+    apiAdminPatch(`${BASE_URL}/knowledge-units/${encoded(unitId)}/metadata`, payload),
+
+  offlineKnowledgeUnit: (unitId, reason) =>
+    apiAdminPost(`${BASE_URL}/knowledge-units/${encoded(unitId)}/offline`, { reason }),
+
+  restoreKnowledgeUnit: (unitId, reason) =>
+    apiAdminPost(`${BASE_URL}/knowledge-units/${encoded(unitId)}/restore`, { reason }),
+
+  createKnowledgeRevision: (unitId, reason) =>
+    apiAdminPost(`${BASE_URL}/knowledge-units/${encoded(unitId)}/revision`, { reason }),
+
+  offlineKnowledgeSource: (itemId, reason) =>
+    apiAdminPost(`${BASE_URL}/knowledge/${encoded(itemId)}/offline`, { reason }),
+
+  restoreKnowledgeSource: (itemId, reason) =>
+    apiAdminPost(`${BASE_URL}/knowledge/${encoded(itemId)}/restore`, { reason }),
+
+  rollbackKnowledgeSource: (itemId, versionId, reason) =>
+    apiAdminPost(
+      `${BASE_URL}/knowledge/${encoded(itemId)}/versions/${encoded(versionId)}/rollback`,
+      { reason }
+    ),
+
   getErrorMessage: errorMessage
 }

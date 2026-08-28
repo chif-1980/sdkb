@@ -183,6 +183,64 @@ class SourceChangeRequestCancelRequest(BaseModel):
         return normalized
 
 
+class KnowledgeUnitLifecycleRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("reason is required")
+        return normalized
+
+
+class KnowledgeUnitMetadataRequest(BaseModel):
+    owner_id: str | None = Field(default=None, max_length=64)
+    owner_name: str | None = Field(default=None, max_length=255)
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    review_due_at: datetime | None = None
+
+    @field_validator("owner_id", "owner_name")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_validity_range(self):
+        if self.valid_from and self.valid_until and self.valid_from > self.valid_until:
+            raise ValueError("valid_from must not be later than valid_until")
+        return self
+
+
+class KnowledgeRevisionRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_revision_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("reason is required")
+        return normalized
+
+
+class SourceLifecycleRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_source_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("reason is required")
+        return normalized
+
+
 class DuplicateRelationResolutionRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=64)
     strategy: DuplicateResolutionStrategy

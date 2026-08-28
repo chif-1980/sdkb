@@ -7,9 +7,11 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from sqlalchemy import select
 
 from server.routers.product_api_route import ProductApiRoute
 from server.utils.auth_middleware import get_product_user
+from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
 from yuxi.product_chat.answer_service import AnswerDelta, AnswerProgress, AnswerService, GroundedAnswer
 from yuxi.product_chat.repository import (
     ProductChatNotFoundError,
@@ -360,6 +362,23 @@ async def set_message_feedback(
                 current_user.id,
                 request.rating,
             )
+            if request.rating == "DISLIKE":
+                citations = list(
+                    await db.scalars(select(MessageCitation).where(MessageCitation.message_id == message.message_id))
+                )
+                chunk_ids = [citation.chunk_id for citation in citations if citation.chunk_id]
+                governance = await ProductChatRepository(db).get_chunk_governance(chunk_ids)
+                segment_ids = {
+                    str(segment_id)
+                    for details in governance.values()
+                    for segment_id in details.get("source_segment_ids", ())
+                    if segment_id
+                }
+                await KnowledgeLifecycleService(db).create_feedback_requests_for_segments(
+                    segment_ids,
+                    reason=f"助手回答被用户标记为不满意（消息 {message.message_id}）",
+                    operator_id=current_user.uid,
+                )
             return MessageFeedbackResponse(
                 message_id=message.message_id,
                 feedback_rating=message.feedback_rating,

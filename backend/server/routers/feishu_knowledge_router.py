@@ -28,6 +28,7 @@ from yuxi.integrations.feishu.service import FeishuScanService
 from yuxi.governance.comparator import CrossDocumentComparisonService
 from yuxi.governance.content_quality import assess_content
 from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
+from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
 from yuxi.governance.review_backfill import backfill_legacy_governance_reviews
 from yuxi.governance.source_segment_service import SourceSegmentService
 from yuxi.knowledge.runtime import knowledge_base
@@ -592,14 +593,15 @@ class FeishuReviewService:
 
     async def remember_publish_candidate(self, version_id: str, *, file_id: str) -> FeishuMaterialVersion:
         async with self._transaction():
-            version, _, _ = await self._get_material(version_id, lock=True)
+            version, item, _ = await self._get_material(version_id, lock=True)
             if version.processing_status != "publishing":
                 raise ValueError("Material is not publishing")
+            params = dict(version.processing_params or {})
+            if item.active_version_id == version.version_id and version.yuxi_file_id != file_id:
+                params["publish_previous_file_id"] = version.yuxi_file_id
             version.yuxi_file_id = file_id
-            version.processing_params = {
-                **(version.processing_params or {}),
-                "publish_candidate_needs_parse": True,
-            }
+            params["publish_candidate_needs_parse"] = True
+            version.processing_params = params
             await self.session.flush()
             return version
 
@@ -655,6 +657,7 @@ class FeishuReviewService:
                 raise LookupError(f"Feishu source item not found: {version.item_id}")
             old_active_id = item.active_version_id
             processing_params = dict(version.processing_params or {})
+            previous_file_id = processing_params.get("publish_previous_file_id")
             requested_revision = int(processing_params.get("unit_publish_requested_revision") or 0)
             claimed_revision = int(processing_params.get("unit_publish_claimed_revision") or requested_revision)
             republish_required = requested_revision > claimed_revision
@@ -667,6 +670,11 @@ class FeishuReviewService:
                 )
                 old_version = old_result.scalar_one_or_none()
             if old_version is not None and old_version.id > version.id:
+                await KnowledgeLifecycleService(self.session).discard_claimed_transitions(
+                    version.version_id,
+                    claimed_revision=claimed_revision,
+                )
+                processing_params = dict(version.processing_params or {})
                 version.processing_status = "replaced"
                 version.yuxi_file_id = yuxi_file_id
                 version.chunk_count = chunk_count
@@ -674,6 +682,7 @@ class FeishuReviewService:
                 version.error_code = None
                 version.error_message = None
                 processing_params.pop("publish_candidate_needs_parse", None)
+                processing_params.pop("publish_previous_file_id", None)
                 if requested_revision:
                     processing_params["unit_publish_completed_revision"] = claimed_revision
                 version.processing_params = processing_params
@@ -699,7 +708,16 @@ class FeishuReviewService:
                     cleanup_file_id = old_version.yuxi_file_id
                 old_version.processing_status = "replaced"
                 old_version.replaced_at = utc_now()
+            elif previous_file_id and previous_file_id != yuxi_file_id:
+                cleanup_file_id = previous_file_id
+            await KnowledgeLifecycleService(self.session).apply_claimed_transitions(
+                version.version_id,
+                claimed_revision=claimed_revision,
+            )
+            processing_params = dict(version.processing_params or {})
             item.active_version_id = version.version_id
+            item.publication_status = "ACTIVE"
+            item.lifecycle_updated_at = utc_now()
             version.processing_status = "publish_queued" if republish_required else "published"
             version.yuxi_file_id = yuxi_file_id
             version.chunk_count = chunk_count
@@ -707,6 +725,10 @@ class FeishuReviewService:
             version.error_code = None
             version.error_message = None
             processing_params.pop("publish_candidate_needs_parse", None)
+            processing_params.pop("publish_previous_file_id", None)
+            processing_params.pop("source_rollback_previous_active_version_id", None)
+            processing_params.pop("source_rollback_previous_processing_status", None)
+            processing_params.pop("source_rollback_previous_file_id", None)
             if requested_revision:
                 processing_params["unit_publish_completed_revision"] = claimed_revision
             version.processing_params = processing_params
@@ -785,17 +807,53 @@ class FeishuReviewService:
             if version.processing_status not in {"publish_queued", "publishing"}:
                 raise ValueError("Material is not queued for publishing")
             from_status = version.processing_status
-            version.processing_status = "publish_failed"
+            processing_params = dict(version.processing_params or {})
+            claimed_revision = int(
+                processing_params.get("unit_publish_claimed_revision")
+                or processing_params.get("unit_publish_requested_revision")
+                or 0
+            )
+            previous_file_id = processing_params.get("publish_previous_file_id")
+            active_republish = (
+                item.active_version_id == version.version_id
+                and item.publication_status == "ACTIVE"
+                and bool(previous_file_id or version.yuxi_file_id)
+            )
+            restore_failed = item.publication_status == "RESTORE_PENDING"
+            rollback_previous_status = processing_params.get("source_rollback_previous_processing_status")
+            rollback_previous_file_id = processing_params.get("source_rollback_previous_file_id")
+            await KnowledgeLifecycleService(self.session).discard_claimed_transitions(
+                version.version_id,
+                claimed_revision=claimed_revision,
+            )
+            processing_params = dict(version.processing_params or {})
+            if rollback_previous_status:
+                version.processing_status = rollback_previous_status
+            else:
+                version.processing_status = "published" if active_republish or restore_failed else "publish_failed"
             version.error_message = message
-            if clear_file_id:
+            if rollback_previous_status:
+                version.yuxi_file_id = rollback_previous_file_id
+            elif active_republish:
+                version.yuxi_file_id = previous_file_id or version.yuxi_file_id
+                if yuxi_file_id is not None:
+                    processing_params["failed_publish_candidate_file_id"] = yuxi_file_id
+            elif clear_file_id:
                 version.yuxi_file_id = None
             elif yuxi_file_id is not None:
                 version.yuxi_file_id = yuxi_file_id
-            processing_params = dict(version.processing_params or {})
-            if candidate_needs_parse:
+            if restore_failed:
+                item.publication_status = "OFFLINE"
+                item.lifecycle_note = message
+                item.lifecycle_updated_at = utc_now()
+            if candidate_needs_parse and not active_republish:
                 processing_params["publish_candidate_needs_parse"] = True
             else:
                 processing_params.pop("publish_candidate_needs_parse", None)
+            processing_params.pop("publish_previous_file_id", None)
+            processing_params.pop("source_rollback_previous_active_version_id", None)
+            processing_params.pop("source_rollback_previous_processing_status", None)
+            processing_params.pop("source_rollback_previous_file_id", None)
             version.processing_params = processing_params
             self._append_event(
                 source_id=item.source_id,
@@ -803,11 +861,225 @@ class FeishuReviewService:
                 version_id=version.version_id,
                 event_type="publish_failed",
                 from_status=from_status,
-                to_status="publish_failed",
+                to_status=version.processing_status,
                 message=message,
             )
             await self.session.flush()
             return version
+
+    async def offline_source(self, item_id: str, *, operator_id: str, reason: str) -> FeishuSourceItem:
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("Lifecycle reason is required")
+        async with self._transaction():
+            row = (
+                await self.session.execute(
+                    select(FeishuSourceItem, FeishuMaterialVersion, FeishuSource)
+                    .join(FeishuMaterialVersion, FeishuMaterialVersion.version_id == FeishuSourceItem.active_version_id)
+                    .join(FeishuSource, FeishuSource.source_id == FeishuSourceItem.source_id)
+                    .where(FeishuSourceItem.item_id == item_id)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if row is None:
+                raise LookupError(f"Formal knowledge source not found: {item_id}")
+            item, version, source = row
+            if item.publication_status == "OFFLINE":
+                return item
+            if item.publication_status not in {"ACTIVE", "OFFLINE_FAILED"} or not version.yuxi_file_id:
+                raise ValueError("Source is not an active indexed source")
+            if version.processing_status != "published":
+                raise ValueError("Source has another publishing operation in progress")
+            file_id = version.yuxi_file_id
+            item.publication_status = "OFFLINE_PENDING"
+            item.lifecycle_note = reason
+            item.lifecycle_updated_by = operator_id
+            item.lifecycle_updated_at = utc_now()
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="source_offline_started",
+                from_status="ACTIVE",
+                to_status="OFFLINE_PENDING",
+                operator_id=operator_id,
+                message=reason,
+            )
+            await self.session.flush()
+        await self.session.commit()
+
+        try:
+            await self.removal_adapter.remove(kb_id=source.target_kb_id, file_id=file_id)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            async with self._transaction():
+                item = await self.session.scalar(
+                    select(FeishuSourceItem).where(FeishuSourceItem.item_id == item_id).with_for_update()
+                )
+                item.publication_status = "ACTIVE"
+                item.lifecycle_note = str(exc)
+                item.lifecycle_updated_at = utc_now()
+                version = await self.session.scalar(
+                    select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == item.active_version_id)
+                )
+                self._append_event(
+                    source_id=item.source_id,
+                    item_id=item.item_id,
+                    version_id=version.version_id,
+                    event_type="source_offline_failed",
+                    from_status="OFFLINE_PENDING",
+                    to_status="ACTIVE",
+                    operator_id=operator_id,
+                    message=str(exc),
+                )
+            await self.session.commit()
+            raise
+
+        async with self._transaction():
+            item = await self.session.scalar(
+                select(FeishuSourceItem).where(FeishuSourceItem.item_id == item_id).with_for_update()
+            )
+            version = await self.session.scalar(
+                select(FeishuMaterialVersion)
+                .where(FeishuMaterialVersion.version_id == item.active_version_id)
+                .with_for_update()
+            )
+            if item.publication_status != "OFFLINE_PENDING" or version.yuxi_file_id != file_id:
+                raise ValueError("Source lifecycle state changed while going offline")
+            version.yuxi_file_id = None
+            version.chunk_count = 0
+            item.publication_status = "OFFLINE"
+            item.lifecycle_updated_at = utc_now()
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="source_offline_completed",
+                from_status="OFFLINE_PENDING",
+                to_status="OFFLINE",
+                operator_id=operator_id,
+                message=reason,
+            )
+            await self.session.flush()
+        await self.session.commit()
+        return item
+
+    async def queue_source_restore(self, item_id: str, *, operator_id: str, reason: str) -> FeishuMaterialVersion:
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("Lifecycle reason is required")
+        async with self._transaction():
+            row = (
+                await self.session.execute(
+                    select(FeishuSourceItem, FeishuMaterialVersion)
+                    .join(FeishuMaterialVersion, FeishuMaterialVersion.version_id == FeishuSourceItem.active_version_id)
+                    .where(FeishuSourceItem.item_id == item_id)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if row is None:
+                raise LookupError(f"Formal knowledge source not found: {item_id}")
+            item, version = row
+            if item.publication_status == "ACTIVE":
+                return version
+            if item.publication_status != "OFFLINE":
+                raise ValueError("Source is not ready to be restored")
+            if not version.source_object_path:
+                raise ValueError("Source archive is unavailable for restoration")
+            from_status = version.processing_status
+            version.processing_status = "publish_queued"
+            version.error_code = None
+            version.error_message = None
+            item.publication_status = "RESTORE_PENDING"
+            item.lifecycle_note = reason
+            item.lifecycle_updated_by = operator_id
+            item.lifecycle_updated_at = utc_now()
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="source_restore_queued",
+                from_status=from_status,
+                to_status="publish_queued",
+                operator_id=operator_id,
+                message=reason,
+            )
+            await self.session.flush()
+            return version
+
+    async def queue_source_rollback(
+        self,
+        item_id: str,
+        target_version_id: str,
+        *,
+        operator_id: str,
+        reason: str,
+    ) -> FeishuMaterialVersion:
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("Rollback reason is required")
+        async with self._transaction():
+            item = await self.session.scalar(
+                select(FeishuSourceItem).where(FeishuSourceItem.item_id == item_id).with_for_update()
+            )
+            if item is None:
+                raise LookupError(f"Formal knowledge source not found: {item_id}")
+            if item.publication_status != "ACTIVE":
+                raise ValueError("Only active sources can be rolled back")
+            if item.active_version_id == target_version_id:
+                raise ValueError("Target version is already active")
+            current = await self.session.scalar(
+                select(FeishuMaterialVersion)
+                .where(FeishuMaterialVersion.version_id == item.active_version_id)
+                .with_for_update()
+            )
+            if current is None or current.processing_status != "published":
+                raise ValueError("Source has another publishing operation in progress")
+            target = await self.session.scalar(
+                select(FeishuMaterialVersion)
+                .where(
+                    FeishuMaterialVersion.version_id == target_version_id,
+                    FeishuMaterialVersion.item_id == item_id,
+                    FeishuMaterialVersion.review_status == "approved",
+                    FeishuMaterialVersion.published_at.is_not(None),
+                )
+                .with_for_update()
+            )
+            if target is None:
+                raise LookupError(f"Approved source version not found: {target_version_id}")
+            if not target.source_object_path:
+                raise ValueError("Target version archive is unavailable for rollback")
+            params = dict(target.processing_params or {})
+            if params.get(
+                "source_rollback_previous_active_version_id"
+            ) == item.active_version_id and target.processing_status in {"publish_queued", "publishing"}:
+                return target
+            from_status = target.processing_status
+            params["source_rollback_previous_active_version_id"] = item.active_version_id
+            params["source_rollback_previous_processing_status"] = from_status
+            params["source_rollback_previous_file_id"] = target.yuxi_file_id
+            target.processing_status = "publish_queued"
+            target.yuxi_file_id = None
+            target.processing_params = params
+            target.error_code = None
+            target.error_message = None
+            item.lifecycle_note = reason
+            item.lifecycle_updated_by = operator_id
+            item.lifecycle_updated_at = utc_now()
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=target.version_id,
+                event_type="source_rollback_queued",
+                from_status=from_status,
+                to_status="publish_queued",
+                operator_id=operator_id,
+                message=reason,
+                payload_json={"previous_active_version_id": item.active_version_id},
+            )
+            await self.session.flush()
+            return target
 
     async def confirm_removal(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
         version, item, source = await self._claim_removal(version_id, operator_id=operator_id)
@@ -1580,7 +1852,7 @@ async def _run_publish_worker(
                 raise RuntimeError("Feishu material has no archived source object")
             publish_file_id = version.yuxi_file_id
             shared_active_file = False
-            if item.active_version_id and item.active_version_id != version.version_id:
+            if item.active_version_id:
                 active_file_id = await session.scalar(
                     select(FeishuMaterialVersion.yuxi_file_id).where(
                         FeishuMaterialVersion.version_id == item.active_version_id
@@ -1609,16 +1881,30 @@ async def _run_publish_worker(
                 source_segments = await segment_service.list_active(version.version_id)
                 if source_segments:
                     chunk_file_id = publish_file_id or version.yuxi_file_id or f"candidate-{version.version_id}"
+                    claimed_revision = int(
+                        (version.processing_params or {}).get("unit_publish_claimed_revision")
+                        or (version.processing_params or {}).get("unit_publish_requested_revision")
+                        or 0
+                    )
+                    excluded_segment_ids = await KnowledgeLifecycleService(session).offline_segment_ids(
+                        version.version_id,
+                        claimed_revision=claimed_revision,
+                    )
                     publish_args["prepared_chunks"] = await segment_service.build_publish_chunks(
                         version.version_id,
                         file_id=chunk_file_id,
                         document_title=item.title or "未命名资料",
+                        excluded_segment_ids=excluded_segment_ids,
                     )
         if context is not None:
             await context.raise_if_cancelled()
         if shared_active_file:
             candidate_file_id = await adapter.prepare_file(
-                **{key: value for key, value in publish_args.items() if key not in {"file_id", "parse_before_index"}}
+                **{
+                    key: value
+                    for key, value in publish_args.items()
+                    if key not in {"file_id", "parse_before_index", "prepared_chunks"}
+                }
             )
             async with pg_manager.get_async_session_context() as session:
                 await FeishuReviewService(session).remember_publish_candidate(

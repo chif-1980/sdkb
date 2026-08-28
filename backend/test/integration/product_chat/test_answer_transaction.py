@@ -130,6 +130,7 @@ def _citation(**overrides):
         "item_id": "item-1",
         "version_id": "version-1",
         "yuxi_file_id": "file-1",
+        "chunk_id": "chunk-1",
         "title": "产品手册",
         "source_url": "https://quickdone.feishu.cn/wiki/item-1",
         "path_text": "产品 / 手册",
@@ -273,6 +274,7 @@ async def test_append_exchange_stages_messages_citations_title_and_timestamp_for
     assert citations == stored_citations
     assert citations[0].message_id == assistant_message.message_id
     assert citations[0].message_id != user_message.message_id
+    assert citations[0].chunk_id == "chunk-1"
     assert citations[0].excerpt == "支持私有部署。"
     assert conversation.title == question.strip()[:30]
     assert conversation.updated_at >= previous_updated_at

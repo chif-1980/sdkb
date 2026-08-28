@@ -3,11 +3,13 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { apiAdminGet } from '@/apis/base'
+import { apiAdminGet, apiAdminPatch, apiAdminPost } from '@/apis/base'
 import FeishuFormalKnowledgePanel from './FeishuFormalKnowledgePanel.vue'
 
 vi.mock('@/apis/base', () => ({
-  apiAdminGet: vi.fn()
+  apiAdminGet: vi.fn(),
+  apiAdminPatch: vi.fn(),
+  apiAdminPost: vi.fn()
 }))
 
 function mountPanel() {
@@ -20,7 +22,17 @@ function mountPanel() {
           template: '<button @click="$emit(\'click\')"><slot /></button>'
         },
         'a-select': { template: '<select />' },
-        'a-input': { template: '<input />' },
+        'a-input': {
+          props: ['value'],
+          emits: ['update:value'],
+          template: '<input :value="value" @input="$emit(\'update:value\', $event.target.value)" />'
+        },
+        'a-textarea': {
+          props: ['value'],
+          emits: ['update:value'],
+          template:
+            '<textarea :value="value" @input="$emit(\'update:value\', $event.target.value)" />'
+        },
         'a-spin': { template: '<div><slot /></div>' },
         'a-tag': { template: '<span><slot /></span>' },
         'a-empty': {
@@ -28,8 +40,10 @@ function mountPanel() {
           template: '<div>{{ description }}</div>'
         },
         'a-modal': {
-          props: ['open'],
-          template: '<section v-if="open" class="modal-stub"><slot /></section>'
+          props: ['open', 'footer'],
+          emits: ['ok'],
+          template:
+            '<section v-if="open" class="modal-stub"><slot /><button v-if="footer !== null" class="modal-ok" @click="$emit(\'ok\')">确认</button></section>'
         },
         'a-table': {
           props: ['columns', 'dataSource'],
@@ -59,6 +73,10 @@ describe('FeishuFormalKnowledgePanel', () => {
               source_url: 'https://quickdone.feishu.cn/wiki/source-1',
               wiki_path: '产品资料 / Q900 部署指南',
               source_role: 'PRIMARY',
+              source_publication_status: 'ACTIVE',
+              lifecycle_status: 'ACTIVE',
+              stored_lifecycle_status: 'ACTIVE',
+              index_status: 'INDEXED',
               source_segment_count: 2,
               source_locator: { page: 3 },
               applicability_scope: {},
@@ -82,6 +100,8 @@ describe('FeishuFormalKnowledgePanel', () => {
       }
       return Promise.resolve({ items: [] })
     })
+    apiAdminPatch.mockResolvedValue({ status: 'updated' })
+    apiAdminPost.mockResolvedValue({ status: 'queued' })
   })
 
   it('按知识单元展示正式知识并可追溯原始材料与版本', async () => {
@@ -102,5 +122,24 @@ describe('FeishuFormalKnowledgePanel', () => {
     expect(wrapper.get('.source-trace').text()).toContain('Q900 部署指南')
     expect(wrapper.get('.source-trace').text()).toContain('知识单元')
     expect(wrapper.get('.source-trace').text()).toContain('第 3 页')
+  })
+
+  it('下架知识单元时要求填写原因并调用治理接口', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.get('.knowledge-row').trigger('click')
+    await flushPromises()
+
+    const offlineButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('下架单元'))
+    await offlineButton.trigger('click')
+    await wrapper.get('textarea').setValue('该条知识已过时')
+    await wrapper.get('.modal-ok').trigger('click')
+    await flushPromises()
+
+    expect(apiAdminPost).toHaveBeenCalledWith('/api/governance/knowledge-units/unit-1/offline', {
+      reason: '该条知识已过时'
+    })
   })
 })

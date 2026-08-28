@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -319,6 +319,101 @@ async def test_formal_knowledge_prefers_included_units_and_keeps_source_trace(go
     assert items[0]["source_title"] == "Q900 部署指南"
     assert items[0]["source_segment_count"] == 2
     assert items[0]["source_locator"] == {"page": 3}
+
+
+async def test_formal_knowledge_reports_reminder_and_offline_state_without_hiding_management_record(
+    governance_session,
+):
+    now = datetime.now(UTC)
+    unit = FeishuKnowledgeUnit(
+        unit_id="unit-lifecycle",
+        unit_key="section:lifecycle",
+        lineage_key="section:lifecycle",
+        version_id="version-current",
+        item_id="item-current",
+        unit_index=0,
+        unit_type="SECTION",
+        title="生命周期说明",
+        content="知识有效期和复核日期只用于提醒。",
+        content_hash="unit-lifecycle-hash",
+        source_segment_ids=["segment-lifecycle"],
+        recommended_outcome="PUBLISH",
+        recommendation_reason="内容完整。",
+        publication_state="INCLUDED",
+        lifecycle_status="ACTIVE",
+        valid_until=now - timedelta(days=1),
+        review_due_at=now - timedelta(days=2),
+    )
+    governance_session.add(unit)
+    await governance_session.commit()
+
+    items = await GovernanceService(governance_session).list_formal_knowledge("source-1")
+    assert items[0]["lifecycle_status"] == "EXPIRED"
+    assert items[0]["stored_lifecycle_status"] == "ACTIVE"
+    assert items[0]["index_status"] == "INDEXED"
+
+    unit.valid_until = now + timedelta(days=30)
+    await governance_session.commit()
+    items = await GovernanceService(governance_session).list_formal_knowledge("source-1")
+    assert items[0]["lifecycle_status"] == "REVIEW_DUE"
+    assert items[0]["index_status"] == "INDEXED"
+
+    source_item = await governance_session.scalar(
+        select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-current")
+    )
+    current_version = await governance_session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-current")
+    )
+    source_item.publication_status = "OFFLINE"
+    current_version.yuxi_file_id = None
+    await governance_session.commit()
+
+    items = await GovernanceService(governance_session).list_formal_knowledge("source-1")
+    assert len(items) == 1
+    assert items[0]["source_publication_status"] == "OFFLINE"
+    assert items[0]["lifecycle_status"] == "OFFLINE"
+    assert items[0]["index_status"] == "OFFLINE"
+
+
+async def test_formal_knowledge_versions_mark_only_archived_approved_history_as_rollback_available(
+    governance_session,
+):
+    current = await governance_session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-current")
+    )
+    current.source_object_path = "source-1/item-current/version-current.docx"
+    governance_session.add_all(
+        [
+            FeishuMaterialVersion(
+                version_id="version-history-ready",
+                item_id="item-current",
+                revision="0",
+                content_hash="history-ready-hash",
+                source_object_path="source-1/item-current/version-history-ready.docx",
+                processing_status="replaced",
+                review_status="approved",
+                yuxi_file_id="file-history-ready",
+                published_at=datetime.now(UTC) - timedelta(days=30),
+            ),
+            FeishuMaterialVersion(
+                version_id="version-history-no-archive",
+                item_id="item-current",
+                revision="-1",
+                content_hash="history-no-archive-hash",
+                processing_status="replaced",
+                review_status="approved",
+                published_at=datetime.now(UTC) - timedelta(days=60),
+            ),
+        ]
+    )
+    await governance_session.commit()
+
+    versions = await GovernanceService(governance_session).list_knowledge_versions("item-current")
+    by_id = {version["version_id"]: version for version in versions}
+    assert by_id["version-current"]["active"] is True
+    assert by_id["version-current"]["rollback_available"] is False
+    assert by_id["version-history-ready"]["rollback_available"] is True
+    assert by_id["version-history-no-archive"]["rollback_available"] is False
 
 
 async def test_comparison_is_idempotent_and_ensures_review_task(governance_session):

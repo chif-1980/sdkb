@@ -185,6 +185,7 @@ class MessageCitation(Base):
     item_id = Column(String(64), nullable=False)
     version_id = Column(String(64), nullable=False)
     yuxi_file_id = Column(String(64), nullable=False)
+    chunk_id = Column(String(128), nullable=True)
     title = Column(String(512), nullable=False)
     source_url = Column(String(2048), nullable=False)
     path_text = Column(Text, nullable=True)
