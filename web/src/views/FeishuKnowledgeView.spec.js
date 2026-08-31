@@ -67,7 +67,9 @@ function makeMaterial(versionId, overrides = {}) {
     processing_status: 'awaiting_review',
     review_status: 'pending',
     source_validity: 'valid',
+    publication_status: 'ACTIVE',
     active: false,
+    source_object_path: `minio://knowledgebases/${versionId}/source`,
     yuxi_file_id: `file-${versionId}`,
     content_quality: { checked: true, has_body: true, body_length: 24 },
     ...overrides
@@ -238,6 +240,7 @@ describe('feishuKnowledgeApi', () => {
     await feishuKnowledgeApi.rejectMaterial('version/1', '内容过期')
     await feishuKnowledgeApi.approveMaterial('version/1')
     await feishuKnowledgeApi.retryMaterial('version/1')
+    await feishuKnowledgeApi.reindexMaterial('version/1')
     await feishuKnowledgeApi.confirmRemoval('version/1')
     await feishuKnowledgeApi.getMaterial('version/1')
     await feishuKnowledgeApi.listMaterialEvents('version/1')
@@ -262,6 +265,10 @@ describe('feishuKnowledgeApi', () => {
     expect(apiAdminPost).toHaveBeenCalledWith(
       '/api/feishu-knowledge/materials/version%2F1/reject',
       { reason: '内容过期' }
+    )
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/feishu-knowledge/materials/version%2F1/reindex',
+      {}
     )
     expect(apiAdminPost).toHaveBeenCalledWith(
       '/api/feishu-knowledge/materials/version%2F1/confirm-removal',
@@ -388,6 +395,12 @@ describe('FeishuMaterialTable', () => {
           source_validity: 'invalid',
           active: true
         }),
+        makeMaterial('reindexable', {
+          title: '可重建索引素材',
+          processing_status: 'published',
+          review_status: 'approved',
+          active: true
+        }),
         makeMaterial('inactive-removal', {
           title: '非活跃素材',
           processing_status: 'published',
@@ -424,12 +437,14 @@ describe('FeishuMaterialTable', () => {
       审核通过: false,
       驳回: false,
       重试: true,
+      重新解析并重建索引: true,
       确认下架: true
     })
     expect(disabledActions('retryable')).toEqual({
       审核通过: true,
       驳回: false,
       重试: false,
+      重新解析并重建索引: true,
       确认下架: true
     })
     expect(disabledActions('missing-review-file').审核通过).toBe(true)
@@ -438,14 +453,16 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: true,
+      重新解析并重建索引: true,
       确认下架: false
     })
+    expect(disabledActions('reindexable').重新解析并重建索引).toBe(false)
     expect(disabledActions('inactive-removal').确认下架).toBe(true)
     expect(disabledActions('missing-file-removal').确认下架).toBe(true)
     expect(disabledActions('failed-removal').确认下架).toBe(false)
   })
 
-  it('仅当全部所选素材符合对应条件时启用四种批量操作', async () => {
+  it('仅当全部所选素材符合对应条件时启用批量操作', async () => {
     const wrapper = mountMaterialTable({
       materials: [
         makeMaterial('reviewable-1', {
@@ -479,6 +496,18 @@ describe('FeishuMaterialTable', () => {
           review_status: 'approved',
           source_validity: 'invalid',
           active: true
+        }),
+        makeMaterial('reindexable-1', {
+          title: '可重建索引素材一',
+          processing_status: 'published',
+          review_status: 'approved',
+          active: true
+        }),
+        makeMaterial('reindexable-2', {
+          title: '可重建索引素材二',
+          processing_status: 'published',
+          review_status: 'approved',
+          active: true
         })
       ]
     })
@@ -497,6 +526,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: true,
+      重新解析并重建索引: true,
       确认下架: true
     })
     const approveButton = wrapper
@@ -512,6 +542,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: false,
       重试: true,
+      重新解析并重建索引: true,
       确认下架: true
     })
     const rejectButton = wrapper
@@ -529,6 +560,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: false,
       驳回: false,
       重试: true,
+      重新解析并重建索引: true,
       确认下架: true
     })
 
@@ -538,6 +570,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: false,
+      重新解析并重建索引: true,
       确认下架: true
     })
 
@@ -547,8 +580,27 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: true,
+      重新解析并重建索引: true,
       确认下架: false
     })
+
+    rowSelection.onChange(['reindexable-1', 'reindexable-2'])
+    await wrapper.vm.$nextTick()
+    expect(batchDisabledActions()).toEqual({
+      审核通过: true,
+      驳回: true,
+      重试: true,
+      重新解析并重建索引: false,
+      确认下架: true
+    })
+    await wrapper
+      .get('.batch-actions')
+      .findAll('button')
+      .find((button) => button.text() === '重新解析并重建索引')
+      .trigger('click')
+    expect(wrapper.emitted('batch-action').at(-1)).toEqual([
+      { action: 'reindex', versionIds: ['reindexable-1', 'reindexable-2'] }
+    ])
   })
 })
 
@@ -748,7 +800,9 @@ describe('FeishuKnowledgeView', () => {
     })
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.findComponent({ name: 'FeishuReviewWorkspace' }).props('targetReviewId')).toEqual({
+    expect(
+      wrapper.findComponent({ name: 'FeishuReviewWorkspace' }).props('targetReviewId')
+    ).toEqual({
       packageId: 'package-update-13',
       sourceVersionId: 'version-13'
     })
@@ -1091,6 +1145,31 @@ describe('FeishuKnowledgeView', () => {
     )
     expect(apiAdminPost).toHaveBeenCalledWith(
       '/api/feishu-knowledge/materials/version-1/approve',
+      {}
+    )
+  })
+
+  it('重新解析前说明原子替换，确认后调用重建索引接口', async () => {
+    Modal.confirm.mockImplementation(({ onOk }) => onOk())
+    apiAdminPost.mockResolvedValue({ status: 'publish_queued' })
+    const wrapper = mountView()
+    await flushPromises()
+    await openMaterials(wrapper)
+
+    wrapper.findComponent({ name: 'FeishuMaterialTable' }).vm.$emit('action', {
+      action: 'reindex',
+      material: { version_id: 'version-1', title: '产品手册' }
+    })
+    await flushPromises()
+
+    expect(Modal.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: '重新解析并重建“产品手册”的索引？',
+        content: '系统会先生成新索引，成功后再替换当前索引；失败时继续使用当前索引。'
+      })
+    )
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/feishu-knowledge/materials/version-1/reindex',
       {}
     )
   })

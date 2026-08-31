@@ -63,6 +63,10 @@ class CitationResponse(ProductResponse):
     locator: str
     excerpt: str
     version_at: str | None
+    media_type: Literal["IMAGE"] | None = None
+    image_url: str | None = None
+    preview_url: str | None = None
+    image_alt: str | None = None
 
 
 class MessageResponse(ProductResponse):

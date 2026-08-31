@@ -146,6 +146,10 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
         "locator",
         "excerpt",
         "source_version_at",
+        "media_type",
+        "image_url",
+        "preview_url",
+        "image_alt",
         "created_at",
     }
 

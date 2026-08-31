@@ -60,7 +60,7 @@ async def test_ppt_segments_keep_approximate_slide_locator():
     )
 
     assert drafts
-    assert all(draft.segment_type == "slide" for draft in drafts)
+    assert {draft.segment_type for draft in drafts} == {"slide", "image"}
     assert all(draft.locator.get("slide") for draft in drafts)
 
 
@@ -85,8 +85,42 @@ async def test_large_markdown_table_is_split_with_repeated_headers():
     assert drafts[0].locator["row_start"] < drafts[-1].locator["row_start"]
 
 
-async def test_media_reference_without_text_does_not_create_segment():
-    assert _drafts("![only-image](image.png)", filename="image.png") == []
+async def test_image_reference_creates_searchable_image_segment_with_preview_and_context():
+    drafts = _drafts(
+        '![系统架构图](/minio/public/docs/architecture.png "/minio/public/docs/previews/architecture.webp")\n\n'
+        "图片文字：接入层 服务层 数据层 向量数据库 对象存储",
+        filename="architecture.docx",
+    )
+
+    assert len(drafts) == 1
+    assert drafts[0].segment_type == "image"
+    assert "系统架构图" in drafts[0].content
+    assert "向量数据库" in drafts[0].content
+
+
+async def test_image_segment_is_published_as_an_independent_retrieval_chunk(segment_session):
+    session, version, item = segment_session
+    service = SourceSegmentService(session)
+    segments = await service.replace_for_version(
+        version,
+        item,
+        yuxi_file_id="file-1",
+        content=(
+            "# 技术架构\n\n"
+            '![系统架构图](/minio/public/docs/architecture.png "/minio/public/docs/previews/architecture.webp")\n\n'
+            "图片文字：接入层 服务层 数据层 向量数据库 对象存储"
+        ),
+    )
+    for segment in segments:
+        segment.publication_state = "INCLUDED"
+    await session.flush()
+
+    chunks = build_retrieval_chunks(segments, file_id="file-1", document_title="部署指南")
+
+    image_chunks = [chunk for chunk in chunks if "image" in chunk["tags"]["segment_types"]]
+    assert len(image_chunks) == 1
+    assert "系统架构图" in image_chunks[0]["content"]
+    assert "向量数据库" in image_chunks[0]["content"]
 
 
 @pytest.fixture

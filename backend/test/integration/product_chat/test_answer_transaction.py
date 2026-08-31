@@ -280,6 +280,32 @@ async def test_append_exchange_stages_messages_citations_title_and_timestamp_for
     assert conversation.updated_at >= previous_updated_at
 
 
+async def test_append_exchange_persists_image_evidence_fields(db_session):
+    repository = ProductChatRepository(db_session)
+    conversation = await repository.create_conversation(7, "")
+    citation = _citation(
+        media_type="IMAGE",
+        image_url="/minio/public/docs/architecture.png",
+        preview_url="/minio/public/docs/previews/architecture.webp",
+        image_alt="系统架构图",
+    )
+
+    _, assistant_message, _ = await repository.append_exchange(
+        conversation,
+        7,
+        "展示系统架构图",
+        _answer(citations=(citation,)),
+    )
+    await db_session.commit()
+    _, stored = (await repository.list_messages_with_citations(conversation.conversation_id))[-1]
+
+    assert stored[0].message_id == assistant_message.message_id
+    assert stored[0].media_type == "IMAGE"
+    assert stored[0].image_url == "/minio/public/docs/architecture.png"
+    assert stored[0].preview_url == "/minio/public/docs/previews/architecture.webp"
+    assert stored[0].image_alt == "系统架构图"
+
+
 async def test_append_exchange_rejects_conversation_archived_after_require(db_session):
     repository = ProductChatRepository(db_session)
     conversation = await repository.create_conversation(7, "Owned")

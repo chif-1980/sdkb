@@ -337,6 +337,10 @@ async def test_send_and_detail_return_persisted_exchange_for_each_answer_status(
             "locator",
             "excerpt",
             "versionAt",
+            "mediaType",
+            "imageUrl",
+            "previewUrl",
+            "imageAlt",
         }
 
     assert detail_response.status_code == 200

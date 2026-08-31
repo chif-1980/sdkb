@@ -185,6 +185,12 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         "CREATE INDEX IF NOT EXISTS ix_message_citations_version_id ON message_citations (version_id)",
     }
     chunk_id_migration = "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS chunk_id VARCHAR(128)"
+    image_migrations = {
+        "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS media_type VARCHAR(16)",
+        "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS image_url VARCHAR(2048)",
+        "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS preview_url VARCHAR(2048)",
+        "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS image_alt VARCHAR(512)",
+    }
     statement_counts = Counter(connection.statements)
     for statement in expected_indexes:
         assert statement_counts[statement] == 2
@@ -194,8 +200,9 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
     ]
     assert len(migration_statements) == 2
     assert statement_counts[chunk_id_migration] == 2
-    assert len(connection.statements) == 2 * (len(expected_indexes) + 2)
-    statements_per_run = len(expected_indexes) + 2
+    assert all(statement_counts[statement] == 2 for statement in image_migrations)
+    assert len(connection.statements) == 2 * (len(expected_indexes) + len(image_migrations) + 2)
+    statements_per_run = len(expected_indexes) + len(image_migrations) + 2
     assert connection.statements[0] == connection.statements[statements_per_run] == migration_statements[0]
     assert all(statement == migration_statements[0] for statement in migration_statements)
     locator_type_check = "data_type IN ('json', 'jsonb')"

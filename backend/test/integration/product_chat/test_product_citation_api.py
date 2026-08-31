@@ -249,6 +249,10 @@ async def test_get_citation_returns_persisted_camel_case_snapshot_after_current_
         "locator": "第1段",
         "excerpt": "支持私有部署。",
         "versionAt": response.json()["versionAt"],
+        "mediaType": None,
+        "imageUrl": None,
+        "previewUrl": None,
+        "imageAlt": None,
     }
     assert response.json()["versionAt"].endswith("Z")
     assert len(context.policy_calls) == 1

@@ -12,6 +12,9 @@
         <a-button size="small" :disabled="!canBatch('retry')" @click="emitBatch('retry')">
           重试
         </a-button>
+        <a-button size="small" :disabled="!canBatch('reindex')" @click="emitBatch('reindex')">
+          重新解析并重建索引
+        </a-button>
         <a-button
           size="small"
           danger
@@ -60,7 +63,14 @@
             </a-tag>
             <a-tag v-if="record.is_directory" color="blue">无需审核</a-tag>
             <a-tag v-else-if="record.content_missing" color="error">正文缺失</a-tag>
-            <a-tag v-else-if="record.content_check_pending && ['parsed', 'awaiting_review'].includes(record.processing_status)" color="warning">正文待确认</a-tag>
+            <a-tag
+              v-else-if="
+                record.content_check_pending &&
+                ['parsed', 'awaiting_review'].includes(record.processing_status)
+              "
+              color="warning"
+              >正文待确认</a-tag
+            >
           </template>
           <template v-else-if="column.key === 'source_validity'">
             <a-tag :color="record.source_validity === 'valid' ? 'success' : 'warning'">
@@ -72,7 +82,9 @@
           </template>
           <template v-else-if="column.key === 'action'">
             <div class="row-actions">
-              <a-button type="link" size="small" @click="emit('open-detail', record)">详情</a-button>
+              <a-button type="link" size="small" @click="emit('open-detail', record)"
+                >详情</a-button
+              >
               <a-dropdown :trigger="['click']">
                 <a-button type="text" size="small" aria-label="素材操作">
                   <MoreHorizontal :size="17" />
@@ -87,6 +99,9 @@
                     </a-menu-item>
                     <a-menu-item key="retry" :disabled="!canPerformAction(record, 'retry')">
                       重试
+                    </a-menu-item>
+                    <a-menu-item key="reindex" :disabled="!canPerformAction(record, 'reindex')">
+                      重新解析并重建索引
                     </a-menu-item>
                     <a-menu-item
                       key="confirm_removal"
@@ -223,6 +238,17 @@ function canPerformAction(material, action) {
   if (action === 'reject') return material.review_status === 'pending'
   if (action === 'retry') {
     return ['parse_failed', 'publish_failed'].includes(material.processing_status)
+  }
+  if (action === 'reindex') {
+    return (
+      material.processing_status === 'published' &&
+      material.review_status === 'approved' &&
+      material.source_validity === 'valid' &&
+      material.publication_status === 'ACTIVE' &&
+      material.active === true &&
+      Boolean(material.source_object_path) &&
+      Boolean(material.yuxi_file_id)
+    )
   }
   if (action === 'confirm_removal') {
     return (

@@ -268,6 +268,54 @@ async def test_supported_answer_uses_only_revalidated_evidence_in_retrieval_orde
 
 
 @pytest.mark.asyncio
+async def test_revalidated_image_evidence_keeps_only_public_minio_media():
+    current = _published_material("file-1")
+    chunks = [
+        {
+            "content": (
+                "文档：产品手册\n位置：第4页\n\n"
+                "![系统架构图](/minio/public/docs/architecture.png "
+                '"/minio/public/docs/previews/architecture.webp")\n\n'
+                "图片文字：接入层 服务层 数据层"
+            ),
+            "metadata": {"file_id": "file-1", "chunk_index": 3, "chunk_id": "chunk-image"},
+        }
+    ]
+    service, *_ = _service(chunks=chunks, published={"file-1": current})
+
+    evidence = await service._revalidate_evidence("source-1", chunks)
+
+    assert len(evidence) == 1
+    citation = evidence[0]
+    assert citation.media_type == "IMAGE"
+    assert citation.image_url == "/minio/public/docs/architecture.png"
+    assert citation.preview_url == "/minio/public/docs/previews/architecture.webp"
+    assert citation.image_alt == "系统架构图"
+    assert "图片：系统架构图" in citation.excerpt
+    assert "图片文字：接入层 服务层 数据层" in citation.excerpt
+    assert "![" not in citation.excerpt
+
+
+@pytest.mark.asyncio
+async def test_revalidated_evidence_rejects_external_image_url():
+    current = _published_material("file-1")
+    chunks = [
+        {
+            "content": "![外部图片](https://example.test/architecture.png)\n\n图片文字：架构说明内容完整可检索",
+            "metadata": {"file_id": "file-1", "chunk_index": 0},
+        }
+    ]
+    service, *_ = _service(chunks=chunks, published={"file-1": current})
+
+    evidence = await service._revalidate_evidence("source-1", chunks)
+
+    assert len(evidence) == 1
+    assert evidence[0].media_type is None
+    assert evidence[0].image_url is None
+    assert evidence[0].preview_url is None
+
+
+@pytest.mark.asyncio
 async def test_retrieval_groups_one_logical_knowledge_and_prefers_primary_source():
     chunks = [
         {
@@ -382,25 +430,11 @@ async def test_detailed_mode_uses_controlled_multi_step_tools_and_streams_the_gr
             self.config = config
             assert stream_mode == "updates"
             assert "QUESTION:\n标准版如何部署？" in input_value["messages"][0]["content"]
-            yield {
-                "model": {
-                    "messages": [SimpleNamespace(tool_calls=[{"name": "search_enterprise_knowledge"}])]
-                }
-            }
+            yield {"model": {"messages": [SimpleNamespace(tool_calls=[{"name": "search_enterprise_knowledge"}])]}}
             await self.tools["search_enterprise_knowledge"].ainvoke({"query": "标准版 部署 条件"})
-            yield {
-                "model": {
-                    "messages": [SimpleNamespace(tool_calls=[{"name": "open_enterprise_source"}])]
-                }
-            }
-            await self.tools["open_enterprise_source"].ainvoke(
-                {"file_id": "file-1", "offset": 0, "window_size": 80}
-            )
-            yield {
-                "model": {
-                    "messages": [SimpleNamespace(tool_calls=[{"name": "open_enterprise_source"}])]
-                }
-            }
+            yield {"model": {"messages": [SimpleNamespace(tool_calls=[{"name": "open_enterprise_source"}])]}}
+            await self.tools["open_enterprise_source"].ainvoke({"file_id": "file-1", "offset": 0, "window_size": 80})
+            yield {"model": {"messages": [SimpleNamespace(tool_calls=[{"name": "open_enterprise_source"}])]}}
             denied = await self.tools["open_enterprise_source"].ainvoke(
                 {"file_id": "file-stale", "offset": 0, "window_size": 80}
             )
@@ -479,11 +513,7 @@ async def test_detailed_mode_stops_knowledge_tools_at_the_call_limit():
 
         async def astream(self, _input_value, *, config, stream_mode):
             for index in range(8):
-                yield {
-                    "model": {
-                        "messages": [SimpleNamespace(tool_calls=[{"name": "search_enterprise_knowledge"}])]
-                    }
-                }
+                yield {"model": {"messages": [SimpleNamespace(tool_calls=[{"name": "search_enterprise_knowledge"}])]}}
                 await self.search_tool.ainvoke({"query": f"检索角度 {index}"})
 
     def agent_factory(**kwargs):

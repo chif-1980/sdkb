@@ -24,7 +24,7 @@ MAX_SEGMENT_TOKENS = 720
 MIN_MEANINGFUL_TOKENS = 8
 TABLE_HEADER_ROWS = 2
 
-_MEDIA_REFERENCE = re.compile(r"^!?\[[^\]]*\]\([^)]+\)\s*$")
+_MEDIA_REFERENCE = re.compile(r'^!\[(?P<alt>[^\]]*)\]\((?P<url>[^\s)]+)(?:\s+["\'](?P<preview>[^"\']+)["\'])?\)\s*$')
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _PART_HEADING = re.compile(r"^(?:part\s*)?([0-9]{1,2})\s*[-—:：.]?\s*(.+)?$", re.IGNORECASE)
 _PDF_PAGE_MARKER = re.compile(r"第\s*(\d+)\s*页(?:\s*/\s*共\s*(\d+)\s*页)?")
@@ -122,10 +122,13 @@ def _generic_blocks(
     paragraph_lines: list[str] = []
     table_lines: list[str] = []
     qa_lines: list[str] = []
+    image_lines: list[str] = []
 
     def append(content: str, segment_type: str, *, path: list[str] | None = None) -> None:
         cleaned = re.sub(r"\n{3,}", "\n\n", content or "").strip()
-        if not cleaned or nlp.count_tokens(_normalized_content(cleaned)) < MIN_MEANINGFUL_TOKENS:
+        if not cleaned or (
+            segment_type != "image" and nlp.count_tokens(_normalized_content(cleaned)) < MIN_MEANINGFUL_TOKENS
+        ):
             return
         blocks.append(
             StructuralBlock(
@@ -151,10 +154,34 @@ def _generic_blocks(
             append("\n".join(qa_lines), "qa")
             qa_lines.clear()
 
+    def flush_image() -> None:
+        if image_lines:
+            append("\n".join(image_lines), "image")
+            image_lines.clear()
+
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
         if _is_media_reference(line):
+            flush_table()
+            flush_paragraph()
+            flush_qa()
+            flush_image()
+            image_lines.append(line)
             continue
+        if image_lines:
+            if not line:
+                if image_lines[-1] == "":
+                    flush_image()
+                else:
+                    image_lines.append("")
+                continue
+            if image_lines[-1] == "" and not line.startswith("图片文字："):
+                flush_image()
+            elif _MARKDOWN_HEADING.match(line) or _looks_like_table_line(line) or _looks_like_question(line):
+                flush_image()
+            else:
+                image_lines.append(line)
+                continue
         if _looks_like_table_line(line):
             flush_paragraph()
             flush_qa()
@@ -202,6 +229,7 @@ def _generic_blocks(
     flush_table()
     flush_paragraph()
     flush_qa()
+    flush_image()
     return blocks
 
 
@@ -238,6 +266,7 @@ def _split_ppt_groups(text: str) -> list[StructuralBlock]:
             if current and nlp.count_tokens("\n".join(current)) >= 80:
                 groups.append("\n".join(current))
                 current = []
+            current.append(raw_line)
             continue
         current.append(raw_line)
         if nlp.count_tokens("\n".join(current)) >= MAX_SEGMENT_TOKENS:
@@ -335,7 +364,7 @@ def _pack_blocks(blocks: Sequence[StructuralBlock]) -> list[StructuralBlock]:
         current.clear()
 
     for block in expanded:
-        structured = block.segment_type in {"table", "qa", "slide", "ocr"}
+        structured = block.segment_type in {"table", "qa", "slide", "ocr", "image"}
         if structured:
             flush()
             packed.append(block)
@@ -375,7 +404,7 @@ def build_source_segment_drafts(
     drafts: list[SourceSegmentDraft] = []
     for index, block in enumerate(packed):
         normalized = _normalized_content(block.content)
-        if nlp.count_tokens(normalized) < MIN_MEANINGFUL_TOKENS:
+        if block.segment_type != "image" and nlp.count_tokens(normalized) < MIN_MEANINGFUL_TOKENS:
             continue
         anchor_payload = {
             "type": block.segment_type,
@@ -453,7 +482,7 @@ def build_retrieval_chunks(
     for segment in sorted(segments, key=lambda item: item.segment_index):
         if segment.status != "ACTIVE" or segment.publication_state != "INCLUDED":
             continue
-        structured = segment.segment_type in {"table", "qa", "slide", "ocr"}
+        structured = segment.segment_type in {"table", "qa", "slide", "ocr", "image"}
         if structured:
             flush()
             current.append(segment)
