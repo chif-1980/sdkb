@@ -71,7 +71,7 @@ class CrossDocumentComparisonService:
             raise LookupError(f"Material version not found: {version_id}")
         current, current_item = current_row
 
-        candidate_rows = (
+        recent_candidate_rows = (
             await self.session.execute(
                 select(FeishuMaterialVersion, FeishuSourceItem)
                 .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
@@ -84,29 +84,61 @@ class CrossDocumentComparisonService:
                 .limit(self.MAX_CANDIDATE_SCAN)
             )
         ).all()
+        published_candidate_rows = (
+            await self.session.execute(
+                select(FeishuMaterialVersion, FeishuSourceItem)
+                .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+                .where(
+                    FeishuSourceItem.source_id == current_item.source_id,
+                    FeishuMaterialVersion.version_id != version_id,
+                    FeishuMaterialVersion.processing_status == "published",
+                    FeishuSourceItem.active_version_id == FeishuMaterialVersion.version_id,
+                )
+            )
+        ).all()
+        candidate_rows_by_version_id = {
+            candidate.version_id: (candidate, item) for candidate, item in recent_candidate_rows
+        }
+        candidate_rows_by_version_id.update(
+            {candidate.version_id: (candidate, item) for candidate, item in published_candidate_rows}
+        )
+        candidate_rows = list(candidate_rows_by_version_id.values())
 
-        # Candidate screening is metadata-only and intentionally cheap. Parsed
-        # bodies are loaded only for the small candidate set below.
+        content_by_file_id = await self._load_contents(
+            [current.yuxi_file_id, *(candidate.yuxi_file_id for candidate, _ in candidate_rows)]
+        )
+        current_content = content_by_file_id.get(current.yuxi_file_id or "", "")
+        content_similarity_by_version_id = {
+            candidate.version_id: self._content_similarity(
+                current_content,
+                content_by_file_id.get(candidate.yuxi_file_id or "", ""),
+            )
+            for candidate, _ in candidate_rows
+        }
+
+        # Preserve same-document history, then rank by parsed body before using
+        # title and path as tie-breakers. Metadata alone must not crowd relevant
+        # published knowledge out of the comparison set.
         ranked_candidates = sorted(
             candidate_rows,
-            key=lambda row: self._candidate_similarity(
-                current,
-                current_item,
-                row[0],
-                row[1],
-                "",
-                "",
+            key=lambda row: (
+                current.item_id == row[0].item_id or current.content_hash == row[0].content_hash,
+                content_similarity_by_version_id[row[0].version_id],
+                self._candidate_similarity(
+                    current,
+                    current_item,
+                    row[0],
+                    row[1],
+                    "",
+                    "",
+                ),
             ),
             reverse=True,
         )[: self.MAX_CANDIDATES]
-        content_by_file_id = await self._load_contents(
-            [current.yuxi_file_id, *(candidate.yuxi_file_id for candidate, _ in ranked_candidates)]
-        )
 
         review = await self._ensure_review(current.version_id)
         _ = review
         relations: list[FeishuCrossDocumentRelation] = []
-        current_content = content_by_file_id.get(current.yuxi_file_id or "", "")
         for candidate, candidate_item in ranked_candidates:
             candidate_content = content_by_file_id.get(candidate.yuxi_file_id or "", "")
             evidence = self._classify(

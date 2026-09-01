@@ -559,6 +559,101 @@ async def test_comparison_is_idempotent_and_ensures_review_task(governance_sessi
     )
 
 
+async def test_comparison_includes_published_knowledge_beyond_metadata_candidate_limit(
+    governance_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        CrossDocumentComparisonService,
+        "MAX_CANDIDATE_SCAN",
+        CrossDocumentComparisonService.MAX_CANDIDATES,
+    )
+    now = datetime.now(UTC)
+    pending_item = FeishuSourceItem(
+        item_id="item-pending-review",
+        source_id="source-1",
+        item_key="page:pending-review",
+        item_type="docx",
+        title="数据治理审批规范",
+        path_text="制度中心 / 数据治理",
+        source_validity="valid",
+    )
+    pending_version = FeishuMaterialVersion(
+        version_id="version-pending-review",
+        item_id=pending_item.item_id,
+        revision="1",
+        content_hash="pending-review-hash",
+        processing_status="awaiting_review",
+        review_status="pending",
+        yuxi_file_id="file-pending-review",
+    )
+    published_item = FeishuSourceItem(
+        item_id="item-published-reference",
+        source_id="source-1",
+        item_key="page:published-reference",
+        item_type="pdf",
+        title="采购管理制度附件",
+        path_text="采购中心 / 制度附件",
+        source_validity="valid",
+        active_version_id="version-published-reference",
+    )
+    published_version = FeishuMaterialVersion(
+        version_id="version-published-reference",
+        item_id=published_item.item_id,
+        revision="8",
+        content_hash="published-reference-hash",
+        processing_status="published",
+        review_status="approved",
+        yuxi_file_id="file-published-reference",
+        published_at=now - timedelta(days=30),
+        created_at=now - timedelta(days=30),
+    )
+    distractors = []
+    for index in range(CrossDocumentComparisonService.MAX_CANDIDATES):
+        item = FeishuSourceItem(
+            item_id=f"item-metadata-distractor-{index}",
+            source_id="source-1",
+            item_key=f"page:metadata-distractor-{index}",
+            item_type="docx",
+            title=pending_item.title,
+            path_text=pending_item.path_text,
+            source_validity="valid",
+        )
+        version = FeishuMaterialVersion(
+            version_id=f"version-metadata-distractor-{index}",
+            item_id=item.item_id,
+            revision="1",
+            content_hash=f"metadata-distractor-hash-{index}",
+            processing_status="awaiting_review",
+            review_status="pending",
+            yuxi_file_id=f"file-metadata-distractor-{index}",
+            created_at=now - timedelta(minutes=index),
+        )
+        distractors.extend([item, version])
+    governance_session.add_all(
+        [pending_item, pending_version, published_item, published_version, *distractors]
+    )
+    await governance_session.commit()
+
+    shared_passage = "正式制度规定，所有采购项目必须完成供应商资质核验、报价复核和审批留痕后方可执行。"
+
+    async def content_loader(file_id: str) -> str:
+        if file_id in {"file-pending-review", "file-published-reference"}:
+            return shared_passage
+        return f"{file_id} 仅用于说明其他数据治理流程，与采购制度内容无关。"
+
+    relations = await CrossDocumentComparisonService(
+        governance_session,
+        content_loader=content_loader,
+    ).compare_version(pending_version.version_id)
+
+    assert any(
+        {relation.source_version_id, relation.target_version_id}
+        == {pending_version.version_id, published_version.version_id}
+        for relation in relations
+    )
+
+
 async def test_comparison_does_not_treat_title_or_path_similarity_as_content_overlap(
     governance_session,
 ):
