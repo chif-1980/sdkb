@@ -243,6 +243,57 @@ function knowledgeUnitPackageDetail() {
   }
 }
 
+function unchangedUpdatePackageDetail({ mixed = false } = {}) {
+  const detail = knowledgeUnitPackageDetail()
+  detail.item_type = 'docx'
+  detail.revision = 'updated:2026-08-25T06:59:09+00:00'
+  detail.chunk_count = 0
+  detail.previous_version = {
+    version_id: 'version-first-old',
+    revision: 'updated:2026-08-24T03:29:45+00:00',
+    yuxi_file_id: 'file-first-old',
+    chunk_count: 71,
+    token_count: 1200,
+    published_at: '2026-08-24T04:00:00Z'
+  }
+  detail.review_type_counts = { UPDATE: 3 }
+  detail.recommendation_counts = { ADOPT_NEW_VERSION: 3 }
+  detail.attention_unit_count = mixed ? 1 : 0
+  detail.safe_recommendation_count = mixed ? 2 : 3
+  detail.items = detail.items.map((item, index) => {
+    const content = [
+      '产品支持知识加工、审核和来源追溯。',
+      '生产环境至少需要八核处理器。',
+      '服务端口为 9090。'
+    ][index]
+    return {
+      ...item,
+      review_type: 'UPDATE',
+      relation_ids: [],
+      problem_tags: [],
+      allowed_outcomes: ['ADOPT_NEW_VERSION', 'KEEP_CURRENT', 'EXCLUDE'],
+      content,
+      previous_content: content,
+      change_type: 'UNCHANGED',
+      recommended_outcome: 'ADOPT_NEW_VERSION',
+      recommendation_reason: '内容与上一版本一致，无需逐项复核。',
+      recommendation_confidence: 1,
+      manual_review_required: false
+    }
+  })
+  if (mixed) {
+    detail.items[1] = {
+      ...detail.items[1],
+      previous_content: '生产环境至少需要四核处理器。',
+      change_type: 'UPDATED',
+      recommendation_reason: '该知识单元内容已变化，请核对差异后采用新版。',
+      recommendation_confidence: 0.9,
+      manual_review_required: false
+    }
+  }
+  return detail
+}
+
 function duplicateCandidates(decision = null) {
   return {
     relation_id: 'relation-duplicate',
@@ -1170,6 +1221,122 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.text()).toContain('目标资料 ↔ 旧版部署手册')
     expect(wrapper.text()).toContain('相同条件下端口结论不同')
     expect(wrapper.emitted('target-consumed')).toHaveLength(1)
+  })
+
+  it('整篇知识单元文字均未变化时可保留正式版本且不重新发布', async () => {
+    const detail = unchangedUpdatePackageDetail()
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [detail], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first-old/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockResolvedValue({ remaining_unit_count: 0 })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.version-change-review').text()).toContain('仅检测到文件版本变化')
+    expect(wrapper.get('.version-card.is-current').text()).toContain('待发布，尚未生成正式索引')
+    expect(wrapper.get('.version-change-review').text()).toContain('图片或版式变化')
+    const noUpdateButton = wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('确认无需更新'))
+    expect(noUpdateButton).toBeTruthy()
+    expect(wrapper.get('.record-actions').text()).not.toContain('整篇批量审核')
+
+    await noUpdateButton.trigger('click')
+    expect(Modal.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: '确认无需更新？',
+        okText: '保留当前正式版本'
+      })
+    )
+    await Modal.confirm.mock.calls[0][0].onOk()
+    await flushPromises()
+
+    const resolveCall = apiAdminPost.mock.calls.find(
+      ([url]) => url === '/api/governance/review-packages/package-first/resolve'
+    )
+    expect(resolveCall[1].decisions).toHaveLength(3)
+    expect(resolveCall[1].decisions.every((decision) => decision.outcome === 'KEEP_CURRENT')).toBe(
+      true
+    )
+    expect(wrapper.emitted('knowledge-change')).toBeUndefined()
+    expect(message.success).toHaveBeenCalledWith('已确认无需更新，保留当前正式知识并关闭候选版本')
+  })
+
+  it('解析失败时不允许确认无需更新', async () => {
+    const detail = unchangedUpdatePackageDetail()
+    detail.content_quality = {
+      checked: true,
+      has_body: false,
+      reason: '本次解析没有读取到正文。'
+    }
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [detail], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first-old/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.content-quality-alert').text()).toContain('未读取到可审核正文')
+    expect(wrapper.get('.record-actions').text()).not.toContain('确认无需更新')
+    expect(wrapper.get('.record-actions').text()).toContain('整篇批量审核')
+  })
+
+  it('仅当前知识单元未变化时不显示整篇无需更新操作', async () => {
+    const detail = unchangedUpdatePackageDetail({ mixed: true })
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({ items: [detail], total: 1, counts: { mine: 1 } })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [], count: 0, token_count: 0 })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/knowledge/databases/kb-1/documents/file-first-old/content') {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.version-change-review').text()).toContain('当前知识单元未检测到文字变化')
+    expect(wrapper.get('.version-change-review').text()).not.toContain('仅检测到文件版本变化')
+    expect(wrapper.get('.record-actions').text()).not.toContain('确认无需更新')
+    expect(wrapper.get('.record-actions').text()).toContain('整篇批量审核')
   })
 
   it('从跨文档关系列表进入时定位对应资料和证据页', async () => {
