@@ -151,7 +151,15 @@ async def test_review_list_and_comparison_return_real_persisted_evidence(governa
     assert comparisons[0]["relation_type"] == "CONFLICT"
     assert comparisons[0]["source_title"] == "金融行业解决方案"
     assert comparisons[0]["target_title"] == "Q900 部署指南"
+    assert comparisons[0]["source_processing_status"] == "awaiting_review"
+    assert comparisons[0]["source_review_status"] == "pending"
+    assert comparisons[0]["target_processing_status"] == "published"
+    assert comparisons[0]["target_review_status"] == "approved"
     assert comparisons[0]["different_content"][0]["field"] == "GPU 数量"
+
+    relations = await service.list_relations("source-1")
+    assert relations[0]["source_processing_status"] == "awaiting_review"
+    assert relations[0]["target_processing_status"] == "published"
 
 
 async def test_comparison_status_separates_all_relations_from_actionable_issues(governance_session):
@@ -652,6 +660,73 @@ async def test_comparison_includes_published_knowledge_beyond_metadata_candidate
         == {pending_version.version_id, published_version.version_id}
         for relation in relations
     )
+
+
+async def test_comparison_invalidates_same_source_item_history_relation(governance_session):
+    historical_version = FeishuMaterialVersion(
+        version_id="version-current-history",
+        item_id="item-current",
+        revision="0",
+        content_hash="current-hash",
+        processing_status="awaiting_review",
+        review_status="pending",
+        yuxi_file_id="file-current-history",
+    )
+    same_item_relation = FeishuCrossDocumentRelation(
+        relation_id="relation-same-source-history",
+        comparison_key="version-current-history:version-current",
+        source_version_id="version-current-history",
+        target_version_id="version-current",
+        relation_type="EXACT_DUPLICATE",
+        similarity=1.0,
+        confidence=0.99,
+        same_content=["同一飞书资料的不同版本", "内容哈希一致", "正文局部相似度 100%"],
+        status="open",
+    )
+    governance_session.add_all([historical_version, same_item_relation])
+    await governance_session.commit()
+
+    async def content_loader(file_id: str) -> str:
+        if file_id in {"file-current", "file-current-history"}:
+            return "相同的正式知识正文内容，用于验证同一资料历史版本不进入跨文档检查。"
+        return "金融行业解决方案，与当前产品资料无关。"
+
+    relations = await CrossDocumentComparisonService(
+        governance_session,
+        content_loader=content_loader,
+    ).compare_version("version-current")
+
+    assert all(
+        {relation.source_version_id, relation.target_version_id}
+        != {"version-current", "version-current-history"}
+        for relation in relations
+    )
+    assert same_item_relation.status == "invalidated"
+    assert same_item_relation.human_decision == "SAME_SOURCE_HISTORY"
+
+
+async def test_comparison_excludes_invalid_source_and_invalidates_open_relation(governance_session):
+    candidate_item = await governance_session.scalar(
+        select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-candidate")
+    )
+    relation = await governance_session.scalar(
+        select(FeishuCrossDocumentRelation).where(FeishuCrossDocumentRelation.relation_id == "relation-1")
+    )
+    candidate_item.source_validity = "invalid"
+    await governance_session.commit()
+
+    async def content_loader(file_id: str) -> str:
+        return f"{file_id} 的正文内容"
+
+    result = await CrossDocumentComparisonService(
+        governance_session,
+        content_loader=content_loader,
+    ).compare_source("source-1")
+
+    assert result["total"] == 1
+    assert relation.status == "invalidated"
+    assert relation.human_decision == "SOURCE_INVALIDATED"
+    assert relation.human_comment == "关联的飞书资料已失效，不再参与跨文档检查"
 
 
 async def test_comparison_does_not_treat_title_or_path_similarity_as_content_overlap(

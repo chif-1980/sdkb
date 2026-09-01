@@ -4,7 +4,7 @@
   <p><strong>企业知识治理与可信知识助手平台</strong></p>
   <p>让企业资料从接入、加工、审核到发布形成可追溯闭环，并以可核对的引用支撑每一次回答。</p>
 
-  [![Version](https://img.shields.io/badge/version-v0.1-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.1)
+  [![Version](https://img.shields.io/badge/version-v0.1.5-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.1.5)
   [![License](https://img.shields.io/badge/license-MIT-475569)](LICENSE)
   [![Docs](https://img.shields.io/badge/docs-在线文档-2563eb)](https://chif-1980.github.io/sdkb/)
 
@@ -72,7 +72,7 @@
 
 ## 当前版本
 
-`v0.1` 是善达知枢首个产品基线，覆盖飞书资料接入、知识加工与审核、正式知识发布以及企业知识助手的可信问答闭环。
+`v0.1.5` 是善达知枢当前正式基线，覆盖飞书资料接入、知识加工与审核、跨文档证据核对、正式知识发布以及企业知识助手的可信问答闭环。
 
 ## 开源说明
 

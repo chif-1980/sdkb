@@ -78,7 +78,7 @@ _DOCUMENT_SOURCE_CACHE: OrderedDict[str, bytes] = OrderedDict()
 _DOCUMENT_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
 _DOCUMENT_PAGE_CACHE: OrderedDict[tuple[str, int], tuple[bytes, str]] = OrderedDict()
 _RELATION_LAYOUT_CACHE: OrderedDict[str, dict] = OrderedDict()
-_RELATION_PAGE_CACHE: OrderedDict[tuple[str, str, int], tuple[bytes, str]] = OrderedDict()
+_RELATION_PAGE_CACHE: OrderedDict[tuple[str, str, int, int], tuple[bytes, str]] = OrderedDict()
 _OFFICE_PDF_CACHE: OrderedDict[str, bytes] = OrderedDict()
 _OFFICE_PDF_LOCKS: dict[str, asyncio.Lock] = {}
 _PREVIEW_PDF_CACHE_DIR = Path(os.getenv("YUXI_GOVERNANCE_PREVIEW_CACHE_DIR", "saves/cache/governance-preview-pdf"))
@@ -875,7 +875,16 @@ def _comparison_text(value: object) -> str:
     return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", str(value or "").lower())
 
 
-def _comparison_block_ids(layout: dict, match: dict, side: str) -> tuple[int | None, list[str]]:
+def _comparison_block_ids_by_page(
+    layout: dict, match: dict, side: str
+) -> tuple[int | None, dict[int, list[str]]]:
+    """Locate one evidence excerpt across the rendered pages of a document.
+
+    Office-to-PDF conversion can split one source segment across several pages,
+    so the source locator is only a search hint.  The returned map keeps the
+    blocks belonging to the excerpt on each page; the first page remains the
+    page used for the initial view.
+    """
     locator = match.get(f"{side}_locator") or {}
     page_number = _comparison_page_number(locator)
     segment_id = match.get(f"{side}_segment_id")
@@ -885,24 +894,99 @@ def _comparison_block_ids(layout: dict, match: dict, side: str) -> tuple[int | N
     candidate_pages = [page for page in pages if page_number is None or page.get("page_number") == page_number]
     if not candidate_pages:
         candidate_pages = pages
-    for page in candidate_pages:
+    remaining_pages = [page for page in pages if page not in candidate_pages]
+    ordered_pages = [*candidate_pages, *remaining_pages]
+    page_matches: list[tuple[int, list[dict], set[int], int, int]] = []
+    for page in ordered_pages:
         blocks = page.get("blocks") or []
-        matched = []
         if normalized_excerpt:
-            matched = [
-                block
-                for block in blocks
-                if (normalized_block := _comparison_text(block.get("content")))
-                and (
-                    normalized_excerpt in normalized_block
-                    or (len(normalized_block) >= 4 and normalized_block in normalized_excerpt)
+            matched = []
+            covered_positions: set[int] = set()
+            longest_match = 0
+            for block in blocks:
+                normalized_block = _comparison_text(block.get("content"))
+                if not normalized_block:
+                    continue
+                if normalized_excerpt in normalized_block:
+                    matched.append(block)
+                    covered_positions.update(range(len(normalized_excerpt)))
+                    longest_match = max(longest_match, len(normalized_excerpt))
+                    continue
+                if len(normalized_block) < 4 or normalized_block not in normalized_excerpt:
+                    continue
+                matched.append(block)
+                longest_match = max(longest_match, len(normalized_block))
+                start = 0
+                while (index := normalized_excerpt.find(normalized_block, start)) >= 0:
+                    covered_positions.update(range(index, index + len(normalized_block)))
+                    start = index + len(normalized_block)
+            if matched:
+                score = (
+                    len(covered_positions),
+                    longest_match,
+                    int(page.get("page_number") == page_number),
                 )
+                page_matches.append(
+                    (
+                        int(page.get("page_number") or 0),
+                        matched,
+                        covered_positions,
+                        longest_match,
+                        score[2],
+                    )
+                )
+    if page_matches:
+        # If a page contains the complete excerpt, it is the authoritative
+        # match; short common labels on another page must not be highlighted.
+        complete_matches = [item for item in page_matches if len(item[2]) >= len(normalized_excerpt)]
+        if complete_matches:
+            candidates = complete_matches
+        else:
+            best_coverage = max(len(item[2]) for item in page_matches)
+            best_longest_match = max(item[3] for item in page_matches)
+            candidates = [
+                item
+                for item in page_matches
+                if len(item[2]) * 100 >= best_coverage * 35
+                and item[3] * 100 >= best_longest_match * 35
             ]
-        if not matched and segment_id:
+        selected: list[tuple[int, list[dict], set[int], int, int]] = []
+        covered: set[int] = set()
+        for item in sorted(candidates, key=lambda value: (len(value[2]), value[3], value[4]), reverse=True):
+            unique = item[2] - covered
+            if not unique and selected:
+                continue
+            selected.append(item)
+            covered.update(item[2])
+            if len(covered) >= len(normalized_excerpt):
+                break
+        by_page = {
+            page: [str(block.get("block_id")) for block in blocks]
+            for page, blocks, _positions, _longest, _locator_match in selected
+            if page and blocks
+        }
+        if by_page:
+            first_page = next(iter(by_page))
+            return first_page, by_page
+    if segment_id:
+        by_page: dict[int, list[str]] = {}
+        for page in ordered_pages:
+            blocks = page.get("blocks") or []
             matched = [block for block in blocks if segment_id in (block.get("source_segment_ids") or [])]
-        if matched:
-            return page.get("page_number"), [str(block.get("block_id")) for block in matched]
-    return page_number, []
+            if matched:
+                page_value = int(page.get("page_number") or 0)
+                if page_value:
+                    by_page[page_value] = [str(block.get("block_id")) for block in matched]
+        if by_page:
+            first_page = next(iter(by_page))
+            return first_page, by_page
+    return page_number, {}
+
+
+def _comparison_block_ids(layout: dict, match: dict, side: str) -> tuple[int | None, list[str]]:
+    """Compatibility wrapper for callers that only need the initial page."""
+    page_number, by_page = _comparison_block_ids_by_page(layout, match, side)
+    return page_number, by_page.get(page_number, []) if page_number is not None else []
 
 
 @governance.get("/relations/{relation_id}/layout-comparison")
@@ -945,8 +1029,10 @@ async def get_relation_layout_comparison(
             matches = []
     enriched_matches = []
     for match in matches:
-        source_page, source_block_ids = _comparison_block_ids(source_layout, match, "source")
-        target_page, target_block_ids = _comparison_block_ids(target_layout, match, "target")
+        source_page, source_blocks_by_page = _comparison_block_ids_by_page(source_layout, match, "source")
+        target_page, target_blocks_by_page = _comparison_block_ids_by_page(target_layout, match, "target")
+        source_block_ids = source_blocks_by_page.get(source_page, []) if source_page is not None else []
+        target_block_ids = target_blocks_by_page.get(target_page, []) if target_page is not None else []
         enriched_matches.append(
             {
                 **match,
@@ -954,6 +1040,14 @@ async def get_relation_layout_comparison(
                 "target_page_number": target_page,
                 "source_block_ids": source_block_ids,
                 "target_block_ids": target_block_ids,
+                "source_page_numbers": list(source_blocks_by_page),
+                "target_page_numbers": list(target_blocks_by_page),
+                "source_block_ids_by_page": {
+                    str(page): block_ids for page, block_ids in source_blocks_by_page.items()
+                },
+                "target_block_ids_by_page": {
+                    str(page): block_ids for page, block_ids in target_blocks_by_page.items()
+                },
             }
         )
     response = {
@@ -992,6 +1086,7 @@ async def get_relation_layout_comparison_page(
     relation_id: str,
     side: str,
     page_number: int,
+    density: int = Query(1, ge=1, le=3),
     db: AsyncSession = Depends(get_db),
 ):
     if side not in {"source", "target"}:
@@ -1004,7 +1099,7 @@ async def get_relation_layout_comparison_page(
     if relation is None:
         raise HTTPException(status_code=404, detail=f"Cross-document relation not found: {relation_id}")
     version_id = relation.source_version_id if side == "source" else relation.target_version_id
-    cache_key = (relation_id, side, page_number)
+    cache_key = (relation_id, side, page_number, density)
     cached = _RELATION_PAGE_CACHE.get(cache_key)
     if cached is None:
         try:
@@ -1022,6 +1117,7 @@ async def get_relation_layout_comparison_page(
                 content,
                 page_number=page_number,
                 pdf_content=pdf_content,
+                density=density,
             )
         except HTTPException:
             raise

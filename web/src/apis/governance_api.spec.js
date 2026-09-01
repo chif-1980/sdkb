@@ -140,6 +140,7 @@ describe('governanceApi', () => {
   it('读取跨文档版式对比和页面预览', () => {
     governanceApi.getRelationLayoutComparison('relation/1')
     governanceApi.getRelationLayoutComparisonPage('relation/1', 'source', 2)
+    governanceApi.getRelationLayoutComparisonPage('relation/1', 'target', 3, 2)
 
     expect(apiAdminGet).toHaveBeenNthCalledWith(
       1,
@@ -148,6 +149,12 @@ describe('governanceApi', () => {
     expect(apiAdminGet).toHaveBeenNthCalledWith(
       2,
       '/api/governance/relations/relation%2F1/layout-comparison/source/pages/2',
+      {},
+      'blob'
+    )
+    expect(apiAdminGet).toHaveBeenNthCalledWith(
+      3,
+      '/api/governance/relations/relation%2F1/layout-comparison/target/pages/3?density=2',
       {},
       'blob'
     )

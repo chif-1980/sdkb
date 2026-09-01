@@ -89,3 +89,18 @@ async def test_oversized_image_layout_and_preview_are_downscaled(monkeypatch) ->
         rect = document[0].rect
         assert rect.width <= 100
         assert rect.height <= 100
+
+
+async def test_document_page_density_renders_a_sharper_preview() -> None:
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+    page.insert_text((60, 100), "High resolution preview")
+    source = document.tobytes()
+    document.close()
+
+    standard, _ = await render_document_page("方案.pdf", source, page_number=1, density=1)
+    sharp, _ = await render_document_page("方案.pdf", source, page_number=1, density=2)
+
+    with Image.open(io.BytesIO(standard)) as standard_image, Image.open(io.BytesIO(sharp)) as sharp_image:
+        assert sharp_image.width > standard_image.width
+        assert sharp_image.height > standard_image.height

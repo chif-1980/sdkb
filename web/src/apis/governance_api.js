@@ -115,9 +115,12 @@ export const governanceApi = {
   getRelationLayoutComparison: (relationId) =>
     apiAdminGet(`${BASE_URL}/relations/${encoded(relationId)}/layout-comparison`),
 
-  getRelationLayoutComparisonPage: (relationId, side, pageNumber) =>
+  getRelationLayoutComparisonPage: (relationId, side, pageNumber, density = 1) =>
     apiAdminGet(
-      `${BASE_URL}/relations/${encoded(relationId)}/layout-comparison/${encoded(side)}/pages/${encoded(pageNumber)}`,
+      withQuery(
+        `${BASE_URL}/relations/${encoded(relationId)}/layout-comparison/${encoded(side)}/pages/${encoded(pageNumber)}`,
+        { density: density > 1 ? density : '' }
+      ),
       {},
       'blob'
     ),

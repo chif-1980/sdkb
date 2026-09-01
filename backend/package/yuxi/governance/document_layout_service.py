@@ -32,6 +32,8 @@ _LAYOUT_EXTENSIONS = frozenset({".docx", ".xlsx", ".pptx", ".pdf", *_IMAGE_EXTEN
 # decompression-bomb threshold while retaining enough detail for text review.
 _MAX_LAYOUT_IMAGE_PIXELS = 24_000_000
 _MAX_LAYOUT_IMAGE_DIMENSION = 8192
+_MAX_RENDER_PAGE_PIXELS = 20_000_000
+_MAX_RENDER_PAGE_DIMENSION = 6400
 
 
 def _clean_text(value: Any) -> str:
@@ -475,6 +477,7 @@ async def render_document_page(
     *,
     page_number: int,
     pdf_content: bytes | None = None,
+    density: int = 1,
 ) -> tuple[bytes, str]:
     """Render a page as PNG (or return the original image bytes)."""
     suffix = PurePosixPath(filename).suffix.lower()
@@ -493,9 +496,18 @@ async def render_document_page(
         if page_number < 1 or page_number > document.page_count:
             raise IndexError("页码超出范围")
         page = document.load_page(page_number - 1)
-        scale = min(3.0, max(1.0, 1600 / max(page.rect.width, 1)))
+        density = max(1, min(3, int(density)))
+        width = max(float(page.rect.width), 1.0)
+        height = max(float(page.rect.height), 1.0)
+        target_scale = max(1.0, (1600 * density) / width)
+        scale = min(
+            target_scale,
+            _MAX_RENDER_PAGE_DIMENSION / width,
+            _MAX_RENDER_PAGE_DIMENSION / height,
+            (_MAX_RENDER_PAGE_PIXELS / (width * height)) ** 0.5,
+        )
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-        return pixmap.tobytes("jpeg", jpg_quality=88), "image/jpeg"
+        return pixmap.tobytes("jpeg", jpg_quality=94 if density > 1 else 90), "image/jpeg"
 
 
 def supported_layout_suffix(suffix: str) -> bool:

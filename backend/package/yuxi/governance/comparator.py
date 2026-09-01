@@ -17,6 +17,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuSourceSegment,
     KnowledgeChunk,
 )
+from yuxi.utils.datetime_utils import utc_now_naive
 
 
 def _tokens(value: str | None) -> set[str]:
@@ -70,6 +71,10 @@ class CrossDocumentComparisonService:
         if current_row is None:
             raise LookupError(f"Material version not found: {version_id}")
         current, current_item = current_row
+        await self._invalidate_ineligible_relations(current)
+        if current_item.source_validity != "valid":
+            await self.session.flush()
+            return []
 
         recent_candidate_rows = (
             await self.session.execute(
@@ -77,7 +82,9 @@ class CrossDocumentComparisonService:
                 .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
                 .where(
                     FeishuSourceItem.source_id == current_item.source_id,
+                    FeishuSourceItem.source_validity == "valid",
                     FeishuMaterialVersion.version_id != version_id,
+                    FeishuMaterialVersion.item_id != current.item_id,
                     FeishuMaterialVersion.processing_status.in_(self.CANDIDATE_STATUSES),
                 )
                 .order_by(FeishuMaterialVersion.created_at.desc())
@@ -90,7 +97,9 @@ class CrossDocumentComparisonService:
                 .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
                 .where(
                     FeishuSourceItem.source_id == current_item.source_id,
+                    FeishuSourceItem.source_validity == "valid",
                     FeishuMaterialVersion.version_id != version_id,
+                    FeishuMaterialVersion.item_id != current.item_id,
                     FeishuMaterialVersion.processing_status == "published",
                     FeishuSourceItem.active_version_id == FeishuMaterialVersion.version_id,
                 )
@@ -116,13 +125,13 @@ class CrossDocumentComparisonService:
             for candidate, _ in candidate_rows
         }
 
-        # Preserve same-document history, then rank by parsed body before using
-        # title and path as tie-breakers. Metadata alone must not crowd relevant
-        # published knowledge out of the comparison set.
+        # Prioritize exact-content and parsed-body matches before using title and
+        # path as tie-breakers. Metadata alone must not crowd relevant published
+        # knowledge out of the comparison set.
         ranked_candidates = sorted(
             candidate_rows,
             key=lambda row: (
-                current.item_id == row[0].item_id or current.content_hash == row[0].content_hash,
+                current.content_hash == row[0].content_hash,
                 content_similarity_by_version_id[row[0].version_id],
                 self._candidate_similarity(
                     current,
@@ -156,6 +165,59 @@ class CrossDocumentComparisonService:
         await self.session.flush()
         return relations
 
+    async def _invalidate_ineligible_relations(self, current: FeishuMaterialVersion) -> None:
+        relations = list(
+            await self.session.scalars(
+                select(FeishuCrossDocumentRelation).where(
+                    FeishuCrossDocumentRelation.status == "open",
+                    or_(
+                        FeishuCrossDocumentRelation.source_version_id == current.version_id,
+                        FeishuCrossDocumentRelation.target_version_id == current.version_id,
+                    ),
+                )
+            )
+        )
+        if not relations:
+            return
+        version_ids = {
+            version_id
+            for relation in relations
+            for version_id in (relation.source_version_id, relation.target_version_id)
+        }
+        version_metadata = {
+            version_id: (item_id, source_validity)
+            for version_id, item_id, source_validity in (
+                await self.session.execute(
+                    select(
+                        FeishuMaterialVersion.version_id,
+                        FeishuMaterialVersion.item_id,
+                        FeishuSourceItem.source_validity,
+                    )
+                    .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+                    .where(FeishuMaterialVersion.version_id.in_(version_ids))
+                )
+            ).all()
+        }
+        resolved_at = utc_now_naive()
+        for relation in relations:
+            source_metadata = version_metadata.get(relation.source_version_id)
+            target_metadata = version_metadata.get(relation.target_version_id)
+            if source_metadata is None or target_metadata is None:
+                continue
+            if source_metadata[1] != "valid" or target_metadata[1] != "valid":
+                decision = "SOURCE_INVALIDATED"
+                comment = "关联的飞书资料已失效，不再参与跨文档检查"
+            elif source_metadata[0] == target_metadata[0]:
+                decision = "SAME_SOURCE_HISTORY"
+                comment = "同一飞书资料的历史版本不属于跨文档关系"
+            else:
+                continue
+            relation.status = "invalidated"
+            relation.human_decision = decision
+            relation.human_comment = comment
+            relation.resolved_by = "system"
+            relation.resolved_at = resolved_at
+
     async def compare_source(
         self,
         source_id: str,
@@ -169,6 +231,7 @@ class CrossDocumentComparisonService:
             .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
             .where(
                 FeishuSourceItem.source_id == source_id,
+                FeishuSourceItem.source_validity == "valid",
                 FeishuMaterialVersion.processing_status.in_(self.CANDIDATE_STATUSES),
             )
             .order_by(FeishuMaterialVersion.created_at.asc())
@@ -306,7 +369,8 @@ class CrossDocumentComparisonService:
         current_content: str = "",
         candidate_content: str = "",
     ) -> dict | None:
-        same_item = current.item_id == candidate.item_id
+        if current.item_id == candidate.item_id:
+            return None
         body_similarity = CrossDocumentComparisonService._local_content_similarity(
             current_content,
             candidate_content,
@@ -343,15 +407,9 @@ class CrossDocumentComparisonService:
         same_content = []
         if _tokens(current_item.title) & _tokens(candidate_item.title):
             same_content.append("标题包含相同产品或主题词")
-        if same_item:
-            same_content.append("同一飞书资料的不同版本")
         if bodies_available and current.content_hash == candidate.content_hash:
             same_content.append("内容哈希一致")
         same_content.append(f"正文局部相似度 {body_similarity:.0%}")
-        if same_item and current.revision != candidate.revision:
-            different_content.append(
-                {"field": "revision", "current": current.revision, "candidate": candidate.revision}
-            )
         return {
             "relation_type": relation_type,
             "similarity": round(similarity, 4),
@@ -380,8 +438,6 @@ class CrossDocumentComparisonService:
     ) -> float:
         if current.content_hash == candidate.content_hash:
             return 1.0
-        if current.item_id == candidate.item_id:
-            return 0.99
         title_similarity = SequenceMatcher(
             None,
             (current_item.title or "").lower(),
