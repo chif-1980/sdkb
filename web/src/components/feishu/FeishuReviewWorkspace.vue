@@ -233,7 +233,17 @@
                 查看飞书原文 <ExternalLink :size="14" />
               </a>
               <a-button
-                v-if="showWholeReviewButton"
+                v-if="canConfirmNoUpdate"
+                size="small"
+                class="whole-review-button"
+                :loading="batchResolving"
+                :disabled="batchResolving"
+                @click="confirmNoUpdate"
+              >
+                <ClipboardCheck :size="14" />确认无需更新
+              </a-button>
+              <a-button
+                v-else-if="showWholeReviewButton"
                 size="small"
                 class="whole-review-button"
                 :loading="batchResolving"
@@ -308,7 +318,7 @@
                   <div class="version-card is-current">
                     <span>本次待审版本</span>
                     <strong>版本 {{ packageDetail.revision || '-' }}</strong>
-                    <small>{{ packageDetail.chunk_count || 0 }} 个片段</small>
+                    <small>{{ candidateIndexLabel }}</small>
                   </div>
                   <div class="version-stat">
                     <span
@@ -370,8 +380,8 @@
                   v-else-if="hasComparisonBaseline && changeContentReady"
                   class="content-notice compact"
                 >
-                  <CircleCheck :size="22" /><strong>正文内容没有发现变化</strong>
-                  <p>飞书版本号发生了变化，但本次解析出的正文与当前正式版本一致。</p>
+                  <CircleCheck :size="22" /><strong>{{ noTextChangeTitle }}</strong>
+                  <p>{{ noTextChangeDescription }}</p>
                 </div>
               </a-spin>
             </section>
@@ -2206,6 +2216,40 @@ const bulkActionableItems = computed(() =>
     ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
   )
 )
+const allActionableUnitsUnchanged = computed(
+  () =>
+    bulkActionableItems.value.length > 0 &&
+    bulkActionableItems.value.every(
+      (item) =>
+        item.knowledge_unit &&
+        item.review_type === 'UPDATE' &&
+        item.change_type === 'UNCHANGED' &&
+        item.allowed_outcomes?.includes('KEEP_CURRENT') &&
+        !item.manual_review_required &&
+        !item.problem_tags?.includes('CONFLICT')
+    )
+)
+const canConfirmNoUpdate = computed(
+  () => allActionableUnitsUnchanged.value && !publishUnavailable.value
+)
+const candidateIndexLabel = computed(() => {
+  const chunkCount = Number(packageDetail.value?.chunk_count || 0)
+  return chunkCount > 0 ? `${chunkCount} 个索引片段` : '待发布，尚未生成正式索引'
+})
+const noTextChangeTitle = computed(() => {
+  if (allActionableUnitsUnchanged.value) return '仅检测到文件版本变化'
+  if (currentItem.value?.knowledge_unit) return '当前知识单元未检测到文字变化'
+  return '未检测到正文文字变化'
+})
+const noTextChangeDescription = computed(() => {
+  if (allActionableUnitsUnchanged.value) {
+    return '本次解析出的全部知识单元文字与当前正式版本一致，但图片或版式变化仍可能导致文件版本发生变化。'
+  }
+  if (currentItem.value?.knowledge_unit) {
+    return '当前知识单元的文字与正式版本一致；请继续核对其他知识单元，以及可能存在的图片或版式变化。'
+  }
+  return '本次解析出的正文文字与当前正式版本一致，但图片、版式或文件属性仍可能发生变化。'
+})
 const bulkExcludeItems = computed(() =>
   (packageDetail.value?.items || []).filter((item) => {
     const cancelledSourceChange =
@@ -3200,6 +3244,19 @@ function confirmWholePackage() {
     }
   })
 }
+function confirmNoUpdate() {
+  if (!canConfirmNoUpdate.value || batchResolving.value) return
+  Modal.confirm({
+    title: '确认无需更新？',
+    content:
+      '确认后将保留当前正式知识并关闭本次候选版本，不会重新发布或重建索引。图片或版式如有变化，请先返回原文核对。',
+    okText: '保留当前正式版本',
+    cancelText: '继续核对',
+    async onOk() {
+      await resolveBulkItems(bulkActionableItems.value, 'KEEP_CURRENT')
+    }
+  })
+}
 function confirmBulkOutcome(outcome) {
   const items = outcome === 'EXCLUDE' ? bulkExcludeItems.value : bulkOutcomeItems(outcome)
   if (!items.length || batchResolving.value) return
@@ -3246,7 +3303,9 @@ async function resolveBulkItems(items, outcomeOverride = '') {
               decision_comment:
                 outcomeOverride === 'REQUEST_SOURCE_CHANGE'
                   ? '整篇资料批量退回，等待资料修改后重新审核。'
-                  : item.recommendation_reason || undefined,
+                  : outcomeOverride === 'KEEP_CURRENT'
+                    ? '已确认正文文字无需更新，保留当前正式知识并关闭候选版本。'
+                    : item.recommendation_reason || undefined,
               applicability_scope: {}
             }))
           })
@@ -3257,6 +3316,12 @@ async function resolveBulkItems(items, outcomeOverride = '') {
         remaining
           ? `已批量处理 ${itemCount} 个安全项；仍有 ${remaining} 个知识单元待逐条审核`
           : `已批量处理整篇资料，共 ${itemCount} 个知识单元`
+      )
+    } else if (outcomeOverride === 'KEEP_CURRENT') {
+      message.success(
+        remaining
+          ? `已确认 ${itemCount} 个知识单元无需更新；仍有 ${remaining} 个知识单元待逐条审核`
+          : '已确认无需更新，保留当前正式知识并关闭候选版本'
       )
     } else {
       const actionText = `批量${bulkOutcomeLabel(outcomeOverride)}`
