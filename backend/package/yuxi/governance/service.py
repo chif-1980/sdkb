@@ -161,7 +161,13 @@ class GovernanceService:
         source_item = aliased(FeishuSourceItem)
         target_item = aliased(FeishuSourceItem)
         statement = (
-            select(FeishuCrossDocumentRelation, source_item, target_item)
+            select(
+                FeishuCrossDocumentRelation,
+                source_version,
+                source_item,
+                target_version,
+                target_item,
+            )
             .join(source_version, source_version.version_id == FeishuCrossDocumentRelation.source_version_id)
             .join(source_item, source_item.item_id == source_version.item_id)
             .join(target_version, target_version.version_id == FeishuCrossDocumentRelation.target_version_id)
@@ -180,8 +186,14 @@ class GovernanceService:
             statement = statement.where(FeishuCrossDocumentRelation.status != "invalidated")
         rows = (await self.session.execute(statement)).all()
         return [
-            self._relation_row_dict(relation, source_item_record, target_item_record)
-            for relation, source_item_record, target_item_record in rows
+            self._relation_row_dict(
+                relation,
+                source_version_record,
+                source_item_record,
+                target_version_record,
+                target_item_record,
+            )
+            for relation, source_version_record, source_item_record, target_version_record, target_item_record in rows
         ]
 
     async def get_comparison_status(self, source_id: str) -> dict:
@@ -596,7 +608,7 @@ class GovernanceService:
     async def _relation_dict(self, relation: FeishuCrossDocumentRelation, current_version_id: str) -> dict:
         source_version, source_item = await self._version_item(relation.source_version_id)
         target_version, target_item = await self._version_item(relation.target_version_id)
-        data = self._relation_row_dict(relation, source_item, target_item)
+        data = self._relation_row_dict(relation, source_version, source_item, target_version, target_item)
         data["current_side"] = "source" if relation.source_version_id == current_version_id else "target"
         data["source_revision"] = source_version.revision
         data["target_revision"] = target_version.revision
@@ -615,7 +627,9 @@ class GovernanceService:
     def _relation_row_dict(
         self,
         relation: FeishuCrossDocumentRelation,
+        source_version: FeishuMaterialVersion,
         source_item: FeishuSourceItem,
+        target_version: FeishuMaterialVersion,
         target_item: FeishuSourceItem,
     ) -> dict:
         return {
@@ -628,6 +642,10 @@ class GovernanceService:
             "target_url": target_item.source_url,
             "source_path": source_item.path_text,
             "target_path": target_item.path_text,
+            "source_processing_status": source_version.processing_status,
+            "source_review_status": source_version.review_status,
+            "target_processing_status": target_version.processing_status,
+            "target_review_status": target_version.review_status,
             "relation_type": relation.relation_type,
             "similarity": relation.similarity,
             "confidence": relation.confidence,

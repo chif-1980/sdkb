@@ -170,6 +170,10 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE INDEX IF NOT EXISTS ix_message_citations_message_id ON message_citations (message_id)",
             "CREATE INDEX IF NOT EXISTS ix_message_citations_version_id ON message_citations (version_id)",
             "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS chunk_id VARCHAR(128)",
+            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS media_type VARCHAR(16)",
+            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS image_url VARCHAR(2048)",
+            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS preview_url VARCHAR(2048)",
+            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS image_alt VARCHAR(512)",
         ]
 
         async with self.async_engine.begin() as conn:

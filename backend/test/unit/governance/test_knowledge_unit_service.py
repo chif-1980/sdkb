@@ -14,6 +14,7 @@ from yuxi.governance.schemas import (
 )
 from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import (
+    FeishuCrossDocumentRelation,
     FeishuMaterialVersion,
     FeishuKnowledgeUnit,
     FeishuReviewItem,
@@ -219,6 +220,62 @@ async def test_ensure_converts_material_review_to_idempotent_unit_items(unit_rev
         item for item in stored_items if item.subject_type == "MATERIAL_VERSION" and item.item_status == "INVALIDATED"
     ]
     assert len(invalidated_materials) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolved_relation_remains_visible_without_affecting_review_advice(unit_review_session):
+    session, package, _ = unit_review_session
+    material_item = await session.scalar(
+        select(FeishuReviewItem).where(FeishuReviewItem.review_item_id == "review-material-1")
+    )
+    material_item.relation_ids = ["relation-resolved"]
+    session.add_all(
+        [
+            FeishuSourceItem(
+                item_id="item-published",
+                source_id="source-1",
+                item_key="page:item-published",
+                item_type="docx",
+                title="已发布部署说明",
+                source_validity="valid",
+            ),
+            FeishuMaterialVersion(
+                version_id="version-published",
+                item_id="item-published",
+                revision="1",
+                content_hash="hash-published",
+                processing_status="published",
+                processing_params={},
+                review_status="published",
+                yuxi_file_id="file-published",
+            ),
+            FeishuCrossDocumentRelation(
+                relation_id="relation-resolved",
+                comparison_key="version-1:version-published",
+                source_version_id="version-1",
+                target_version_id="version-published",
+                relation_type="CONFLICT",
+                similarity=0.9,
+                confidence=0.9,
+                same_content=["安装前需要准备管理员账号和服务地址"],
+                different_content=[{"current": "按步骤完成部署", "candidate": "直接完成部署"}],
+                status="resolved",
+                human_decision="KEEP_CURRENT",
+            ),
+        ]
+    )
+    await session.flush()
+
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+
+    related_items = [item for item in detail["items"] if "relation-resolved" in item["relation_ids"]]
+    assert len(related_items) == 1
+    assert related_items[0]["title"] == "安装步骤"
+    assert related_items[0]["review_type"] == "NEW"
+    assert related_items[0]["problem_tags"] == []
+    assert related_items[0]["recommended_outcome"] == "PUBLISH"
+    assert related_items[0]["manual_review_required"] is False
+    assert [relation["relation_id"] for relation in detail["relations"]] == ["relation-resolved"]
 
 
 @pytest.mark.asyncio

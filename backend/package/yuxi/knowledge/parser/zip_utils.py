@@ -6,6 +6,7 @@ import time
 import zipfile
 from pathlib import Path
 
+from yuxi.knowledge.parser.image_enrichment import enrich_image, image_markdown
 from yuxi.storage.minio import get_minio_client
 from yuxi.utils import logger
 
@@ -22,6 +23,7 @@ async def process_zip_file(
     zip_path: str,
     image_bucket: str = DEFAULT_IMAGE_BUCKET,
     image_prefix: str = DEFAULT_IMAGE_PREFIX,
+    parser_params: dict | None = None,
 ) -> dict:
     """
     处理ZIP文件，提取markdown内容和图片
@@ -64,6 +66,7 @@ async def process_zip_file(
                 images_dir,
                 image_bucket=image_bucket,
                 image_prefix=normalized_prefix,
+                parser_params=parser_params,
             )
             markdown_content = replace_image_links(markdown_content, images_info)
 
@@ -134,6 +137,7 @@ async def process_images(
     images_dir: str,
     image_bucket: str,
     image_prefix: str,
+    parser_params: dict | None = None,
 ) -> list[dict]:
     """处理图片：上传到MinIO并返回信息"""
     supported_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -162,11 +166,23 @@ async def process_images(
                 object_name=object_name,
                 data=data,
             )
+            enrichment = await asyncio.to_thread(enrich_image, data, Path(img_name).name, parser_params)
+            preview_url = None
+            if enrichment.preview_data:
+                preview_result = await minio_client.aupload_file(
+                    bucket_name=image_bucket,
+                    object_name=f"{normalized_prefix}/previews/{timestamp}_{Path(img_name).stem}.webp",
+                    data=enrichment.preview_data,
+                    content_type="image/webp",
+                )
+                preview_url = preview_result.url
 
             img_info = {
                 "name": Path(img_name).name,
                 "url": result.url,
                 "path": f"images/{Path(img_name).name}",
+                "preview_url": preview_url,
+                "ocr_text": enrichment.ocr_text,
             }
             images.append(img_info)
 
@@ -187,22 +203,32 @@ def replace_image_links(markdown_content: str, images: list[dict]) -> str:
     image_map = {}
     for img in images:
         path = img["path"]
-        url = img["url"]
-        image_map[path] = url
-        image_map[f"/{path}"] = url
-        image_map[img["name"]] = url
+        image_map[path] = img
+        image_map[f"/{path}"] = img
+        image_map[img["name"]] = img
 
     def replace_link(match):
         alt_text = match.group(1) or ""
         img_path = match.group(2)
 
-        for pattern, url in image_map.items():
+        for pattern, image in image_map.items():
             if img_path.endswith(pattern) or img_path == pattern:
-                return f"![{alt_text}]({url})"
+                return image_markdown(
+                    alt=alt_text or image["name"],
+                    image_url=image["url"],
+                    preview_url=image.get("preview_url"),
+                    ocr_text=image.get("ocr_text"),
+                )
 
         filename = os.path.basename(img_path)
         if filename in image_map:
-            return f"![{alt_text}]({image_map[filename]})"
+            image = image_map[filename]
+            return image_markdown(
+                alt=alt_text or image["name"],
+                image_url=image["url"],
+                preview_url=image.get("preview_url"),
+                ocr_text=image.get("ocr_text"),
+            )
 
         return match.group(0)
 

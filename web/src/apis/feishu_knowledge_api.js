@@ -12,6 +12,7 @@ const ERROR_MESSAGES = {
   'Reject reason is required': '驳回时必须填写原因',
   'Only pending material can be rejected': '仅待审核的素材可以驳回',
   'Only failed material can be retried': '仅处理失败的素材可以重试',
+  'Only active published material can be reindexed': '仅来源有效且当前生效的已发布素材可以重新解析',
   'Material is not queued for publishing': '素材当前不在等待发布状态',
   'Material is not queued for processing': '素材当前不在等待加工状态',
   'Material is not processing': '素材当前不在加工中',
@@ -92,6 +93,9 @@ export const feishuKnowledgeApi = {
 
   retryMaterial: (versionId) =>
     apiAdminPost(`${BASE_URL}/materials/${encoded(versionId)}/retry`, {}),
+
+  reindexMaterial: (versionId) =>
+    apiAdminPost(`${BASE_URL}/materials/${encoded(versionId)}/reindex`, {}),
 
   confirmRemoval: (versionId) =>
     apiAdminPost(`${BASE_URL}/materials/${encoded(versionId)}/confirm-removal`, {}),

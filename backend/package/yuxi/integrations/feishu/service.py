@@ -476,18 +476,24 @@ class FeishuScanService:
             content = download.content
             content_type = download.content_type
         content_hash = sha256(content).hexdigest()
-        if (
-            current is not None
-            and revision is None
-            and normalized_updated_at is None
-            and current.content_hash == content_hash
-            and not archive_missing
-        ):
+        next_revision = self._version_revision(revision, normalized_updated_at, content_hash)
+        if current is not None and current.content_hash == content_hash and not archive_missing:
+            current.revision = next_revision
+            current.processing_params = {
+                **(current.processing_params or {}),
+                **self._processing_params(normalized_updated_at),
+                "source_url": source_url,
+                "wiki_path": path_text,
+                "item_type": item_type,
+                "title": title,
+                "download_type": download_type,
+            }
+            await self.repository.session.flush()
             counts.unchanged += 1
             return
         version, version_created = await self.repository.create_material_version(
             item_id=item.item_id,
-            revision=self._version_revision(revision, normalized_updated_at, content_hash),
+            revision=next_revision,
             content_hash=content_hash,
             processing_status="discovered",
             processing_params=self._processing_params(normalized_updated_at),

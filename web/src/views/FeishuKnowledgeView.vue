@@ -1126,6 +1126,7 @@ async function executeSingle(action, material, reason) {
     if (action === 'approve') await feishuKnowledgeApi.approveMaterial(material.version_id)
     if (action === 'reject') await feishuKnowledgeApi.rejectMaterial(material.version_id, reason)
     if (action === 'retry') await feishuKnowledgeApi.retryMaterial(material.version_id)
+    if (action === 'reindex') await feishuKnowledgeApi.reindexMaterial(material.version_id)
     if (action === 'confirm_removal') await feishuKnowledgeApi.confirmRemoval(material.version_id)
     message.success(actionSuccessLabel(action))
     await Promise.all([loadSources(), loadMaterials()])
@@ -1145,11 +1146,13 @@ function handleMaterialAction({ action, material }) {
   const titles = {
     approve: `确认审核通过“${material.title || '未命名素材'}”？`,
     retry: `确认重试“${material.title || '未命名素材'}”？`,
+    reindex: `重新解析并重建“${material.title || '未命名素材'}”的索引？`,
     confirm_removal: `确认下架“${material.title || '未命名素材'}”？`
   }
   const descriptions = {
     approve: '通过后将进入正式知识库发布流程。',
     retry: '系统将根据当前状态重新执行加工或发布。',
+    reindex: '系统会先生成新索引，成功后再替换当前索引；失败时继续使用当前索引。',
     confirm_removal: '确认后将从正式知识库移除该素材。'
   }
   confirmAction(
@@ -1186,10 +1189,19 @@ function handleBatchAction({ action, versionIds }) {
     )
     return
   }
-  const labels = { approve: '审核通过', retry: '重试', confirm_removal: '确认下架' }
+  const labels = {
+    approve: '审核通过',
+    retry: '重试',
+    reindex: '重新解析并重建索引',
+    confirm_removal: '确认下架'
+  }
   confirmAction(
     `确认${labels[action]}所选 ${versionIds.length} 条素材？`,
-    action === 'confirm_removal' ? '这些素材将从正式知识库移除。' : '操作将应用到全部所选素材。',
+    action === 'confirm_removal'
+      ? '这些素材将从正式知识库移除。'
+      : action === 'reindex'
+        ? '系统会逐条生成新索引，成功后再替换当前索引；失败的素材继续使用当前索引。'
+        : '操作将应用到全部所选素材。',
     () => executeBatch(action, versionIds),
     action === 'confirm_removal'
   )
@@ -1200,6 +1212,7 @@ function actionSuccessLabel(action) {
     approve: '已审核通过，等待发布',
     reject: '已驳回素材',
     retry: '已提交重试',
+    reindex: '已提交重新解析和索引重建',
     confirm_removal: '已确认下架'
   }[action]
 }

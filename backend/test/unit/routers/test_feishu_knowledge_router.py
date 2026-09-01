@@ -499,6 +499,32 @@ async def test_approve_queues_publish_without_replacing_active(review_fixture):
     assert segment_states == ["INCLUDED", "ALIAS"]
 
 
+async def test_reindex_queues_only_active_published_material_and_records_event(review_fixture):
+    old = await review_fixture.get(FeishuMaterialVersion, 1)
+    old.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-old/source.docx"
+    await review_fixture.commit()
+
+    material = await FeishuReviewService(review_fixture).reindex("version-old", operator_id="admin")
+
+    events = list(
+        await review_fixture.scalars(
+            select(FeishuProcessingEvent).where(FeishuProcessingEvent.version_id == "version-old")
+        )
+    )
+    assert material.processing_status == "publish_queued"
+    assert material.yuxi_file_id == "file-old"
+    assert material.processing_params["reindex_requested"] is True
+    assert events[-1].event_type == "reindex_queued"
+    assert (events[-1].from_status, events[-1].to_status, events[-1].operator_id) == (
+        "published",
+        "publish_queued",
+        "admin",
+    )
+
+    with pytest.raises(ValueError, match="active published"):
+        await FeishuReviewService(review_fixture).reindex("version-new", operator_id="admin")
+
+
 async def test_unit_publish_keeps_pending_segments_and_replays_new_revision(review_fixture):
     review_fixture.add_all(
         [
@@ -2398,6 +2424,56 @@ async def test_approve_endpoint_queues_real_publish_task(monkeypatch):
     assert calls[2][1]["statuses"] == {"pending"}
 
 
+async def test_reindex_endpoint_queues_publish_task(monkeypatch, review_fixture):
+    enqueued = []
+
+    async def fake_enqueue(version_id, *, operator_id):
+        enqueued.append((version_id, operator_id))
+        return SimpleNamespace(id="task-reindex")
+
+    old = await review_fixture.get(FeishuMaterialVersion, 1)
+    old.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-old/source.docx"
+    await review_fixture.commit()
+    monkeypatch.setattr(router_module, "_enqueue_publish", fake_enqueue)
+
+    result = await router_module.reindex_material(
+        "version-old",
+        db=review_fixture,
+        current_user=SimpleNamespace(uid="admin"),
+    )
+
+    assert result == {
+        "version_id": "version-old",
+        "status": "publish_queued",
+        "task_id": "task-reindex",
+    }
+    assert enqueued == [("version-old", "admin")]
+
+
+async def test_reindex_enqueue_failure_restores_published_material(monkeypatch, review_fixture):
+    async def fail_enqueue(*_args, **_kwargs):
+        raise RuntimeError("task queue unavailable")
+
+    old = await review_fixture.get(FeishuMaterialVersion, 1)
+    old.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-old/source.docx"
+    await review_fixture.commit()
+    monkeypatch.setattr(router_module, "_enqueue_publish", fail_enqueue)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router_module.reindex_material(
+            "version-old",
+            db=review_fixture,
+            current_user=SimpleNamespace(uid="admin"),
+        )
+
+    await review_fixture.refresh(old)
+    assert exc_info.value.status_code == 500
+    assert old.processing_status == "published"
+    assert old.yuxi_file_id == "file-old"
+    assert old.error_message == "task queue unavailable"
+    assert "reindex_requested" not in old.processing_params
+
+
 async def test_batch_reject_requires_reason_even_when_field_is_omitted():
     async with await _client(user=SimpleNamespace(uid="admin", role="admin")) as client:
         response = await client.post(
@@ -2532,6 +2608,7 @@ async def test_material_list_supports_item_type_filter_and_serializes_api_respon
                 "title": "Guide.pdf",
                 "item_type": "attachment",
                 "source_validity": "valid",
+                "publication_status": "ACTIVE",
                 "active": False,
                 "source_url": None,
                 "wiki_path": None,
@@ -3226,6 +3303,135 @@ async def test_publish_worker_archives_then_publishes_and_switches_active(monkey
     assert version.source_object_path.endswith("/source.md")
     assert version.chunk_count == 4
     assert item.active_version_id == "version-new"
+
+
+async def test_reindex_worker_rebuilds_segments_and_switches_after_index(monkeypatch, review_fixture):
+    original_content = "# 内部说明\n\n这部分内部说明已经明确不纳入知识库，重新解析后仍需保持排除状态。"
+    rebuilt_content = (
+        f"{original_content}\n\n"
+        "# 系统架构\n\n"
+        "![系统架构图](/minio/public/docs/architecture.png "
+        '"/minio/public/docs/previews/architecture.webp")\n\n'
+        "图片文字：接入层 服务层 数据层 向量数据库 对象存储"
+    )
+    deleted_files = []
+    captured_publish = {}
+
+    class FakeKnowledgeBase:
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            assert (kb_id, file_id, operator_id) == ("kb-1", "file-new", "admin")
+            return {"status": "parsed"}
+
+        async def get_file_content(self, kb_id, file_id):
+            assert (kb_id, file_id) == ("kb-1", "file-new")
+            return {"content": rebuilt_content}
+
+        async def delete_file(self, kb_id, file_id):
+            deleted_files.append((kb_id, file_id))
+
+    class FakePublishAdapter:
+        async def prepare_file(self, **kwargs):
+            assert kwargs["kb_id"] == "kb-1"
+            return "file-new"
+
+        async def publish(self, **kwargs):
+            captured_publish.update(kwargs)
+            assert kwargs["file_id"] == "file-new"
+            assert kwargs["parse_before_index"] is False
+            assert all("内部说明" not in chunk["content"] for chunk in kwargs["prepared_chunks"])
+            assert any("系统架构图" in chunk["content"] for chunk in kwargs["prepared_chunks"])
+            return router_module.PublishResult(file_id="file-new", chunk_count=len(kwargs["prepared_chunks"]))
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    old = await review_fixture.get(FeishuMaterialVersion, 1)
+    old.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-old/source.docx"
+    segments = await router_module.SourceSegmentService(review_fixture).replace_for_version(
+        old,
+        item,
+        yuxi_file_id="file-old",
+        content=original_content,
+    )
+    segments[0].publication_state = "EXCLUDED"
+    await review_fixture.commit()
+    await FeishuReviewService(review_fixture).reindex("version-old", operator_id="admin")
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+
+    result = await router_module._run_publish_worker(
+        "version-old",
+        operator_id="admin",
+        publish_adapter=FakePublishAdapter(),
+    )
+
+    await review_fixture.refresh(old)
+    active_segments = await router_module.SourceSegmentService(review_fixture).list_active("version-old")
+    assert result == {"version_id": "version-old", "status": "published", "file_id": "file-new"}
+    assert old.processing_status == "published"
+    assert old.yuxi_file_id == "file-new"
+    assert "reindex_requested" not in old.processing_params
+    assert [segment.publication_state for segment in active_segments] == ["EXCLUDED", "INCLUDED"]
+    assert [segment.segment_type for segment in active_segments] == ["paragraph", "image"]
+    assert deleted_files == [("kb-1", "file-old")]
+    assert captured_publish["prepared_chunks"][0]["tags"]["segment_types"] == ["image"]
+
+
+@pytest.mark.parametrize("failure_stage", ["parse", "index"])
+async def test_reindex_worker_failure_keeps_old_index(
+    monkeypatch,
+    review_fixture,
+    failure_stage,
+):
+    deleted_files = []
+    rebuilt_content = "# 新正文\n\n这是重新解析后用于验证索引失败恢复的完整正文内容。"
+
+    class FakeKnowledgeBase:
+        async def parse_file(self, kb_id, file_id, *, operator_id):
+            if failure_stage == "parse":
+                raise RuntimeError("parse failed")
+            return {"status": "parsed"}
+
+        async def get_file_content(self, kb_id, file_id):
+            return {"content": rebuilt_content}
+
+        async def delete_file(self, kb_id, file_id):
+            deleted_files.append((kb_id, file_id))
+
+    class FailingPublishAdapter:
+        async def prepare_file(self, **kwargs):
+            return "file-new"
+
+        async def publish(self, **kwargs):
+            raise RuntimeError("index failed")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield review_fixture
+
+    old = await review_fixture.get(FeishuMaterialVersion, 1)
+    old.source_object_path = "minio://knowledgebases/feishu/source-1/item-1/version-old/source.docx"
+    await review_fixture.commit()
+    await FeishuReviewService(review_fixture).reindex("version-old", operator_id="admin")
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(router_module, "knowledge_base", FakeKnowledgeBase())
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        await router_module._run_publish_worker(
+            "version-old",
+            operator_id="admin",
+            publish_adapter=FailingPublishAdapter(),
+        )
+
+    await review_fixture.refresh(old)
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    assert item.active_version_id == "version-old"
+    assert old.processing_status == "published"
+    assert old.yuxi_file_id == "file-old"
+    assert "reindex_requested" not in old.processing_params
+    assert deleted_files == [("kb-1", "file-new")]
 
 
 async def test_publish_worker_commits_active_switch_before_deleting_replaced_file(monkeypatch, review_fixture):

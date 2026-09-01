@@ -30,7 +30,11 @@ from yuxi.governance.content_quality import assess_content
 from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
 from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
 from yuxi.governance.review_backfill import backfill_legacy_governance_reviews
-from yuxi.governance.source_segment_service import SourceSegmentService
+from yuxi.governance.source_segment_service import (
+    SourceSegmentService,
+    build_retrieval_chunks,
+    build_source_segment_drafts,
+)
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.repositories.feishu_knowledge_repository import (
     FeishuKnowledgeRepository as _BaseRepository,
@@ -210,6 +214,7 @@ class PublishAdapter(Protocol):
         operator_id: str,
         file_id: str | None = None,
         parse_before_index: bool = False,
+        prepared_chunks: list[dict] | None = None,
     ) -> PublishResult: ...
 
 
@@ -520,6 +525,38 @@ class FeishuReviewService:
             await self.session.flush()
             return version
 
+    async def reindex(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
+        async with self._transaction():
+            version, item, _ = await self._get_material(version_id, lock=True)
+            if (
+                item.active_version_id != version.version_id
+                or item.publication_status != "ACTIVE"
+                or item.source_validity != "valid"
+                or version.processing_status != "published"
+                or version.review_status != "approved"
+                or not version.source_object_path
+                or not version.yuxi_file_id
+            ):
+                raise ValueError("Only active published material can be reindexed")
+            params = dict(version.processing_params or {})
+            params["reindex_requested"] = True
+            params["reindex_requested_at"] = utc_now().isoformat()
+            version.processing_params = params
+            version.processing_status = "publish_queued"
+            version.error_code = None
+            version.error_message = None
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="reindex_queued",
+                from_status="published",
+                to_status="publish_queued",
+                operator_id=operator_id,
+            )
+            await self.session.flush()
+            return version
+
     async def claim_publish(self, version_id: str) -> tuple[FeishuMaterialVersion, FeishuSourceItem, FeishuSource]:
         async with self._transaction():
             version, item, source = await self._get_material(version_id, lock=True)
@@ -729,6 +766,7 @@ class FeishuReviewService:
             processing_params.pop("source_rollback_previous_active_version_id", None)
             processing_params.pop("source_rollback_previous_processing_status", None)
             processing_params.pop("source_rollback_previous_file_id", None)
+            processing_params.pop("reindex_requested", None)
             if requested_revision:
                 processing_params["unit_publish_completed_revision"] = claimed_revision
             version.processing_params = processing_params
@@ -854,6 +892,7 @@ class FeishuReviewService:
             processing_params.pop("source_rollback_previous_active_version_id", None)
             processing_params.pop("source_rollback_previous_processing_status", None)
             processing_params.pop("source_rollback_previous_file_id", None)
+            processing_params.pop("reindex_requested", None)
             version.processing_params = processing_params
             self._append_event(
                 source_id=item.source_id,
@@ -1277,7 +1316,7 @@ class RejectRequest(BaseModel):
 
 
 class BatchActionRequest(BaseModel):
-    action: Literal["approve", "reject", "retry", "confirm_removal"]
+    action: Literal["approve", "reject", "retry", "reindex", "confirm_removal"]
     version_ids: list[str] = Field(min_length=1, max_length=100)
     reason: str | None = Field(default=None, max_length=2000)
 
@@ -1363,6 +1402,7 @@ def _material_dict(version: FeishuMaterialVersion, item: FeishuSourceItem, sourc
         "title": item.title,
         "item_type": item.item_type,
         "source_validity": item.source_validity,
+        "publication_status": item.publication_status,
         "active": item.active_version_id == version.version_id,
         "source_url": item.source_url,
         "wiki_path": item.path_text,
@@ -1844,6 +1884,9 @@ async def _run_publish_worker(
     adapter = publish_adapter or KnowledgePublishAdapter()
     candidate_file_id = None
     publish_args = None
+    reindex_requested = False
+    reindex_content = ""
+    reindex_publication_states: dict[str, str] = {}
     try:
         async with pg_manager.get_async_session_context() as session:
             version, item, source = await FeishuReviewService(session).claim_publish(version_id)
@@ -1862,6 +1905,7 @@ async def _run_publish_worker(
                     publish_file_id = None
                     shared_active_file = True
             candidate_needs_parse = bool((version.processing_params or {}).get("publish_candidate_needs_parse"))
+            reindex_requested = bool((version.processing_params or {}).get("reindex_requested"))
             if candidate_needs_parse:
                 candidate_file_id = publish_file_id
             publish_args = {
@@ -1879,7 +1923,11 @@ async def _run_publish_worker(
             if hasattr(session, "scalars"):
                 segment_service = SourceSegmentService(session)
                 source_segments = await segment_service.list_active(version.version_id)
-                if source_segments:
+                if reindex_requested:
+                    reindex_publication_states = {
+                        segment.segment_key: segment.publication_state for segment in source_segments
+                    }
+                elif source_segments:
                     chunk_file_id = publish_file_id or version.yuxi_file_id or f"candidate-{version.version_id}"
                     claimed_revision = int(
                         (version.processing_params or {}).get("unit_publish_claimed_revision")
@@ -1914,6 +1962,50 @@ async def _run_publish_worker(
                 await session.commit()
             publish_args["file_id"] = candidate_file_id
             publish_args["parse_before_index"] = True
+        if reindex_requested:
+            parsed = await knowledge_base.parse_file(
+                publish_args["kb_id"],
+                publish_args["file_id"],
+                operator_id=operator_id,
+            )
+            if parsed.get("status") != "parsed":
+                raise RuntimeError(f"Feishu material parsing did not complete: {parsed.get('status')}")
+            content_info = await knowledge_base.get_file_content(
+                publish_args["kb_id"],
+                publish_args["file_id"],
+            )
+            if not isinstance(content_info, dict) or not isinstance(content_info.get("content"), str):
+                raise RuntimeError("Feishu material parsed content is unavailable")
+            reindex_content = content_info["content"]
+            filename = item.title or Path(item.path_text or "material.md").name
+            if not Path(filename).suffix and item.item_type:
+                filename = f"{filename}.{item.item_type}"
+            drafts = build_source_segment_drafts(
+                reindex_content,
+                version_id=version.version_id,
+                item_id=item.item_id,
+                filename=filename,
+            )
+            prepared_segments = [
+                SimpleNamespace(
+                    segment_id=draft.segment_id,
+                    segment_key=draft.segment_key,
+                    segment_index=draft.segment_index,
+                    segment_type=draft.segment_type,
+                    title_path=list(draft.title_path),
+                    locator_json=draft.locator,
+                    content=draft.content,
+                    publication_state=reindex_publication_states.get(draft.segment_key, "INCLUDED"),
+                    status="ACTIVE",
+                )
+                for draft in drafts
+            ]
+            publish_args["prepared_chunks"] = build_retrieval_chunks(
+                prepared_segments,
+                file_id=publish_args["file_id"],
+                document_title=item.title or "未命名资料",
+            )
+            publish_args["parse_before_index"] = False
         result = await adapter.publish(**publish_args)
     except asyncio.CancelledError as exc:
         recovery_message = _cancellation_message(exc)
@@ -1993,7 +2085,26 @@ async def _run_publish_worker(
 
     try:
         async with pg_manager.get_async_session_context() as session:
-            switch = await FeishuReviewService(session).mark_publish_succeeded(
+            service = FeishuReviewService(session)
+            if reindex_requested:
+                version, item, _ = await service._get_material(version_id, lock=True)
+                segments = await SourceSegmentService(session).replace_for_version(
+                    version,
+                    item,
+                    yuxi_file_id=result.file_id,
+                    content=reindex_content,
+                )
+                for segment in segments:
+                    segment.publication_state = reindex_publication_states.get(segment.segment_key, "INCLUDED")
+                params = dict(version.processing_params or {})
+                params["content_quality"] = assess_content(content=reindex_content, title=item.title)
+                params["source_segments"] = {
+                    "engine_version": "structure_v1",
+                    "count": len(segments),
+                    "token_count": sum(segment.token_count for segment in segments),
+                }
+                version.processing_params = params
+            switch = await service.mark_publish_succeeded(
                 version_id,
                 yuxi_file_id=result.file_id,
                 chunk_count=result.chunk_count,
@@ -2508,6 +2619,28 @@ async def retry_material(
     return {"version_id": material.version_id, "status": material.processing_status, "task_id": task.id}
 
 
+@feishu_knowledge.post("/materials/{version_id}/reindex", status_code=202)
+async def reindex_material(
+    version_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        material = await FeishuReviewService(db).reindex(version_id, operator_id=current_user.uid)
+        await db.commit()
+        try:
+            task = await _enqueue_publish(version_id, operator_id=current_user.uid)
+        except Exception as exc:
+            await FeishuReviewService(db).mark_publish_failed(version_id, message=str(exc))
+            await db.commit()
+            raise
+    except (LookupError, ValueError) as exc:
+        _raise_action_error(exc)
+    except Exception as exc:
+        _raise_action_error(exc)
+    return {"version_id": material.version_id, "status": material.processing_status, "task_id": task.id}
+
+
 async def _apply_action(
     version_id: str,
     action: str,
@@ -2525,6 +2658,8 @@ async def _apply_action(
         return await reject_material(version_id, RejectRequest(reason=reason), db=db, current_user=user)
     if action == "retry":
         return await retry_material(version_id, db=db, current_user=user)
+    if action == "reindex":
+        return await reindex_material(version_id, db=db, current_user=user)
     if action == "confirm_removal":
         return await confirm_removal(version_id, db=db, current_user=user)
     raise HTTPException(status_code=422, detail=f"Unsupported action: {action}")

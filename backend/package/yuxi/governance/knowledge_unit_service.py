@@ -368,7 +368,7 @@ class KnowledgeUnitService:
         relations_by_unit = await self._relations_by_unit(package.source_version_id, units)
         for unit in units:
             relations = relations_by_unit.get(unit.unit_id, [])
-            relation_types = {relation.relation_type for relation in relations}
+            relation_types = {relation.relation_type for relation in relations if relation.status == "open"}
             problem_tags = [RELATION_TAGS[value] for value in relation_types if value in RELATION_TAGS]
             review_type = self._unit_review_type(base_item, unit, relation_types)
             recommended_outcome, reason, confidence, manual_required = self._recommendation_for_review_type(
@@ -527,7 +527,7 @@ class KnowledgeUnitService:
         relations = list(
             await self.session.scalars(
                 select(FeishuCrossDocumentRelation).where(
-                    FeishuCrossDocumentRelation.status == "open",
+                    FeishuCrossDocumentRelation.status != "invalidated",
                     or_(
                         FeishuCrossDocumentRelation.source_version_id == version_id,
                         FeishuCrossDocumentRelation.target_version_id == version_id,

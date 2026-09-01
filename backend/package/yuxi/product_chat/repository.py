@@ -339,6 +339,10 @@ class ProductChatRepository:
                 path_text=citation.path_text,
                 locator=citation.locator,
                 excerpt=citation.excerpt,
+                media_type=getattr(citation, "media_type", None),
+                image_url=getattr(citation, "image_url", None),
+                preview_url=getattr(citation, "preview_url", None),
+                image_alt=getattr(citation, "image_alt", None),
                 source_version_at=(
                     citation.source_version_at.astimezone(UTC).replace(tzinfo=None)
                     if citation.source_version_at is not None and citation.source_version_at.tzinfo is not None

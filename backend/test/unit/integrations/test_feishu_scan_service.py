@@ -541,7 +541,7 @@ async def test_equivalent_update_time_formats_do_not_create_a_version(repository
     assert fake.download_calls == []
 
 
-async def test_page_version_uses_docx_revision(repository, session):
+async def test_page_revision_change_without_content_change_reuses_version(repository, session):
     root = node("root", "Root")
     fake = FakeFeishuClient(
         nodes={"root": root},
@@ -564,8 +564,51 @@ async def test_page_version_uses_docx_revision(repository, session):
         ).scalars()
     )
 
-    assert result.changed_count == 1
-    assert [version.revision for version in versions] == ["41", "42"]
+    assert result.changed_count == 0
+    assert result.unchanged_count == 1
+    assert [version.revision for version in versions] == ["42"]
+
+
+async def test_attachment_rename_without_content_change_reuses_version(repository, session):
+    root = node("root", "Root")
+    attachment = FeishuAttachment(
+        file_token="file-1",
+        name="产品白皮书_通用版.docx",
+        revision=None,
+        source_updated_at="2026-08-21T01:03:50Z",
+    )
+    fake = FakeFeishuClient(
+        nodes={"root": root},
+        page_attachments={"obj-root": [attachment]},
+        page_contents={"obj-root": b"page"},
+        contents={"file-1": b"same document body"},
+    )
+    service = FeishuScanService(repository=repository, client=fake)
+    await service.scan(source_id="source-1", mode="full")
+    fake.page_attachments["obj-root"] = [
+        replace(
+            attachment,
+            name="产品白皮书.docx",
+            source_updated_at="2026-08-25T06:59:23Z",
+        )
+    ]
+
+    result = await service.scan(source_id="source-1", mode="incremental")
+    items = {item.title: item for item in await _items(session)}
+    versions = list(
+        await session.scalars(
+            select(FeishuMaterialVersion).where(
+                FeishuMaterialVersion.item_id == items["产品白皮书.docx"].item_id
+            )
+        )
+    )
+
+    assert result.changed_count == 0
+    assert result.unchanged_count == 2
+    assert len(versions) == 1
+    assert versions[0].revision == "updated:2026-08-25T06:59:23+00:00"
+    assert versions[0].processing_params["title"] == "产品白皮书.docx"
+    assert versions[0].processing_params["source_updated_at"] == "2026-08-25T06:59:23+00:00"
 
 
 async def test_attachment_extensions_and_media_statuses_are_classified(repository, session):

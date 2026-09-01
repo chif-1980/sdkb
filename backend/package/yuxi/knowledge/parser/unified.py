@@ -19,6 +19,7 @@ from docling.document_converter import DocumentConverter
 from langchain_community.document_loaders import PyPDFLoader
 from markdownify import markdownify as md_convert
 
+from yuxi.knowledge.parser.image_enrichment import enrich_image, image_markdown
 from yuxi.knowledge.parser.zip_utils import process_zip_file as _process_zip_file
 from yuxi.storage.minio import get_minio_client
 from yuxi.utils import logger
@@ -120,6 +121,16 @@ def _upload_image_to_minio(image_data: bytes, filename: str, bucket_name: str, o
     return result.url
 
 
+def _upload_image_preview_to_minio(preview_data: bytes, filename: str, bucket_name: str, object_prefix: str) -> str:
+    stem = Path(filename).stem or "image"
+    return _upload_image_to_minio(
+        preview_data,
+        f"previews/{stem}.webp",
+        bucket_name,
+        object_prefix,
+    )
+
+
 def _parse_data_uri(data_uri: str) -> tuple[bytes, str]:
     """解析 data URI，返回 (image_data, mime_type)。"""
     header, base64_data = data_uri.split(",", 1)
@@ -152,7 +163,25 @@ def _convert_with_docling(file_path: Path, params: dict | None = None) -> str:
                     image_data, mime_type = _parse_data_uri(uri)
                     filename = f"image_{int(time.time() * 1000000)}.{mime_type.split('/')[-1]}"
                     url = _upload_image_to_minio(image_data, filename, image_bucket, image_prefix)
-                    replacements.append(f"![{filename}]({url})")
+                    enrichment = enrich_image(image_data, filename, params)
+                    preview_url = (
+                        _upload_image_preview_to_minio(
+                            enrichment.preview_data,
+                            filename,
+                            image_bucket,
+                            image_prefix,
+                        )
+                        if enrichment.preview_data
+                        else None
+                    )
+                    replacements.append(
+                        image_markdown(
+                            alt=filename,
+                            image_url=url,
+                            preview_url=preview_url,
+                            ocr_text=enrichment.ocr_text,
+                        )
+                    )
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"上传图片失败 {filename}: {e}")
                     replacements.append(f"[图片: {filename}]")
@@ -391,6 +420,7 @@ async def _process_file_to_markdown_core(
                 str(file_path_obj),
                 image_bucket=image_bucket,
                 image_prefix=image_prefix,
+                parser_params=params,
             )
 
             artifacts = {

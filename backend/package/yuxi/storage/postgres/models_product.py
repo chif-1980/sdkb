@@ -192,6 +192,10 @@ class MessageCitation(Base):
     locator = Column(Text, nullable=False)
     excerpt = Column(Text, nullable=False)
     source_version_at = Column(DateTime, nullable=True)
+    media_type = Column(String(16), nullable=True)
+    image_url = Column(String(2048), nullable=True)
+    preview_url = Column(String(2048), nullable=True)
+    image_alt = Column(String(512), nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
 
     __table_args__ = (

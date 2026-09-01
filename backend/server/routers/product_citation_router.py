@@ -24,6 +24,10 @@ def _citation_response(citation: MessageCitation) -> CitationResponse:
         locator=citation.locator,
         excerpt=citation.excerpt,
         version_at=format_utc_datetime(citation.source_version_at),
+        media_type=citation.media_type,
+        image_url=citation.image_url,
+        preview_url=citation.preview_url,
+        image_alt=citation.image_alt,
     )
 
 

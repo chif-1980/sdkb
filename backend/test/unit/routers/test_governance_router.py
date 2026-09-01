@@ -32,6 +32,164 @@ from yuxi.storage.postgres.models_knowledge import (
 pytestmark = pytest.mark.asyncio
 
 
+async def test_comparison_block_ids_falls_back_to_the_page_containing_the_excerpt():
+    excerpt = "提供全面的数据分析服务，让用户更方便、快捷、智能的完成日常工作"
+    layout = {
+        "pages": [
+            {
+                "page_number": 2,
+                "blocks": [{"block_id": "catalogue", "content": "目录", "source_segment_ids": []}],
+            },
+            {
+                "page_number": 7,
+                "blocks": [
+                    {
+                        "block_id": "actual-evidence",
+                        "content": excerpt,
+                        "source_segment_ids": ["segment-evidence"],
+                    }
+                ],
+            },
+        ]
+    }
+    match = {
+        "source_locator": {"slide": 2},
+        "source_segment_id": "segment-evidence",
+        "source_overlap_excerpt": excerpt,
+    }
+
+    page_number, block_ids = governance_router_module._comparison_block_ids(layout, match, "source")
+
+    assert page_number == 7
+    assert block_ids == ["actual-evidence"]
+
+
+async def test_comparison_block_ids_prefers_long_evidence_over_locator_page_short_labels():
+    excerpt = (
+        "智能化投标管理信息系统V1.0投标审查审查任务创建"
+        "支持用户自定义输入审查任务名称并选择全部审查范围"
+    )
+    layout = {
+        "pages": [
+            {
+                "page_number": 10,
+                "blocks": [
+                    {"block_id": "short-1", "content": "智能化投标", "source_segment_ids": []},
+                    {"block_id": "short-2", "content": "投标管理", "source_segment_ids": []},
+                    {"block_id": "short-3", "content": "信息系统", "source_segment_ids": []},
+                ],
+            },
+            {
+                "page_number": 12,
+                "blocks": [
+                    {
+                        "block_id": "actual-evidence",
+                        "content": excerpt,
+                        "source_segment_ids": ["segment-evidence"],
+                    }
+                ],
+            },
+        ]
+    }
+    match = {
+        "source_locator": {"page": 10},
+        "source_segment_id": "segment-evidence",
+        "source_overlap_excerpt": excerpt,
+    }
+
+    page_number, block_ids = governance_router_module._comparison_block_ids(layout, match, "source")
+
+    assert page_number == 12
+    assert block_ids == ["actual-evidence"]
+
+
+async def test_comparison_block_ids_tracks_evidence_split_across_word_pdf_pages():
+    excerpt = "第一部分表格内容跨页后继续展示第二部分表格内容"
+    layout = {
+        "pages": [
+            {
+                "page_number": 6,
+                "blocks": [
+                    {
+                        "block_id": "page-6-table-1",
+                        "content": "第一部分表格内容跨页后继续展示",
+                        "source_segment_ids": ["segment-evidence"],
+                    }
+                ],
+            },
+            {
+                "page_number": 7,
+                "blocks": [
+                    {
+                        "block_id": "page-7-table-1",
+                        "content": "第二部分表格内容",
+                        "source_segment_ids": ["segment-evidence"],
+                    }
+                ],
+            },
+        ]
+    }
+    match = {
+        "source_locator": {"block": 14},
+        "source_segment_id": "segment-evidence",
+        "source_overlap_excerpt": excerpt,
+    }
+
+    page_number, blocks_by_page = governance_router_module._comparison_block_ids_by_page(
+        layout, match, "source"
+    )
+
+    assert page_number == 6
+    assert blocks_by_page == {
+        6: ["page-6-table-1"],
+        7: ["page-7-table-1"],
+    }
+
+
+async def test_comparison_block_ids_ignores_common_heading_on_another_word_page():
+    excerpt = (
+        "智能化投标管理信息系统V1.0目录确认"
+        "支持查看已归档目录并确认目录层级和文件信息完整准确"
+    )
+    layout = {
+        "pages": [
+            {
+                "page_number": 10,
+                "blocks": [
+                    {"block_id": "common-heading-1", "content": "智能化投标管"},
+                    {"block_id": "common-heading-2", "content": "理信息系统"},
+                ],
+            },
+            {
+                "page_number": 11,
+                "blocks": [
+                    {
+                        "block_id": "actual-evidence-1",
+                        "content": "目录确认支持查看已归档目录并确认目录层级",
+                    },
+                    {
+                        "block_id": "actual-evidence-2",
+                        "content": "文件信息完整准确",
+                    },
+                ],
+            },
+        ]
+    }
+    match = {
+        "source_locator": {"block": 14},
+        "source_overlap_excerpt": excerpt,
+    }
+
+    page_number, blocks_by_page = governance_router_module._comparison_block_ids_by_page(
+        layout, match, "source"
+    )
+
+    assert page_number == 11
+    assert blocks_by_page == {
+        11: ["actual-evidence-1", "actual-evidence-2"],
+    }
+
+
 async def test_office_pdf_cache_survives_memory_cache_reset(tmp_path, monkeypatch):
     conversions = 0
 
@@ -1149,9 +1307,10 @@ async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
     async def fake_duplicate_service(_db, _relation_id):
         return FakeDuplicateService()
 
-    async def fake_render(_filename, _content, *, page_number, pdf_content=None):
+    async def fake_render(_filename, _content, *, page_number, pdf_content=None, density=1):
         assert page_number == 1
         assert pdf_content == b"%PDF-cached"
+        assert density == 2
         return b"png", "image/png"
 
     async def fake_cached_pdf(cache_key, filename, content):
@@ -1177,7 +1336,10 @@ async def test_relation_layout_comparison_returns_both_pages_and_match_blocks(
     assert body["matches"][0]["source_block_ids"] == ["source-block"]
     assert body["matches"][0]["target_block_ids"] == ["target-block"]
 
-    page = await client.get(f"/api/governance/relations/{relation_id}/layout-comparison/source/pages/1")
+    page = await client.get(
+        f"/api/governance/relations/{relation_id}/layout-comparison/source/pages/1",
+        params={"density": 2},
+    )
     assert page.status_code == 200
     assert page.headers["content-type"].startswith("image/png")
     assert page.content == b"png"

@@ -48,7 +48,7 @@
       :pagination="{ pageSize: 10 }"
       row-key="relation_id"
       size="small"
-      :scroll="{ x: 1140 }"
+      :scroll="{ x: 1190 }"
       :row-class-name="relationRowClass"
     >
       <template #bodyCell="{ column, record }">
@@ -71,7 +71,14 @@
         <template v-else-if="column.key === 'sources'">
           <div class="source-pair">
             <div class="source-entry">
-              <span class="source-label">来源一</span>
+              <div class="source-marker">
+                <span class="source-label">来源一</span>
+                <span
+                  class="source-stage"
+                  :class="`source-stage-${sourceStageMeta(record, 'source').tone}`"
+                  >{{ sourceStageMeta(record, 'source').label }}</span
+                >
+              </div>
               <div class="source-info">
                 <strong :title="record.source_title">{{ record.source_title }}</strong>
                 <span :title="record.source_path || '未记录目录'">{{
@@ -80,7 +87,14 @@
               </div>
             </div>
             <div class="source-entry">
-              <span class="source-label">来源二</span>
+              <div class="source-marker">
+                <span class="source-label">来源二</span>
+                <span
+                  class="source-stage"
+                  :class="`source-stage-${sourceStageMeta(record, 'target').tone}`"
+                  >{{ sourceStageMeta(record, 'target').label }}</span
+                >
+              </div>
               <div class="source-info">
                 <strong :title="record.target_title">{{ record.target_title }}</strong>
                 <span :title="record.target_path || '未记录目录'">{{
@@ -169,7 +183,7 @@ const statusOptions = [
 const columns = [
   { title: '关系', key: 'relation_type', width: 100 },
   { title: '比较主题', key: 'topic', width: 270 },
-  { title: '对比文件', key: 'sources', width: 270 },
+  { title: '对比文件', key: 'sources', width: 320 },
   { title: '证据标记', key: 'evidence', width: 150 },
   { title: '适用范围', key: 'scope', width: 150 },
   { title: '处理状态', key: 'status', width: 100 },
@@ -314,6 +328,27 @@ function relationStatusColor(record) {
 }
 function relationActionLabel(record) {
   return ['EXACT_DUPLICATE', 'OVERLAP'].includes(record.relation_type) ? '查看重叠' : '进入审核'
+}
+function sourceStageMeta(record, side) {
+  const processingStatus = record[`${side}_processing_status`]
+  const reviewStatus = record[`${side}_review_status`]
+  if (processingStatus === 'published') return { label: '已发布', tone: 'published' }
+  if (['removed', 'remove_queued', 'removing'].includes(processingStatus))
+    return { label: '已下架', tone: 'neutral' }
+  if (processingStatus === 'replaced') return { label: '历史版本', tone: 'neutral' }
+  if (['publish_queued', 'publishing'].includes(processingStatus))
+    return { label: '发布中', tone: 'processing' }
+  if (reviewStatus === 'changes_requested') return { label: '退回修改', tone: 'error' }
+  if (
+    ['awaiting_review', 'parsed'].includes(processingStatus) ||
+    ['pending', 'in_review'].includes(reviewStatus)
+  )
+    return { label: '待审核', tone: 'pending' }
+  if (reviewStatus === 'approved') return { label: '已审核', tone: 'approved' }
+  if (String(processingStatus || '').includes('failed')) return { label: '处理失败', tone: 'error' }
+  if (['discovered', 'parsing'].includes(processingStatus))
+    return { label: '处理中', tone: 'processing' }
+  return { label: '状态未知', tone: 'neutral' }
 }
 </script>
 
@@ -463,10 +498,16 @@ function relationActionLabel(record) {
 }
 .source-entry {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
+  grid-template-columns: 82px minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
   align-items: start;
+}
+.source-marker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
 }
 .source-label {
   display: inline-flex;
@@ -478,6 +519,40 @@ function relationActionLabel(record) {
   color: var(--color-text-tertiary);
   font-size: 10px;
   line-height: 17px;
+}
+.source-stage {
+  display: inline-flex;
+  min-height: 17px;
+  align-items: center;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 17px;
+  white-space: nowrap;
+}
+.source-stage-pending {
+  color: #8b6712;
+  background: #fff5cc;
+}
+.source-stage-published {
+  color: #36744d;
+  background: #eaf6ed;
+}
+.source-stage-approved {
+  color: #386e85;
+  background: #eaf5f8;
+}
+.source-stage-processing {
+  color: #315f91;
+  background: #eaf2fb;
+}
+.source-stage-error {
+  color: #a63840;
+  background: #fff0f0;
+}
+.source-stage-neutral {
+  color: var(--color-text-tertiary);
+  background: var(--gray-50);
 }
 .source-info {
   min-width: 0;

@@ -1,5 +1,7 @@
 import json
 
+from minio.error import S3Error
+
 from yuxi.storage.minio.client import MinIOClient, normalize_public_minio_url
 
 
@@ -52,3 +54,22 @@ def test_legacy_public_minio_url_preserves_query_and_fragment(monkeypatch):
         normalize_public_minio_url("http://example.test:9000/public/avatar/user.png?v=123#preview")
         == "/minio/public/avatar/user.png?v=123#preview"
     )
+
+
+def test_existing_bucket_race_is_treated_as_success():
+    class RacingMinio(FakeMinio):
+        def make_bucket(self, bucket_name: str) -> None:
+            raise S3Error(
+                None,
+                "BucketAlreadyOwnedByYou",
+                "The bucket was created by another concurrent request.",
+                f"/{bucket_name}",
+                "request-id",
+                "host-id",
+                bucket_name,
+            )
+
+    client = MinIOClient()
+    client._client = RacingMinio()
+
+    assert client.ensure_bucket_exists("knowledgebases") is True

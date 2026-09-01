@@ -496,7 +496,9 @@ describe('FeishuReviewWorkspace', () => {
       if (url === '/api/governance/review-packages?source_id=source-1&view=mine') {
         return Promise.resolve({ items: packages, total: 3, counts: { mine: 3 } })
       }
-      if (url === '/api/governance/review-packages?source_id=source-1&view=mine&page=2&page_size=20') {
+      if (
+        url === '/api/governance/review-packages?source_id=source-1&view=mine&page=2&page_size=20'
+      ) {
         return Promise.resolve({ items: [nextPackage], total: 3, counts: { mine: 3 } })
       }
       if (url.startsWith('/api/governance/review-packages/package-')) {
@@ -739,7 +741,9 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.layout-context-sidebar').text()).toContain('审核信息')
     expect(wrapper.get('.layout-sidebar-primary').text()).toContain('处理当前知识单元')
     expect(
-      wrapper.findAll('.record-actions button').some((button) => button.text().includes('处理当前知识单元'))
+      wrapper
+        .findAll('.record-actions button')
+        .some((button) => button.text().includes('处理当前知识单元'))
     ).toBe(false)
     expect(apiAdminGet).toHaveBeenCalledWith(
       '/api/governance/review-packages/package-ppt-unit/presentation/slides/2',
@@ -832,7 +836,11 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.evidence-tabs-actions').text()).toContain('查看飞书原文')
     expect(wrapper.find('.record-heading').exists()).toBe(false)
     expect(wrapper.get('.layout-sidebar-primary').text()).toContain('处理当前知识单元')
-    expect(wrapper.findAll('.record-actions button').some((button) => button.text().includes('处理当前知识单元'))).toBe(false)
+    expect(
+      wrapper
+        .findAll('.record-actions button')
+        .some((button) => button.text().includes('处理当前知识单元'))
+    ).toBe(false)
     expect(wrapper.get('.layout-context-sidebar').text()).toContain('部署指南.docx')
     expect(wrapper.get('.layout-context-sidebar').text()).toContain('审核信息')
     expect(wrapper.findAll('.document-layout-block')).toHaveLength(1)
@@ -960,7 +968,9 @@ describe('FeishuReviewWorkspace', () => {
           edits: {}
         })
       }
-      if (url.startsWith('/api/governance/review-packages/package-docx-unit-linkage/layout/pages/')) {
+      if (
+        url.startsWith('/api/governance/review-packages/package-docx-unit-linkage/layout/pages/')
+      ) {
         return Promise.resolve({ blob: () => Promise.resolve(new Blob([url])) })
       }
       if (url === '/api/knowledge/databases/kb-1/documents/file-docx-unit-linkage/content') {
@@ -1335,7 +1345,11 @@ describe('FeishuReviewWorkspace', () => {
       {}
     )
     expect(wrapper.get('.queue-item.active').text()).toContain('第一份资料')
-    expect(wrapper.findAll('.record-actions button').some((button) => button.text().includes('重新申请纳入'))).toBe(false)
+    expect(
+      wrapper
+        .findAll('.record-actions button')
+        .some((button) => button.text().includes('重新申请纳入'))
+    ).toBe(false)
     expect(message.success).toHaveBeenCalledWith('“产品能力”已重新提交审核')
   })
 
@@ -1534,7 +1548,7 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.duplicate-action-help').attributes('aria-label')).toContain('独有内容')
   })
 
-  it('跨文档证据只高亮对应文字块，异页证据分别定位且不联动翻页', async () => {
+  it('跨文档证据支持异页定位、工作区全屏和同步缩放移动', async () => {
     const detail = duplicatePackageDetail()
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
@@ -1556,7 +1570,8 @@ describe('FeishuReviewWorkspace', () => {
           counts: { mine: 1 }
         })
       }
-      if (url === '/api/governance/review-packages/package-duplicate') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-duplicate')
+        return Promise.resolve(detail)
       if (url === '/api/governance/relations/relation-duplicate/duplicate-candidates') {
         return Promise.resolve(duplicateCandidates())
       }
@@ -1659,7 +1674,10 @@ describe('FeishuReviewWorkspace', () => {
           ]
         })
       }
-      if (url.includes('/layout-comparison/source/pages/') || url.includes('/layout-comparison/target/pages/')) {
+      if (
+        url.includes('/layout-comparison/source/pages/') ||
+        url.includes('/layout-comparison/target/pages/')
+      ) {
         return Promise.resolve({ blob: () => Promise.resolve(new Blob(['image'])) })
       }
       if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
@@ -1695,6 +1713,95 @@ describe('FeishuReviewWorkspace', () => {
       'blob'
     )
 
+    const sourceCanvas = wrapper.findAll('.comparison-layout-canvas')[0]
+    const scrollEvent = new WheelEvent('wheel', { deltaY: -100, cancelable: true })
+    sourceCanvas.element.dispatchEvent(scrollEvent)
+    await wrapper.vm.$nextTick()
+    expect(scrollEvent.defaultPrevented).toBe(false)
+
+    expect(wrapper.get('.comparison-review').classes()).not.toContain('is-fullscreen')
+    await wrapper.get('button[aria-label="放大版式"]').trigger('click')
+    await flushPromises()
+    const comparisonContents = wrapper.findAll('.comparison-layout-content')
+    expect(comparisonContents[0].attributes('style')).toContain('width: 125%')
+    expect(comparisonContents[1].attributes('style')).toContain('width: 125%')
+    expect(comparisonContents[0].attributes('style')).not.toContain('scale(')
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/relations/relation-duplicate/layout-comparison/source/pages/2?density=2',
+      {},
+      'blob'
+    )
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/relations/relation-duplicate/layout-comparison/target/pages/3?density=2',
+      {},
+      'blob'
+    )
+
+    await wrapper.get('button[aria-label="放大版式"]').trigger('click')
+    await flushPromises()
+    expect(comparisonContents[0].attributes('style')).toContain('width: 150%')
+    expect(comparisonContents[1].attributes('style')).toContain('width: 150%')
+
+    const zoomGesture = new WheelEvent('wheel', {
+      deltaY: -10,
+      ctrlKey: true,
+      cancelable: true
+    })
+    sourceCanvas.element.dispatchEvent(zoomGesture)
+    await wrapper.vm.$nextTick()
+    expect(zoomGesture.defaultPrevented).toBe(true)
+    expect(comparisonContents[0].attributes('style')).toContain('width: 160%')
+    expect(comparisonContents[1].attributes('style')).toContain('width: 160%')
+
+    vi.spyOn(sourceCanvas.element, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 200,
+      right: 400,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    })
+    await sourceCanvas.trigger('pointerdown', {
+      button: 0,
+      pointerId: 1,
+      clientX: 100,
+      clientY: 80
+    })
+    await sourceCanvas.trigger('pointermove', {
+      pointerId: 1,
+      clientX: 120,
+      clientY: 95
+    })
+    await sourceCanvas.trigger('pointerup', { pointerId: 1 })
+    expect(comparisonContents[0].attributes('style')).toContain('left: calc(50% + 20px)')
+    expect(comparisonContents[0].attributes('style')).toContain('top: calc(50% + 15px)')
+    expect(comparisonContents[1].attributes('style')).toContain('left: calc(50% + 20px)')
+    expect(comparisonContents[1].attributes('style')).toContain('top: calc(50% + 15px)')
+
+    await wrapper.get('button[aria-label="放大版式"]').trigger('click')
+    await wrapper.get('button[aria-label="放大版式"]').trigger('click')
+    await flushPromises()
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/relations/relation-duplicate/layout-comparison/source/pages/2?density=3',
+      {},
+      'blob'
+    )
+    expect(apiAdminGet).toHaveBeenCalledWith(
+      '/api/governance/relations/relation-duplicate/layout-comparison/target/pages/3?density=3',
+      {},
+      'blob'
+    )
+
+    await wrapper.get('button[aria-label="版式全屏"]').trigger('click')
+    expect(wrapper.get('.comparison-review').classes()).toContain('is-fullscreen')
+    expect(document.body.classList.contains('comparison-workspace-fullscreen')).toBe(true)
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.comparison-review').classes()).not.toContain('is-fullscreen')
+
     const targetPageTwoCallCount = apiAdminGet.mock.calls.filter(([url]) =>
       url.endsWith('/layout-comparison/target/pages/2')
     ).length
@@ -1704,10 +1811,194 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.findAll('.comparison-layout-pane')[0].text()).toContain('第 2 / 3 页')
     expect(wrapper.findAll('.comparison-layout-pane')[1].text()).toContain('第 2 / 3 页')
     expect(
-      apiAdminGet.mock.calls.filter(([url]) =>
-        url.endsWith('/layout-comparison/target/pages/2')
-      ).length
+      apiAdminGet.mock.calls.filter(([url]) => url.endsWith('/layout-comparison/target/pages/2'))
+        .length
     ).toBe(targetPageTwoCallCount)
+  })
+
+  it('Word 与 Excel 对比时完整展示证据单元格并允许滚动查看自然宽度表格', async () => {
+    const detail = duplicatePackageDetail()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:relation-page')
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const evidence =
+      '系统既支持知识问答，也支持信息查询、资料采集、服务受理、高风险交易、诊断排障、投诉争议和主动触达，并可与人工客服协同完成复杂场景。'
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              package_id: detail.package_id,
+              source_version_id: detail.source_version_id,
+              title: detail.title
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-duplicate')
+        return Promise.resolve(detail)
+      if (url === '/api/governance/relations/relation-duplicate/duplicate-candidates') {
+        return Promise.resolve(duplicateCandidates())
+      }
+      if (url === '/api/governance/relations/relation-duplicate/layout-comparison') {
+        return Promise.resolve({
+          supported: true,
+          relation_id: 'relation-duplicate',
+          relation_type: 'OVERLAP',
+          source: {
+            title: '产品白皮书.docx',
+            revision: '2',
+            pages: [
+              {
+                page_number: 1,
+                aspect_ratio: 0.75,
+                blocks: [
+                  {
+                    block_id: 'source-block-1',
+                    content: evidence,
+                    left: 10,
+                    top: 20,
+                    width: 70,
+                    height: 12,
+                    source_segment_ids: []
+                  },
+                  {
+                    block_id: 'source-block-2',
+                    content: '另一条证据',
+                    left: 10,
+                    top: 40,
+                    width: 40,
+                    height: 8,
+                    source_segment_ids: []
+                  }
+                ]
+              }
+            ]
+          },
+          target: {
+            title: '产品报价单.xlsx',
+            revision: '1',
+            pages: [
+              {
+                page_number: 1,
+                label: '报价明细',
+                width: 9,
+                height: 8,
+                render_mode: 'grid',
+                blocks: [
+                  {
+                    block_id: 'sheet-1-cell-B2',
+                    content: '知识问答',
+                    left: 11.1111,
+                    top: 12.5,
+                    width: 11.1111,
+                    height: 12.5,
+                    locator: { sheet: '报价明细', cell: 'B2' },
+                    source_segment_ids: []
+                  },
+                  {
+                    block_id: 'sheet-1-cell-C2',
+                    content: '250000',
+                    left: 22.2222,
+                    top: 12.5,
+                    width: 11.1111,
+                    height: 12.5,
+                    locator: { sheet: '报价明细', cell: 'C2' },
+                    source_segment_ids: []
+                  },
+                  {
+                    block_id: 'sheet-1-cell-D2',
+                    content: evidence,
+                    left: 33.3333,
+                    top: 12.5,
+                    width: 11.1111,
+                    height: 12.5,
+                    locator: { sheet: '报价明细', cell: 'D2' },
+                    source_segment_ids: []
+                  }
+                ]
+              }
+            ]
+          },
+          matches: [
+            {
+              match_id: 'match-1',
+              similarity: 1,
+              source_page_number: 1,
+              target_page_number: 1,
+              source_block_ids: ['source-block-1'],
+              target_block_ids: ['sheet-1-cell-B2', 'sheet-1-cell-D2'],
+              source_overlap_excerpt: evidence,
+              target_overlap_excerpt: evidence
+            },
+            {
+              match_id: 'match-2',
+              similarity: 0.8,
+              source_page_number: 1,
+              target_page_number: 1,
+              source_block_ids: ['source-block-2'],
+              target_block_ids: ['sheet-1-cell-C2'],
+              source_overlap_excerpt: '另一条证据',
+              target_overlap_excerpt: '250000'
+            }
+          ]
+        })
+      }
+      if (url.includes('/layout-comparison/source/pages/')) {
+        return Promise.resolve({ blob: () => Promise.resolve(new Blob(['image'])) })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url === '/api/knowledge/databases/kb-1/documents/file-duplicate/content') {
+        return Promise.resolve({ content: '# 产品介绍 A', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    await wrapper
+      .findAll('.evidence-tabs button')
+      .find((button) => button.text().includes('跨文档证据'))
+      .trigger('click')
+    await flushPromises()
+
+    const gridCanvas = wrapper.findAll('.comparison-layout-canvas')[1]
+    const gridContent = wrapper.findAll('.comparison-layout-content')[1]
+    expect(gridCanvas.classes()).toContain('is-grid')
+    expect(gridCanvas.classes()).not.toContain('is-pannable')
+    expect(gridContent.attributes('style')).toContain('width: max(100%, 1404px)')
+    expect(gridContent.attributes('style')).toContain('height: max(100%, 448px)')
+    expect(wrapper.get('.comparison-grid-cell-detail').text()).toContain(
+      `匹配单元格B2、D2D2${evidence}`
+    )
+    expect(wrapper.findAll('.comparison-layout-block.comparison-block-match')).toHaveLength(3)
+    expect(wrapper.findAll('.comparison-layout-block.comparison-block-selected')).toHaveLength(2)
+    expect(wrapper.findAll('.comparison-layout-block-number').map((node) => node.text())).toEqual([
+      '1',
+      'B2',
+      'D2'
+    ])
+
+    await wrapper.findAll('.comparison-layout-block.comparison-block-grid')[0].trigger('click')
+    expect(wrapper.get('.comparison-grid-cell-detail').text()).toContain('匹配单元格B2、D2B2知识问答')
+
+    await wrapper.findAll('.comparison-layout-block.comparison-block-grid')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.comparison-grid-cell-detail').text()).toContain('匹配单元格C2C225000')
+    expect(wrapper.findAll('.comparison-layout-block.comparison-block-match')).toHaveLength(2)
+
+    await gridCanvas.trigger('pointerenter')
+    await wrapper.get('button[aria-label="放大版式"]').trigger('click')
+    await flushPromises()
+    expect(gridContent.attributes('style')).toContain('width: max(100%, 1755px)')
+    expect(wrapper.findAll('.comparison-layout-content')[0].attributes('style')).toContain(
+      'width: 125%'
+    )
   })
 
   it('可以选择规范内容并将另一边记录为重复来源', async () => {
@@ -1935,7 +2226,9 @@ describe('FeishuReviewWorkspace', () => {
       })
     )
     expect(wrapper.emitted('knowledge-change')).toHaveLength(1)
-    expect(message.success).toHaveBeenCalledWith('已批量处理 1 个安全项；仍有 2 个知识单元待逐条审核')
+    expect(message.success).toHaveBeenCalledWith(
+      '已批量处理 1 个安全项；仍有 2 个知识单元待逐条审核'
+    )
   })
 
   it('知识单元支持批量不纳入和批量退回资料修改', async () => {

@@ -7,11 +7,7 @@
     }"
     aria-label="知识审核工作区"
   >
-    <aside
-      v-show="!queueCollapsed"
-      class="review-queue"
-      @scroll.passive="handleQueueScroll"
-    >
+    <aside v-show="!queueCollapsed" class="review-queue" @scroll.passive="handleQueueScroll">
       <div class="queue-heading">
         <div class="queue-heading-row">
           <div>
@@ -256,12 +252,16 @@
                 <RotateCcw :size="14" />重新申请纳入
               </a-button>
               <a-button
-                v-else-if="!currentItem?.knowledge_unit || (!isDocumentLayoutReview && !isPptxReview)"
+                v-else-if="
+                  !currentItem?.knowledge_unit || (!isDocumentLayoutReview && !isPptxReview)
+                "
                 type="primary"
                 size="small"
                 @click="decisionPanelOpen = true"
               >
-                <ClipboardCheck :size="14" />{{ knowledgeUnitMode ? '处理当前知识单元' : '审核处理' }}
+                <ClipboardCheck :size="14" />{{
+                  knowledgeUnitMode ? '处理当前知识单元' : '审核处理'
+                }}
               </a-button>
               <button
                 v-if="knowledgeUnitMode"
@@ -470,8 +470,15 @@
                       <section class="layout-context-sidebar">
                         <header class="layout-sidebar-heading">
                           <span>审核信息</span>
-                          <a-tag :color="statusColor(currentItem?.item_status || packageDetail.workflow_status)">
-                            {{ itemStatusLabel(currentItem?.item_status, currentItem) || workflowStatusLabel(packageDetail.workflow_status) }}
+                          <a-tag
+                            :color="
+                              statusColor(currentItem?.item_status || packageDetail.workflow_status)
+                            "
+                          >
+                            {{
+                              itemStatusLabel(currentItem?.item_status, currentItem) ||
+                              workflowStatusLabel(packageDetail.workflow_status)
+                            }}
                           </a-tag>
                         </header>
                         <h3 :title="packageDetail.title">{{ packageDetail.title }}</h3>
@@ -490,7 +497,11 @@
                             class="unit-recommendation"
                             :class="{ attention: currentItem.manual_review_required }"
                           >
-                            {{ currentItem.manual_review_required ? '需要人工确认' : `建议${outcomeLabel(currentItem.recommended_outcome)}` }}
+                            {{
+                              currentItem.manual_review_required
+                                ? '需要人工确认'
+                                : `建议${outcomeLabel(currentItem.recommended_outcome)}`
+                            }}
                           </span>
                         </div>
                         <dl class="layout-sidebar-facts">
@@ -528,7 +539,10 @@
                         >
                           <ClipboardCheck :size="14" />处理当前知识单元
                         </button>
-                        <div v-if="itemNavigationItems.length > 1" class="layout-sidebar-navigation">
+                        <div
+                          v-if="itemNavigationItems.length > 1"
+                          class="layout-sidebar-navigation"
+                        >
                           <button
                             type="button"
                             :disabled="!hasPreviousItem"
@@ -551,14 +565,24 @@
                           :aria-expanded="unitListExpanded"
                           @click="unitListExpanded = !unitListExpanded"
                         >
-                          {{ unitListExpanded ? '收起知识单元列表' : `查看全部知识单元（${visibleItems.length}）` }}
+                          {{
+                            unitListExpanded
+                              ? '收起知识单元列表'
+                              : `查看全部知识单元（${visibleItems.length}）`
+                          }}
                         </button>
-                        <div v-if="knowledgeUnitMode && unitListExpanded" class="layout-sidebar-unit-list">
+                        <div
+                          v-if="knowledgeUnitMode && unitListExpanded"
+                          class="layout-sidebar-unit-list"
+                        >
                           <button
                             v-for="(item, index) in visibleItems"
                             :key="item.review_item_id"
                             type="button"
-                            :class="{ active: item.review_item_id === selectedItemId, attention: item.manual_review_required }"
+                            :class="{
+                              active: item.review_item_id === selectedItemId,
+                              attention: item.manual_review_required
+                            }"
                             @click="selectItem(item.review_item_id)"
                           >
                             <span>{{ index + 1 }}</span>
@@ -598,7 +622,10 @@
                       <span v-if="activeDocumentPage?.preview_scaled" class="preview-scale-note">
                         原图像素过大，已按安全分辨率预览
                       </span>
-                      <span v-if="activeDocumentPage?.render_mode === 'grid'" class="spreadsheet-toolbar-note">
+                      <span
+                        v-if="activeDocumentPage?.render_mode === 'grid'"
+                        class="spreadsheet-toolbar-note"
+                      >
                         横向、纵向滚动查看 · 点击单元格编辑
                       </span>
                       <span v-else>{{ activeDocumentPage?.block_count || 0 }} 个可定位内容块</span>
@@ -632,7 +659,10 @@
                     </button>
                   </div>
                   <div class="document-layout-stage has-side-panel">
-                    <div v-if="activeDocumentPage?.render_mode === 'grid'" class="spreadsheet-viewport">
+                    <div
+                      v-if="activeDocumentPage?.render_mode === 'grid'"
+                      class="spreadsheet-viewport"
+                    >
                       <div
                         class="document-layout-canvas spreadsheet-canvas"
                         :style="spreadsheetCanvasStyle(activeDocumentPage)"
@@ -644,7 +674,10 @@
                           :key="block.block_id"
                           type="button"
                           class="document-layout-block spreadsheet-cell"
-                          :class="{ active: block.block_id === selectedDocumentBlockId, edited: block.edited }"
+                          :class="{
+                            active: block.block_id === selectedDocumentBlockId,
+                            edited: block.edited
+                          }"
                           :style="fragmentHotspotStyle(block)"
                           :title="block.content"
                           :aria-label="`${block.locator?.cell || '单元格'}：${block.content}`"
@@ -674,7 +707,10 @@
                         :key="block.block_id"
                         type="button"
                         class="document-layout-block"
-                        :class="{ active: block.block_id === selectedDocumentBlockId, edited: block.edited }"
+                        :class="{
+                          active: block.block_id === selectedDocumentBlockId,
+                          edited: block.edited
+                        }"
                         :style="fragmentHotspotStyle(block)"
                         :title="block.content"
                         @click="selectDocumentBlock(block)"
@@ -686,8 +722,15 @@
                       <section class="layout-context-sidebar">
                         <header class="layout-sidebar-heading">
                           <span>审核信息</span>
-                          <a-tag :color="statusColor(currentItem?.item_status || packageDetail.workflow_status)">
-                            {{ itemStatusLabel(currentItem?.item_status, currentItem) || workflowStatusLabel(packageDetail.workflow_status) }}
+                          <a-tag
+                            :color="
+                              statusColor(currentItem?.item_status || packageDetail.workflow_status)
+                            "
+                          >
+                            {{
+                              itemStatusLabel(currentItem?.item_status, currentItem) ||
+                              workflowStatusLabel(packageDetail.workflow_status)
+                            }}
                           </a-tag>
                         </header>
                         <h3 :title="packageDetail.title">{{ packageDetail.title }}</h3>
@@ -706,7 +749,11 @@
                             class="unit-recommendation"
                             :class="{ attention: currentItem.manual_review_required }"
                           >
-                            {{ currentItem.manual_review_required ? '需要人工确认' : `建议${outcomeLabel(currentItem.recommended_outcome)}` }}
+                            {{
+                              currentItem.manual_review_required
+                                ? '需要人工确认'
+                                : `建议${outcomeLabel(currentItem.recommended_outcome)}`
+                            }}
                           </span>
                         </div>
                         <dl class="layout-sidebar-facts">
@@ -723,9 +770,9 @@
                             <dd>{{ currentItem?.source_segment_ids?.length || 0 }} 个</dd>
                           </div>
                         </dl>
-                          <p v-if="currentItem?.summary" class="layout-sidebar-summary">
-                            {{ currentItem.summary }}
-                          </p>
+                        <p v-if="currentItem?.summary" class="layout-sidebar-summary">
+                          {{ currentItem.summary }}
+                        </p>
                         <button
                           v-if="currentItem?.can_reopen_exclusion"
                           type="button"
@@ -744,7 +791,10 @@
                         >
                           <ClipboardCheck :size="14" />处理当前知识单元
                         </button>
-                        <div v-if="itemNavigationItems.length > 1" class="layout-sidebar-navigation">
+                        <div
+                          v-if="itemNavigationItems.length > 1"
+                          class="layout-sidebar-navigation"
+                        >
                           <button
                             type="button"
                             :disabled="!hasPreviousItem"
@@ -767,14 +817,24 @@
                           :aria-expanded="unitListExpanded"
                           @click="unitListExpanded = !unitListExpanded"
                         >
-                          {{ unitListExpanded ? '收起知识单元列表' : `查看全部知识单元（${visibleItems.length}）` }}
+                          {{
+                            unitListExpanded
+                              ? '收起知识单元列表'
+                              : `查看全部知识单元（${visibleItems.length}）`
+                          }}
                         </button>
-                        <div v-if="knowledgeUnitMode && unitListExpanded" class="layout-sidebar-unit-list">
+                        <div
+                          v-if="knowledgeUnitMode && unitListExpanded"
+                          class="layout-sidebar-unit-list"
+                        >
                           <button
                             v-for="(item, index) in visibleItems"
                             :key="item.review_item_id"
                             type="button"
-                            :class="{ active: item.review_item_id === selectedItemId, attention: item.manual_review_required }"
+                            :class="{
+                              active: item.review_item_id === selectedItemId,
+                              attention: item.manual_review_required
+                            }"
                             @click="selectItem(item.review_item_id)"
                           >
                             <span>{{ index + 1 }}</span>
@@ -786,15 +846,17 @@
                         <header>
                           <div>
                             <strong>内容块编辑</strong>
-                            <span>{{ selectedDocumentBlock.locator?.cell || selectedDocumentBlock.locator?.block || activeDocumentPage?.label }}</span>
+                            <span>{{
+                              selectedDocumentBlock.locator?.cell ||
+                              selectedDocumentBlock.locator?.block ||
+                              activeDocumentPage?.label
+                            }}</span>
                           </div>
-                          <span v-if="selectedDocumentBlock.edited" class="document-edit-badge">草稿已改</span>
+                          <span v-if="selectedDocumentBlock.edited" class="document-edit-badge"
+                            >草稿已改</span
+                          >
                         </header>
-                        <textarea
-                          v-model="documentBlockDraft"
-                          rows="7"
-                          aria-label="内容块编辑"
-                        />
+                        <textarea v-model="documentBlockDraft" rows="7" aria-label="内容块编辑" />
                         <p>这里只保存审核草稿，不会改写飞书原始资料。</p>
                         <button
                           type="button"
@@ -906,7 +968,11 @@
               </a-spin>
             </section>
 
-            <section v-else-if="activeEvidenceView === 'comparisons'" class="comparison-review">
+            <section
+              v-else-if="activeEvidenceView === 'comparisons'"
+              class="comparison-review"
+              :class="{ 'is-fullscreen': comparisonFullscreen }"
+            >
               <div v-if="!selectedRelations.length" class="content-notice">
                 <GitCompareArrows :size="24" /><strong>当前审核项没有跨文档问题</strong>
                 <p>没有发现需要人工裁决的重复、重叠或冲突证据。</p>
@@ -946,103 +1012,381 @@
                 <div class="comparison-evidence-layout">
                   <div class="comparison-layout-main">
                     <a-spin :spinning="relationLayoutLoading">
-                      <section v-if="comparisonLayoutReady" class="comparison-layout-review" aria-label="跨文档版式对比">
-                    <header class="comparison-layout-toolbar">
-                      <div>
-                        <strong>版式对比</strong>
-                        <span v-if="comparisonMatchCount">已定位 {{ comparisonMatchCount }} 组匹配片段</span>
-                        <span v-else>暂未生成可定位片段</span>
-                      </div>
-                      <label class="comparison-sync-toggle">
-                        <input
-                          v-model="comparisonSyncPages"
-                          type="checkbox"
-                          :disabled="!comparisonMatchPagesAligned"
-                        />
-                        <span>同步翻页</span>
-                      </label>
-                    </header>
-                    <div
-                      v-if="relationLayoutComparison.matches?.length"
-                      class="comparison-match-panel"
-                      aria-label="匹配片段导航"
-                    >
-                      <div class="comparison-match-strip">
-                        <button
-                          v-for="(match, index) in relationLayoutComparison.matches"
-                          :key="match.match_id"
-                          type="button"
-                          :class="{ active: match.match_id === selectedComparisonMatchId }"
-                          @click="selectComparisonMatch(match)"
+                      <section
+                        v-if="comparisonLayoutReady"
+                        class="comparison-layout-review"
+                        aria-label="跨文档版式对比"
+                      >
+                        <header class="comparison-layout-toolbar">
+                          <div class="comparison-layout-heading">
+                            <strong>版式对比</strong>
+                            <span v-if="comparisonMatchCount"
+                              >已定位 {{ comparisonMatchCount }} 组匹配片段</span
+                            >
+                            <span v-else>暂未生成可定位片段</span>
+                          </div>
+                          <div class="comparison-view-toolbar">
+                            <label class="comparison-sync-toggle">
+                              <input
+                                v-model="comparisonSyncPages"
+                                type="checkbox"
+                                :disabled="!comparisonMatchPagesAligned"
+                              />
+                              <span>同步翻页</span>
+                            </label>
+                            <label class="comparison-sync-toggle">
+                              <input
+                                v-model="comparisonSyncView"
+                                type="checkbox"
+                                @change="syncComparisonViews"
+                              />
+                              <span>同步视图</span>
+                            </label>
+                            <div class="comparison-zoom-controls" aria-label="版式缩放控制">
+                              <button
+                                type="button"
+                                title="缩小"
+                                aria-label="缩小版式"
+                                :disabled="activeComparisonView.scale <= COMPARISON_MIN_SCALE"
+                                @click="changeComparisonZoom(-COMPARISON_SCALE_STEP)"
+                              >
+                                <ZoomOut :size="14" />
+                              </button>
+                              <output :aria-label="`当前缩放 ${comparisonZoomPercentage}%`">
+                                {{ comparisonZoomPercentage }}%
+                              </output>
+                              <button
+                                type="button"
+                                title="放大"
+                                aria-label="放大版式"
+                                :disabled="activeComparisonView.scale >= COMPARISON_MAX_SCALE"
+                                @click="changeComparisonZoom(COMPARISON_SCALE_STEP)"
+                              >
+                                <ZoomIn :size="14" />
+                              </button>
+                              <button
+                                type="button"
+                                title="恢复适配大小"
+                                aria-label="恢复版式大小"
+                                @click="resetComparisonView()"
+                              >
+                                <RotateCcw :size="13" />
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              class="comparison-fullscreen-toggle"
+                              :title="comparisonFullscreen ? '退出全屏' : '全屏查看'"
+                              :aria-label="comparisonFullscreen ? '退出版式全屏' : '版式全屏'"
+                              :aria-pressed="comparisonFullscreen"
+                              @click="toggleComparisonFullscreen"
+                            >
+                              <Minimize2 v-if="comparisonFullscreen" :size="15" />
+                              <Maximize2 v-else :size="15" />
+                            </button>
+                          </div>
+                        </header>
+                        <div
+                          v-if="relationLayoutComparison.matches?.length"
+                          class="comparison-match-panel"
+                          aria-label="匹配片段导航"
                         >
-                          <span>{{ index + 1 }}</span>
-                          <strong>匹配片段 {{ index + 1 }}</strong>
-                          <small>{{ percentage(match.similarity) }} · {{ comparisonMatchLocator(match) }}</small>
-                        </button>
-                      </div>
-                    </div>
-                    <p v-else class="comparison-layout-fallback">
-                      <CircleAlert :size="15" />{{ relationLayoutComparison.message || '当前仅提供文字证据。' }}
-                    </p>
-                    <div class="comparison-layout-columns">
-                      <section class="comparison-layout-pane">
-                        <header>
-                          <div>
-                            <strong>{{ relationLayoutComparison.source.title }}</strong>
-                            <span>版本 {{ relationLayoutComparison.source.revision || '-' }} · 第 {{ comparisonPageNumbers.source }} / {{ comparisonSourcePages.length }} 页</span>
+                          <div class="comparison-match-strip">
+                            <button
+                              v-for="(match, index) in relationLayoutComparison.matches"
+                              :key="match.match_id"
+                              type="button"
+                              :class="{ active: match.match_id === selectedComparisonMatchId }"
+                              @click="selectComparisonMatch(match)"
+                            >
+                              <span>{{ index + 1 }}</span>
+                              <strong>匹配片段 {{ index + 1 }}</strong>
+                              <small
+                                >{{ percentage(match.similarity) }} ·
+                                {{ comparisonMatchLocator(match) }}</small
+                              >
+                            </button>
                           </div>
-                          <div class="comparison-page-actions">
-                            <button type="button" aria-label="来源一上一页" :disabled="comparisonPageNumbers.source <= 1" @click="changeComparisonPage('source', -1)"><ChevronLeft :size="14" /></button>
-                            <button type="button" aria-label="来源一下一页" :disabled="comparisonPageNumbers.source >= comparisonSourcePages.length" @click="changeComparisonPage('source', 1)"><ChevronRight :size="14" /></button>
-                          </div>
-                        </header>
-                        <div class="comparison-layout-canvas" :style="{ aspectRatio: String(activeComparisonSourcePage?.aspect_ratio || 16 / 9) }">
-                          <div v-if="activeComparisonSourcePage?.render_mode === 'grid'" class="comparison-layout-grid-hint">表格版式</div>
-                          <img v-else-if="comparisonPagePreviewUrls.source" :src="comparisonPagePreviewUrls.source" :alt="`${relationLayoutComparison.source.title} 第 ${comparisonPageNumbers.source} 页`" />
-                          <div v-else class="comparison-layout-state"><CircleAlert :size="18" /><span>{{ comparisonPagePreviewErrors.source || '正在生成页面预览…' }}</span></div>
-                          <button
-                            v-for="block in activeComparisonSourcePage?.blocks || []"
-                            :key="`source-${block.block_id}`"
-                            type="button"
-                            class="comparison-layout-block"
-                            :class="comparisonBlockClass('source', block)"
-                            :style="comparisonBlockStyle(block)"
-                            :title="block.content"
-                            @click="comparisonMatchForBlock('source', block) && selectComparisonMatch(comparisonMatchForBlock('source', block))"
-                          ><span v-if="comparisonBlockClass('source', block)['comparison-block-grid']" class="comparison-block-content">{{ block.content }}</span><span v-if="comparisonBlockClass('source', block)['comparison-block-grid'] && comparisonBlockClass('source', block)['comparison-block-match']" class="comparison-layout-block-number">{{ comparisonMatchNumber('source', block) }}</span><span v-else-if="comparisonBlockClass('source', block)['comparison-block-match']" class="comparison-layout-block-number">{{ comparisonMatchNumber('source', block) }}</span></button>
                         </div>
-                      </section>
-                      <section class="comparison-layout-pane">
-                        <header>
-                          <div>
-                            <strong>{{ relationLayoutComparison.target.title }}</strong>
-                            <span>版本 {{ relationLayoutComparison.target.revision || '-' }} · 第 {{ comparisonPageNumbers.target }} / {{ comparisonTargetPages.length }} 页</span>
-                          </div>
-                          <div class="comparison-page-actions">
-                            <button type="button" aria-label="来源二上一页" :disabled="comparisonPageNumbers.target <= 1" @click="changeComparisonPage('target', -1)"><ChevronLeft :size="14" /></button>
-                            <button type="button" aria-label="来源二下一页" :disabled="comparisonPageNumbers.target >= comparisonTargetPages.length" @click="changeComparisonPage('target', 1)"><ChevronRight :size="14" /></button>
-                          </div>
-                        </header>
-                        <div class="comparison-layout-canvas" :style="{ aspectRatio: String(activeComparisonTargetPage?.aspect_ratio || 16 / 9) }">
-                          <div v-if="activeComparisonTargetPage?.render_mode === 'grid'" class="comparison-layout-grid-hint">表格版式</div>
-                          <img v-else-if="comparisonPagePreviewUrls.target" :src="comparisonPagePreviewUrls.target" :alt="`${relationLayoutComparison.target.title} 第 ${comparisonPageNumbers.target} 页`" />
-                          <div v-else class="comparison-layout-state"><CircleAlert :size="18" /><span>{{ comparisonPagePreviewErrors.target || '正在生成页面预览…' }}</span></div>
-                          <button
-                            v-for="block in activeComparisonTargetPage?.blocks || []"
-                            :key="`target-${block.block_id}`"
-                            type="button"
-                            class="comparison-layout-block"
-                            :class="comparisonBlockClass('target', block)"
-                            :style="comparisonBlockStyle(block)"
-                            :title="block.content"
-                            @click="comparisonMatchForBlock('target', block) && selectComparisonMatch(comparisonMatchForBlock('target', block))"
-                          ><span v-if="comparisonBlockClass('target', block)['comparison-block-grid']" class="comparison-block-content">{{ block.content }}</span><span v-if="comparisonBlockClass('target', block)['comparison-block-grid'] && comparisonBlockClass('target', block)['comparison-block-match']" class="comparison-layout-block-number">{{ comparisonMatchNumber('target', block) }}</span><span v-else-if="comparisonBlockClass('target', block)['comparison-block-match']" class="comparison-layout-block-number">{{ comparisonMatchNumber('target', block) }}</span></button>
+                        <p v-else class="comparison-layout-fallback">
+                          <CircleAlert :size="15" />{{
+                            relationLayoutComparison.message || '当前仅提供文字证据。'
+                          }}
+                        </p>
+                        <div class="comparison-layout-columns">
+                          <section class="comparison-layout-pane">
+                            <header>
+                              <div>
+                                <strong>{{ relationLayoutComparison.source.title }}</strong>
+                                <span
+                                  >版本 {{ relationLayoutComparison.source.revision || '-' }} · 第
+                                  {{ comparisonPageNumbers.source }} /
+                                  {{ comparisonSourcePages.length }} 页</span
+                                >
+                              </div>
+                              <div class="comparison-page-actions">
+                                <button
+                                  type="button"
+                                  aria-label="来源一上一页"
+                                  :disabled="comparisonPageNumbers.source <= 1"
+                                  @click="changeComparisonPage('source', -1)"
+                                >
+                                  <ChevronLeft :size="14" />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label="来源一下一页"
+                                  :disabled="
+                                    comparisonPageNumbers.source >= comparisonSourcePages.length
+                                  "
+                                  @click="changeComparisonPage('source', 1)"
+                                >
+                                  <ChevronRight :size="14" />
+                                </button>
+                              </div>
+                            </header>
+                            <div
+                              class="comparison-layout-stage"
+                              :class="{
+                                'has-grid': activeComparisonSourcePage?.render_mode === 'grid'
+                              }"
+                            >
+                              <div
+                                v-if="activeComparisonSourceGridBlock"
+                                class="comparison-grid-cell-detail"
+                              >
+                                <div class="comparison-grid-cell-summary">
+                                  <span>匹配单元格</span>
+                                  <strong>{{ comparisonGridMatchCells('source') }}</strong>
+                                </div>
+                                <div class="comparison-grid-cell-current">
+                                  <strong>{{ activeComparisonSourceGridBlock.locator?.cell }}</strong>
+                                  <span>{{ activeComparisonSourceGridBlock.content }}</span>
+                                </div>
+                              </div>
+                              <div
+                                :ref="(element) => setComparisonCanvasRef('source', element)"
+                                class="comparison-layout-canvas"
+                                :class="{
+                                  'is-grid': activeComparisonSourcePage?.render_mode === 'grid',
+                                  'is-pannable':
+                                    activeComparisonSourcePage?.render_mode !== 'grid' &&
+                                    comparisonViews.source.scale > COMPARISON_MIN_SCALE
+                                }"
+                                :style="comparisonCanvasStyle(activeComparisonSourcePage)"
+                                @pointerenter="activeComparisonViewSide = 'source'"
+                                @pointerdown="startComparisonPan('source', $event)"
+                                @pointermove="moveComparisonPan($event)"
+                                @pointerup="endComparisonPan($event)"
+                                @pointercancel="endComparisonPan($event)"
+                                @wheel="zoomComparisonFromWheel('source', $event)"
+                              >
+                                <div
+                                  class="comparison-layout-content"
+                                  :class="{
+                                    'is-grid': activeComparisonSourcePage?.render_mode === 'grid'
+                                  }"
+                                  :style="comparisonViewStyle('source', activeComparisonSourcePage)"
+                                >
+                                  <div
+                                    v-if="activeComparisonSourcePage?.render_mode === 'grid'"
+                                    class="comparison-layout-grid-hint"
+                                  >
+                                    表格版式
+                                  </div>
+                                  <img
+                                    v-else-if="comparisonPagePreviewUrls.source"
+                                    :src="comparisonPagePreviewUrls.source"
+                                    :alt="`${relationLayoutComparison.source.title} 第 ${comparisonPageNumbers.source} 页`"
+                                    draggable="false"
+                                  />
+                                  <div v-else class="comparison-layout-state">
+                                    <CircleAlert :size="18" /><span>{{
+                                      comparisonPagePreviewErrors.source || '正在生成页面预览…'
+                                    }}</span>
+                                  </div>
+                                  <button
+                                    v-for="block in activeComparisonSourcePage?.blocks || []"
+                                    :key="`source-${block.block_id}`"
+                                    type="button"
+                                    class="comparison-layout-block"
+                                    :class="comparisonBlockClass('source', block)"
+                                    :style="comparisonBlockStyle(block)"
+                                    :title="block.content"
+                                    @click="selectComparisonBlock('source', block)"
+                                  >
+                                    <span
+                                      v-if="
+                                        comparisonBlockClass('source', block)[
+                                          'comparison-block-grid'
+                                        ]
+                                      "
+                                      class="comparison-block-content"
+                                      >{{ block.content }}</span
+                                    ><span
+                                      v-if="
+                                        comparisonBlockClass('source', block)[
+                                          'comparison-block-grid'
+                                        ] &&
+                                        comparisonBlockClass('source', block)[
+                                          'comparison-block-match'
+                                        ]
+                                      "
+                                      class="comparison-layout-block-number"
+                                      >{{ comparisonBlockMarker('source', block) }}</span
+                                    ><span
+                                      v-else-if="
+                                        comparisonBlockClass('source', block)[
+                                          'comparison-block-match'
+                                        ]
+                                      "
+                                      class="comparison-layout-block-number"
+                                      >{{ comparisonBlockMarker('source', block) }}</span
+                                    >
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </section>
+                          <section class="comparison-layout-pane">
+                            <header>
+                              <div>
+                                <strong>{{ relationLayoutComparison.target.title }}</strong>
+                                <span
+                                  >版本 {{ relationLayoutComparison.target.revision || '-' }} · 第
+                                  {{ comparisonPageNumbers.target }} /
+                                  {{ comparisonTargetPages.length }} 页</span
+                                >
+                              </div>
+                              <div class="comparison-page-actions">
+                                <button
+                                  type="button"
+                                  aria-label="来源二上一页"
+                                  :disabled="comparisonPageNumbers.target <= 1"
+                                  @click="changeComparisonPage('target', -1)"
+                                >
+                                  <ChevronLeft :size="14" />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label="来源二下一页"
+                                  :disabled="
+                                    comparisonPageNumbers.target >= comparisonTargetPages.length
+                                  "
+                                  @click="changeComparisonPage('target', 1)"
+                                >
+                                  <ChevronRight :size="14" />
+                                </button>
+                              </div>
+                            </header>
+                            <div
+                              class="comparison-layout-stage"
+                              :class="{
+                                'has-grid': activeComparisonTargetPage?.render_mode === 'grid'
+                              }"
+                            >
+                              <div
+                                v-if="activeComparisonTargetGridBlock"
+                                class="comparison-grid-cell-detail"
+                              >
+                                <div class="comparison-grid-cell-summary">
+                                  <span>匹配单元格</span>
+                                  <strong>{{ comparisonGridMatchCells('target') }}</strong>
+                                </div>
+                                <div class="comparison-grid-cell-current">
+                                  <strong>{{ activeComparisonTargetGridBlock.locator?.cell }}</strong>
+                                  <span>{{ activeComparisonTargetGridBlock.content }}</span>
+                                </div>
+                              </div>
+                              <div
+                                :ref="(element) => setComparisonCanvasRef('target', element)"
+                                class="comparison-layout-canvas"
+                                :class="{
+                                  'is-grid': activeComparisonTargetPage?.render_mode === 'grid',
+                                  'is-pannable':
+                                    activeComparisonTargetPage?.render_mode !== 'grid' &&
+                                    comparisonViews.target.scale > COMPARISON_MIN_SCALE
+                                }"
+                                :style="comparisonCanvasStyle(activeComparisonTargetPage)"
+                                @pointerenter="activeComparisonViewSide = 'target'"
+                                @pointerdown="startComparisonPan('target', $event)"
+                                @pointermove="moveComparisonPan($event)"
+                                @pointerup="endComparisonPan($event)"
+                                @pointercancel="endComparisonPan($event)"
+                                @wheel="zoomComparisonFromWheel('target', $event)"
+                              >
+                                <div
+                                  class="comparison-layout-content"
+                                  :class="{
+                                    'is-grid': activeComparisonTargetPage?.render_mode === 'grid'
+                                  }"
+                                  :style="comparisonViewStyle('target', activeComparisonTargetPage)"
+                                >
+                                  <div
+                                    v-if="activeComparisonTargetPage?.render_mode === 'grid'"
+                                    class="comparison-layout-grid-hint"
+                                  >
+                                    表格版式
+                                  </div>
+                                  <img
+                                    v-else-if="comparisonPagePreviewUrls.target"
+                                    :src="comparisonPagePreviewUrls.target"
+                                    :alt="`${relationLayoutComparison.target.title} 第 ${comparisonPageNumbers.target} 页`"
+                                    draggable="false"
+                                  />
+                                  <div v-else class="comparison-layout-state">
+                                    <CircleAlert :size="18" /><span>{{
+                                      comparisonPagePreviewErrors.target || '正在生成页面预览…'
+                                    }}</span>
+                                  </div>
+                                  <button
+                                    v-for="block in activeComparisonTargetPage?.blocks || []"
+                                    :key="`target-${block.block_id}`"
+                                    type="button"
+                                    class="comparison-layout-block"
+                                    :class="comparisonBlockClass('target', block)"
+                                    :style="comparisonBlockStyle(block)"
+                                    :title="block.content"
+                                    @click="selectComparisonBlock('target', block)"
+                                  >
+                                    <span
+                                      v-if="
+                                        comparisonBlockClass('target', block)[
+                                          'comparison-block-grid'
+                                        ]
+                                      "
+                                      class="comparison-block-content"
+                                      >{{ block.content }}</span
+                                    ><span
+                                      v-if="
+                                        comparisonBlockClass('target', block)[
+                                          'comparison-block-grid'
+                                        ] &&
+                                        comparisonBlockClass('target', block)[
+                                          'comparison-block-match'
+                                        ]
+                                      "
+                                      class="comparison-layout-block-number"
+                                      >{{ comparisonBlockMarker('target', block) }}</span
+                                    ><span
+                                      v-else-if="
+                                        comparisonBlockClass('target', block)[
+                                          'comparison-block-match'
+                                        ]
+                                      "
+                                      class="comparison-layout-block-number"
+                                      >{{ comparisonBlockMarker('target', block) }}</span
+                                    >
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </section>
                         </div>
-                      </section>
-                    </div>
                       </section>
                       <div v-else-if="relationLayoutError" class="content-notice compact is-error">
-                        <CircleAlert :size="20" /><strong>版式对比暂不可用</strong><p>{{ relationLayoutError }}，已保留文字证据。</p>
+                        <CircleAlert :size="20" /><strong>版式对比暂不可用</strong>
+                        <p>{{ relationLayoutError }}，已保留文字证据。</p>
                       </div>
                     </a-spin>
                   </div>
@@ -1051,175 +1395,197 @@
                     class="comparison-card"
                     :class="comparisonClass(activeRelation.relation_type)"
                   >
-                  <header class="comparison-card-header">
-                    <div>
-                      <a-tag :color="relationColor(activeRelation.relation_type)">{{
-                        relationLabel(activeRelation.relation_type)
-                      }}</a-tag
-                      ><strong
-                        >{{ activeRelation.source_title }} ↔
-                        {{ activeRelation.target_title }}</strong
-                      >
-                    </div>
-                    <span>置信度 {{ percentage(activeRelation.confidence) }}</span>
-                  </header>
-                  <div
-                    v-if="activeRelation.same_content?.length"
-                    class="evidence-block evidence-same"
-                  >
-                    <strong>相同内容</strong>
-                    <ul>
-                      <li
-                        v-for="(fact, index) in activeRelation.same_content"
-                        :key="`same-${index}`"
-                      >
-                        {{ formatFactValue(fact) }}
-                      </li>
-                    </ul>
-                  </div>
-                  <div
-                    v-if="activeRelation.different_content?.length"
-                    class="evidence-block evidence-diff"
-                  >
-                    <strong>差异内容</strong>
-                    <div
-                      v-for="(fact, index) in activeRelation.different_content"
-                      :key="`diff-${index}`"
-                      class="difference-row"
-                    >
-                      <span>{{ fact.field || '内容差异' }}</span>
-                      <p><b>来源一</b>{{ fact.current ?? formatFactValue(fact) }}</p>
-                      <p><b>来源二</b>{{ fact.candidate ?? '-' }}</p>
-                    </div>
-                  </div>
-                  <p v-if="activeRelation.reasoning" class="comparison-reasoning">
-                    <span>判断理由</span>{{ activeRelation.reasoning }}
-                  </p>
-                  <section
-                    v-if="duplicateRelation(activeRelation)"
-                    class="duplicate-governance"
-                    aria-label="重复片段处理"
-                  >
-                    <div class="duplicate-governance-heading">
+                    <header class="comparison-card-header">
                       <div>
-                        <Link2 :size="14" />
-                        <span>
-                          <strong>文字证据</strong>
-                          <template v-if="activeDuplicateMatch">
-                            当前对应上方的匹配片段 {{ activeDuplicateMatchIndex + 1 }} / {{ activeDuplicateMatches.length }}
-                          </template>
-                          <template v-else>用于核对版式高亮的具体正文</template>
-                        </span>
-                      </div>
-                      <a-button
-                        v-if="!duplicateCandidates[activeRelation.relation_id]"
-                        size="small"
-                        :loading="duplicateLoading[activeRelation.relation_id]"
-                        @click="loadDuplicateCandidates(activeRelation)"
-                        >{{
-                          duplicateLoading[activeRelation.relation_id]
-                            ? '正在加载文字证据'
-                            : '加载文字证据'
-                        }}</a-button
-                      >
-                    </div>
-                    <a-spin :spinning="duplicateLoading[activeRelation.relation_id]">
-                      <template v-if="duplicateCandidates[activeRelation.relation_id]">
-                        <div
-                          v-if="duplicateCandidates[activeRelation.relation_id].decision"
-                          class="duplicate-decision-result"
+                        <a-tag :color="relationColor(activeRelation.relation_type)">{{
+                          relationLabel(activeRelation.relation_type)
+                        }}</a-tag
+                        ><strong
+                          >{{ activeRelation.source_title }} ↔
+                          {{ activeRelation.target_title }}</strong
                         >
-                          <CircleCheck :size="15" />
-                          <div>
-                            <strong>{{
-                              duplicateDecisionTitle(
-                                duplicateCandidates[activeRelation.relation_id]
-                              )
-                            }}</strong>
-                            <span
-                              >已处理
-                              {{
-                                duplicateCandidates[activeRelation.relation_id].decision
-                                  .fragment_match_ids?.length || 0
-                              }}
-                              组重复片段，其他独有内容继续审核。</span
-                            >
-                          </div>
+                      </div>
+                      <span>置信度 {{ percentage(activeRelation.confidence) }}</span>
+                    </header>
+                    <div
+                      v-if="activeRelation.same_content?.length"
+                      class="evidence-block evidence-same"
+                    >
+                      <strong>相同内容</strong>
+                      <ul>
+                        <li
+                          v-for="(fact, index) in activeRelation.same_content"
+                          :key="`same-${index}`"
+                        >
+                          {{ formatFactValue(fact) }}
+                        </li>
+                      </ul>
+                    </div>
+                    <div
+                      v-if="activeRelation.different_content?.length"
+                      class="evidence-block evidence-diff"
+                    >
+                      <strong>差异内容</strong>
+                      <div
+                        v-for="(fact, index) in activeRelation.different_content"
+                        :key="`diff-${index}`"
+                        class="difference-row"
+                      >
+                        <span>{{ fact.field || '内容差异' }}</span>
+                        <p><b>来源一</b>{{ fact.current ?? formatFactValue(fact) }}</p>
+                        <p><b>来源二</b>{{ fact.candidate ?? '-' }}</p>
+                      </div>
+                    </div>
+                    <p v-if="activeRelation.reasoning" class="comparison-reasoning">
+                      <span>判断理由</span>{{ activeRelation.reasoning }}
+                    </p>
+                    <section
+                      v-if="duplicateRelation(activeRelation)"
+                      class="duplicate-governance"
+                      aria-label="重复片段处理"
+                    >
+                      <div class="duplicate-governance-heading">
+                        <div>
+                          <Link2 :size="14" />
+                          <span>
+                            <strong>文字证据</strong>
+                            <template v-if="activeDuplicateMatch">
+                              当前对应上方的匹配片段 {{ activeDuplicateMatchIndex + 1 }} /
+                              {{ activeDuplicateMatches.length }}
+                            </template>
+                            <template v-else>用于核对版式高亮的具体正文</template>
+                          </span>
                         </div>
-                        <template v-else-if="activeDuplicateMatch">
-                          <div class="duplicate-match-list">
-                            <article :key="activeDuplicateMatch.match_id" class="duplicate-match">
-                              <header>
-                                <span>匹配片段 {{ activeDuplicateMatchIndex + 1 }} / {{ activeDuplicateMatches.length }}</span>
-                                <b>相似度 {{ percentage(activeDuplicateMatch.similarity) }}</b>
-                              </header>
-                              <div>
-                                <section>
-                                  <label
-                                    >来源一 · 重叠部分
-                                    <span v-if="formatSegmentLocator(activeDuplicateMatch.source_locator)">{{
-                                      formatSegmentLocator(activeDuplicateMatch.source_locator)
-                                    }}</span></label
-                                  >
-                                  <p class="overlap-snippet">
-                                    {{ activeDuplicateMatch.source_overlap_excerpt || activeDuplicateMatch.source_excerpt }}
-                                  </p>
-                                </section>
-                                <section>
-                                  <label
-                                    >来源二 · 重叠部分
-                                    <span v-if="formatSegmentLocator(activeDuplicateMatch.target_locator)">{{
-                                      formatSegmentLocator(activeDuplicateMatch.target_locator)
-                                    }}</span></label
-                                  >
-                                  <p class="overlap-snippet">
-                                    {{ activeDuplicateMatch.target_overlap_excerpt || activeDuplicateMatch.target_excerpt }}
-                                  </p>
-                                </section>
-                              </div>
-                            </article>
-                          </div>
-                          <div class="duplicate-actions">
-                            <a-tooltip
-                              :title="duplicateActionHelp(activeDuplicateMatches.length)"
-                              placement="top"
-                            >
-                              <button
-                                type="button"
-                                class="unit-visibility duplicate-action-help"
-                                :aria-label="duplicateActionHelp(activeDuplicateMatches.length)"
-                              >
-                                ?
-                              </button>
-                            </a-tooltip>
+                        <a-button
+                          v-if="!duplicateCandidates[activeRelation.relation_id]"
+                          size="small"
+                          :loading="duplicateLoading[activeRelation.relation_id]"
+                          @click="loadDuplicateCandidates(activeRelation)"
+                          >{{
+                            duplicateLoading[activeRelation.relation_id]
+                              ? '正在加载文字证据'
+                              : '加载文字证据'
+                          }}</a-button
+                        >
+                      </div>
+                      <a-spin :spinning="duplicateLoading[activeRelation.relation_id]">
+                        <template v-if="duplicateCandidates[activeRelation.relation_id]">
+                          <div
+                            v-if="duplicateCandidates[activeRelation.relation_id].decision"
+                            class="duplicate-decision-result"
+                          >
+                            <CircleCheck :size="15" />
                             <div>
-                              <a-button
-                                size="small"
-                                :loading="duplicateResolving === activeRelation.relation_id"
-                                @click="confirmDuplicateResolution(activeRelation, 'USE_SOURCE')"
-                                >保留来源一</a-button
-                              >
-                              <a-button
-                                size="small"
-                                :loading="duplicateResolving === activeRelation.relation_id"
-                                @click="confirmDuplicateResolution(activeRelation, 'USE_TARGET')"
-                                >保留来源二</a-button
-                              >
-                              <a-button
-                                size="small"
-                                :loading="duplicateResolving === activeRelation.relation_id"
-                                @click="confirmDuplicateResolution(activeRelation, 'KEEP_SEPARATE')"
-                                >分别保留</a-button
+                              <strong>{{
+                                duplicateDecisionTitle(
+                                  duplicateCandidates[activeRelation.relation_id]
+                                )
+                              }}</strong>
+                              <span
+                                >已处理
+                                {{
+                                  duplicateCandidates[activeRelation.relation_id].decision
+                                    .fragment_match_ids?.length || 0
+                                }}
+                                组重复片段，其他独有内容继续审核。</span
                               >
                             </div>
                           </div>
+                          <template v-else-if="activeDuplicateMatch">
+                            <div class="duplicate-match-list">
+                              <article :key="activeDuplicateMatch.match_id" class="duplicate-match">
+                                <header>
+                                  <span
+                                    >匹配片段 {{ activeDuplicateMatchIndex + 1 }} /
+                                    {{ activeDuplicateMatches.length }}</span
+                                  >
+                                  <b>相似度 {{ percentage(activeDuplicateMatch.similarity) }}</b>
+                                </header>
+                                <div>
+                                  <section>
+                                    <label
+                                      >来源一 · 重叠部分
+                                      <span
+                                        v-if="
+                                          formatSegmentLocator(activeDuplicateMatch.source_locator)
+                                        "
+                                        >{{
+                                          formatSegmentLocator(activeDuplicateMatch.source_locator)
+                                        }}</span
+                                      ></label
+                                    >
+                                    <p class="overlap-snippet">
+                                      {{
+                                        activeDuplicateMatch.source_overlap_excerpt ||
+                                        activeDuplicateMatch.source_excerpt
+                                      }}
+                                    </p>
+                                  </section>
+                                  <section>
+                                    <label
+                                      >来源二 · 重叠部分
+                                      <span
+                                        v-if="
+                                          formatSegmentLocator(activeDuplicateMatch.target_locator)
+                                        "
+                                        >{{
+                                          formatSegmentLocator(activeDuplicateMatch.target_locator)
+                                        }}</span
+                                      ></label
+                                    >
+                                    <p class="overlap-snippet">
+                                      {{
+                                        activeDuplicateMatch.target_overlap_excerpt ||
+                                        activeDuplicateMatch.target_excerpt
+                                      }}
+                                    </p>
+                                  </section>
+                                </div>
+                              </article>
+                            </div>
+                            <div class="duplicate-actions">
+                              <a-tooltip
+                                :title="duplicateActionHelp(activeDuplicateMatches.length)"
+                                placement="top"
+                              >
+                                <button
+                                  type="button"
+                                  class="unit-visibility duplicate-action-help"
+                                  :aria-label="duplicateActionHelp(activeDuplicateMatches.length)"
+                                >
+                                  ?
+                                </button>
+                              </a-tooltip>
+                              <div>
+                                <a-button
+                                  size="small"
+                                  :loading="duplicateResolving === activeRelation.relation_id"
+                                  @click="confirmDuplicateResolution(activeRelation, 'USE_SOURCE')"
+                                  >保留来源一</a-button
+                                >
+                                <a-button
+                                  size="small"
+                                  :loading="duplicateResolving === activeRelation.relation_id"
+                                  @click="confirmDuplicateResolution(activeRelation, 'USE_TARGET')"
+                                  >保留来源二</a-button
+                                >
+                                <a-button
+                                  size="small"
+                                  :loading="duplicateResolving === activeRelation.relation_id"
+                                  @click="
+                                    confirmDuplicateResolution(activeRelation, 'KEEP_SEPARATE')
+                                  "
+                                  >分别保留</a-button
+                                >
+                              </div>
+                            </div>
+                          </template>
+                          <div v-else class="duplicate-empty">
+                            没有提取到可核对的重叠正文，本条不能作为内容重叠依据，请重新运行跨文档检查。
+                          </div>
                         </template>
-                        <div v-else class="duplicate-empty">
-                          没有提取到可核对的重叠正文，本条不能作为内容重叠依据，请重新运行跨文档检查。
-                        </div>
-                      </template>
-                    </a-spin>
-                  </section>
+                      </a-spin>
+                    </section>
                   </article>
                 </div>
               </template>
@@ -1282,14 +1648,20 @@
           <template v-if="currentItem">
             <div class="decision-heading">
               <div>
-                <h3>{{ knowledgeUnitMode ? '处理当前知识单元' : `${reviewTypeLabel(currentItem.review_type)}处理` }}</h3>
+                <h3>
+                  {{
+                    knowledgeUnitMode
+                      ? '处理当前知识单元'
+                      : `${reviewTypeLabel(currentItem.review_type)}处理`
+                  }}
+                </h3>
                 <p>
                   {{
                     knowledgeUnitMode
                       ? `当前为知识单元 ${currentUnitPosition} / ${packageDetail.knowledge_unit_count}，提交后只会处理这一项。`
                       : currentItem.review_type === 'STALE'
-                      ? '内容未变化，请确认是否继续有效。'
-                      : '选择业务结果，系统自动执行对应的知识处理动作。'
+                        ? '内容未变化，请确认是否继续有效。'
+                        : '选择业务结果，系统自动执行对应的知识处理动作。'
                   }}
                 </p>
               </div>
@@ -1355,11 +1727,7 @@
                 <div class="field-label-row">
                   <label>{{ problemTagLabel }}</label>
                   <a-tooltip :title="problemTagHelp" placement="topLeft">
-                    <button
-                      type="button"
-                      class="problem-help"
-                      :aria-label="problemTagHelp"
-                    >
+                    <button type="button" class="problem-help" :aria-label="problemTagHelp">
                       ?
                     </button>
                   </a-tooltip>
@@ -1416,7 +1784,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { diffLines } from 'diff'
 import {
@@ -1431,12 +1799,16 @@ import {
   GitCompareArrows,
   History,
   Link2,
+  Maximize2,
+  Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
   RotateCcw,
   UserRoundCog,
-  X
+  X,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-vue-next'
 import { governanceApi } from '@/apis/governance_api'
 import { documentApi } from '@/apis/knowledge_api'
@@ -1487,6 +1859,23 @@ const comparisonPagePreviewErrors = reactive({ source: '', target: '' })
 const comparisonPagePreviewCache = new Map()
 const comparisonPagePreviewRequests = new Map()
 const comparisonSyncPages = ref(true)
+const comparisonSyncView = ref(true)
+const comparisonFullscreen = ref(false)
+const activeComparisonViewSide = ref('source')
+const comparisonViews = reactive({
+  source: { scale: 1, x: 0, y: 0 },
+  target: { scale: 1, x: 0, y: 0 }
+})
+const comparisonGridBlockIds = reactive({ source: '', target: '' })
+const comparisonCanvasRefs = { source: null, target: null }
+const comparisonPan = {
+  side: '',
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  originX: 0,
+  originY: 0
+}
 const selectedComparisonMatchId = ref('')
 const reviewContent = ref(emptyReviewContent())
 const previousReviewContent = ref(emptyReviewContent())
@@ -1518,6 +1907,9 @@ const documentPagePreviewRequests = new Map()
 const documentEditSaving = ref(false)
 const DOCUMENT_PAGE_PREVIEW_CACHE_LIMIT = 12
 const COMPARISON_PAGE_PREVIEW_CACHE_LIMIT = 24
+const COMPARISON_MIN_SCALE = 1
+const COMPARISON_MAX_SCALE = 3
+const COMPARISON_SCALE_STEP = 0.25
 let slidePreviewCacheEpoch = 0
 let slidePreviewRequestSeq = 0
 let documentPagePreviewRequestSeq = 0
@@ -1698,10 +2090,11 @@ const activeRelationIndex = computed(() =>
       )
     : -1
 )
-const activeComparisonMatch = computed(() =>
-  (relationLayoutComparison.value?.matches || []).find(
-    (match) => match.match_id === selectedComparisonMatchId.value
-  ) || relationLayoutComparison.value?.matches?.[0]
+const activeComparisonMatch = computed(
+  () =>
+    (relationLayoutComparison.value?.matches || []).find(
+      (match) => match.match_id === selectedComparisonMatchId.value
+    ) || relationLayoutComparison.value?.matches?.[0]
 )
 const comparisonMatchPagesAligned = computed(() => {
   const match = activeComparisonMatch.value
@@ -1730,26 +2123,29 @@ const activeDuplicateMatchIndex = computed(() => {
 })
 const comparisonSourcePages = computed(() => relationLayoutComparison.value?.source?.pages || [])
 const comparisonTargetPages = computed(() => relationLayoutComparison.value?.target?.pages || [])
-const activeComparisonSourcePage = computed(() =>
-  comparisonSourcePages.value.find(
-    (page) => page.page_number === comparisonPageNumbers.source
-  ) || comparisonSourcePages.value[0]
-)
-const activeComparisonTargetPage = computed(() =>
-  comparisonTargetPages.value.find(
-    (page) => page.page_number === comparisonPageNumbers.target
-  ) || comparisonTargetPages.value[0]
-)
-const comparisonLayoutReady = computed(
+const activeComparisonSourcePage = computed(
   () =>
-    Boolean(
-      relationLayoutComparison.value?.supported &&
-        activeRelation.value &&
-        relationLayoutComparison.value.source?.pages?.length &&
-        relationLayoutComparison.value.target?.pages?.length
-    )
+    comparisonSourcePages.value.find((page) => page.page_number === comparisonPageNumbers.source) ||
+    comparisonSourcePages.value[0]
+)
+const activeComparisonTargetPage = computed(
+  () =>
+    comparisonTargetPages.value.find((page) => page.page_number === comparisonPageNumbers.target) ||
+    comparisonTargetPages.value[0]
+)
+const activeComparisonSourceGridBlock = computed(() => comparisonGridFocusBlock('source'))
+const activeComparisonTargetGridBlock = computed(() => comparisonGridFocusBlock('target'))
+const comparisonLayoutReady = computed(() =>
+  Boolean(
+    relationLayoutComparison.value?.supported &&
+    activeRelation.value &&
+    relationLayoutComparison.value.source?.pages?.length &&
+    relationLayoutComparison.value.target?.pages?.length
+  )
 )
 const comparisonMatchCount = computed(() => relationLayoutComparison.value?.matches?.length || 0)
+const activeComparisonView = computed(() => comparisonViews[activeComparisonViewSide.value])
+const comparisonZoomPercentage = computed(() => Math.round(activeComparisonView.value.scale * 100))
 const mergedReviewContent = computed(() => mergeChunks(reviewContent.value.lines || []))
 const reviewMarkdown = computed(
   () => reviewContent.value.content || mergedReviewContent.value.content || ''
@@ -1806,8 +2202,8 @@ const showWholeReviewButton = computed(() =>
   Boolean(packageDetail.value?.item_count || packageDetail.value?.items?.length)
 )
 const bulkActionableItems = computed(() =>
-  (packageDetail.value?.items || []).filter(
-    (item) => ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
+  (packageDetail.value?.items || []).filter((item) =>
+    ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
   )
 )
 const bulkExcludeItems = computed(() =>
@@ -1819,7 +2215,8 @@ const bulkExcludeItems = computed(() =>
       item.allowed_outcomes?.includes('EXCLUDE') &&
       (['PENDING', 'WAITING_SOURCE_CHANGE', 'WAITING_BUSINESS_CONFIRMATION'].includes(
         item.item_status
-      ) || cancelledSourceChange)
+      ) ||
+        cancelledSourceChange)
     )
   })
 )
@@ -1847,7 +2244,9 @@ function bulkRecommendedOutcome(item) {
     item?.recommended_outcome ||
     (!item?.knowledge_unit && item?.review_type !== 'CONFLICT'
       ? item.allowed_outcomes?.find((value) =>
-          ['PUBLISH', 'ADOPT_NEW_VERSION', 'CONFIRM_VALID', 'KEEP_CURRENT', 'DISMISS'].includes(value)
+          ['PUBLISH', 'ADOPT_NEW_VERSION', 'CONFIRM_VALID', 'KEEP_CURRENT', 'DISMISS'].includes(
+            value
+          )
         )
       : '')
   )
@@ -1922,6 +2321,9 @@ watch(
   },
   { immediate: true }
 )
+watch(activeEvidenceView, (view) => {
+  if (view !== 'comparisons' && comparisonFullscreen.value) toggleComparisonFullscreen(false)
+})
 
 async function loadPackages() {
   if (!props.sourceId) return
@@ -2404,16 +2806,13 @@ async function saveDocumentBlockEdit() {
   if (!block || !packageDetail.value || !documentBlockDraft.value.trim()) return
   documentEditSaving.value = true
   try {
-    const response = await governanceApi.saveReviewPackageLayoutEdit(
-      selectedPackageId.value,
-      {
-        lock_version: packageDetail.value.lock_version,
-        block_id: block.block_id,
-        page_number: activeDocumentPageNumber.value,
-        content: documentBlockDraft.value.trim(),
-        source_segment_ids: block.source_segment_ids || []
-      }
-    )
+    const response = await governanceApi.saveReviewPackageLayoutEdit(selectedPackageId.value, {
+      lock_version: packageDetail.value.lock_version,
+      block_id: block.block_id,
+      page_number: activeDocumentPageNumber.value,
+      content: documentBlockDraft.value.trim(),
+      source_segment_ids: block.source_segment_ids || []
+    })
     packageDetail.value.draft = response.draft
     packageDetail.value.lock_version = response.lock_version
     block.content = documentBlockDraft.value.trim()
@@ -2575,7 +2974,10 @@ function presentationFragmentLabel(fragment) {
     .trim()
   return text.length > 30 ? `${text.slice(0, 30)}…` : text || '未命名片段'
 }
+onMounted(() => window.addEventListener('keydown', handleComparisonKeydown))
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleComparisonKeydown)
+  document.body.classList.remove('comparison-workspace-fullscreen')
   clearSlidePreviewCache()
   clearDocumentPagePreviewCache()
   clearRelationLayoutComparison()
@@ -2926,6 +3328,170 @@ async function loadReviewers() {
   }
 }
 
+function setComparisonCanvasRef(side, element) {
+  comparisonCanvasRefs[side] = element || null
+}
+
+function comparisonCanvasStyle(page) {
+  if (page?.render_mode === 'grid') return {}
+  return { aspectRatio: String(page?.aspect_ratio || 16 / 9) }
+}
+
+function comparisonViewStyle(side, page) {
+  const view = comparisonViews[side]
+  if (page?.render_mode === 'grid') {
+    const columns = Math.max(Number(page.width) || 1, 1)
+    const rows = Math.max(Number(page.height) || 1, 1)
+    const columnWidth = columns > 16 ? 128 : 156
+    const rowHeight = rows > 60 ? 34 : rows > 20 ? 40 : 56
+    const scaledColumnWidth = Math.round(columnWidth * view.scale)
+    const scaledRowHeight = Math.round(rowHeight * view.scale)
+    return {
+      '--sheet-column-width': `${scaledColumnWidth}px`,
+      '--sheet-row-height': `${scaledRowHeight}px`,
+      width: `max(100%, ${columns * scaledColumnWidth}px)`,
+      height: `max(100%, ${Math.max(rows * scaledRowHeight, 320)}px)`
+    }
+  }
+  return {
+    width: `${view.scale * 100}%`,
+    height: `${view.scale * 100}%`,
+    left: `calc(50% + ${view.x}px)`,
+    top: `calc(50% + ${view.y}px)`
+  }
+}
+
+function clampComparisonOffset(side, x, y, scale) {
+  const rect = comparisonCanvasRefs[side]?.getBoundingClientRect?.()
+  if (!rect?.width || !rect?.height) return { x, y }
+  const maxX = (rect.width * (scale - 1)) / 2
+  const maxY = (rect.height * (scale - 1)) / 2
+  return {
+    x: Math.max(-maxX, Math.min(maxX, x)),
+    y: Math.max(-maxY, Math.min(maxY, y))
+  }
+}
+
+function applyComparisonView(side, nextView) {
+  const scale = Math.max(
+    COMPARISON_MIN_SCALE,
+    Math.min(COMPARISON_MAX_SCALE, Number(nextView.scale) || COMPARISON_MIN_SCALE)
+  )
+  const offset =
+    scale === COMPARISON_MIN_SCALE
+      ? { x: 0, y: 0 }
+      : clampComparisonOffset(side, Number(nextView.x) || 0, Number(nextView.y) || 0, scale)
+  Object.assign(comparisonViews[side], { scale, ...offset })
+  activeComparisonViewSide.value = side
+  if (comparisonSyncView.value) {
+    const other = side === 'source' ? 'target' : 'source'
+    Object.assign(comparisonViews[other], { scale, ...offset })
+  }
+}
+
+function setComparisonZoom(side, nextScale, event = null) {
+  const view = comparisonViews[side]
+  const previousDensity = comparisonPreviewDensity(side)
+  const scale = Math.max(COMPARISON_MIN_SCALE, Math.min(COMPARISON_MAX_SCALE, nextScale))
+  if (scale === view.scale) return
+  const rect = comparisonCanvasRefs[side]?.getBoundingClientRect?.()
+  const centerX = (rect?.left || 0) + (rect?.width || 0) / 2
+  const centerY = (rect?.top || 0) + (rect?.height || 0) / 2
+  const anchorX = Number.isFinite(event?.clientX) ? event.clientX : centerX
+  const anchorY = Number.isFinite(event?.clientY) ? event.clientY : centerY
+  const ratio = scale / view.scale
+  applyComparisonView(side, {
+    scale,
+    x: anchorX - centerX - (anchorX - centerX - view.x) * ratio,
+    y: anchorY - centerY - (anchorY - centerY - view.y) * ratio
+  })
+  if (comparisonPreviewDensity(side) !== previousDensity) {
+    void loadComparisonPagePreview(side)
+    if (comparisonSyncView.value)
+      void loadComparisonPagePreview(side === 'source' ? 'target' : 'source')
+  }
+}
+
+function changeComparisonZoom(offset) {
+  const side = activeComparisonViewSide.value
+  setComparisonZoom(side, comparisonViews[side].scale + offset)
+}
+
+function zoomComparisonFromWheel(side, event) {
+  if (!event.ctrlKey && !event.metaKey) return
+  event.preventDefault()
+  activeComparisonViewSide.value = side
+  const direction = event.deltaY < 0 ? 0.1 : -0.1
+  setComparisonZoom(side, comparisonViews[side].scale + direction, event)
+}
+
+function resetComparisonView(side = activeComparisonViewSide.value) {
+  setComparisonZoom(side, COMPARISON_MIN_SCALE)
+}
+
+function resetAllComparisonViews() {
+  Object.assign(comparisonViews.source, { scale: COMPARISON_MIN_SCALE, x: 0, y: 0 })
+  Object.assign(comparisonViews.target, { scale: COMPARISON_MIN_SCALE, x: 0, y: 0 })
+}
+
+function syncComparisonViews() {
+  if (!comparisonSyncView.value) return
+  const side = activeComparisonViewSide.value
+  const other = side === 'source' ? 'target' : 'source'
+  const previousDensity = comparisonPreviewDensity(other)
+  Object.assign(comparisonViews[other], comparisonViews[side])
+  if (comparisonPreviewDensity(other) !== previousDensity) void loadComparisonPagePreview(other)
+}
+
+function startComparisonPan(side, event) {
+  const page =
+    side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  if (
+    event.button !== 0 ||
+    page?.render_mode === 'grid' ||
+    comparisonViews[side].scale <= COMPARISON_MIN_SCALE ||
+    event.target?.closest?.('.comparison-layout-block')
+  )
+    return
+  activeComparisonViewSide.value = side
+  Object.assign(comparisonPan, {
+    side,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: comparisonViews[side].x,
+    originY: comparisonViews[side].y
+  })
+  event.currentTarget?.setPointerCapture?.(event.pointerId)
+  event.preventDefault()
+}
+
+function moveComparisonPan(event) {
+  if (!comparisonPan.side || comparisonPan.pointerId !== event.pointerId) return
+  applyComparisonView(comparisonPan.side, {
+    scale: comparisonViews[comparisonPan.side].scale,
+    x: comparisonPan.originX + event.clientX - comparisonPan.startX,
+    y: comparisonPan.originY + event.clientY - comparisonPan.startY
+  })
+  event.preventDefault()
+}
+
+function endComparisonPan(event) {
+  if (!comparisonPan.side || comparisonPan.pointerId !== event.pointerId) return
+  event.currentTarget?.releasePointerCapture?.(event.pointerId)
+  comparisonPan.side = ''
+  comparisonPan.pointerId = null
+}
+
+function toggleComparisonFullscreen(force) {
+  comparisonFullscreen.value = typeof force === 'boolean' ? force : !comparisonFullscreen.value
+  document.body.classList.toggle('comparison-workspace-fullscreen', comparisonFullscreen.value)
+}
+
+function handleComparisonKeydown(event) {
+  if (event.key === 'Escape' && comparisonFullscreen.value) toggleComparisonFullscreen(false)
+}
+
 async function showComparisons(relationId = '') {
   activeEvidenceView.value = 'comparisons'
   const requestedId = typeof relationId === 'string' ? relationId : ''
@@ -2937,6 +3503,9 @@ async function showComparisons(relationId = '') {
 
 async function focusRelation(comparison) {
   if (!comparison) return
+  resetAllComparisonViews()
+  comparisonGridBlockIds.source = ''
+  comparisonGridBlockIds.target = ''
   selectedRelationId.value = comparison.relation_id
   await loadRelationLayoutComparison(comparison)
   if (duplicateRelation(comparison)) await loadDuplicateCandidates(comparison)
@@ -2959,10 +3528,19 @@ function clearRelationLayoutComparison({ preserveCache = false } = {}) {
   comparisonPagePreviewUrls.target = ''
   comparisonPagePreviewErrors.source = ''
   comparisonPagePreviewErrors.target = ''
+  comparisonGridBlockIds.source = ''
+  comparisonGridBlockIds.target = ''
 }
 
-function comparisonPageCacheKey(relationId, side, pageNumber) {
-  return `${relationId}:${side}:${pageNumber}`
+function comparisonPreviewDensity(side) {
+  const scale = comparisonViews[side].scale
+  if (scale > 2) return 3
+  if (scale > 1) return 2
+  return 1
+}
+
+function comparisonPageCacheKey(relationId, side, pageNumber, density = 1) {
+  return `${relationId}:${side}:${pageNumber}:${density}`
 }
 
 function rememberComparisonPagePreview(key, url) {
@@ -2977,8 +3555,8 @@ function rememberComparisonPagePreview(key, url) {
   }
 }
 
-async function fetchComparisonPagePreview(relationId, side, pageNumber) {
-  const key = comparisonPageCacheKey(relationId, side, pageNumber)
+async function fetchComparisonPagePreview(relationId, side, pageNumber, density = 1) {
+  const key = comparisonPageCacheKey(relationId, side, pageNumber, density)
   const cachedUrl = comparisonPagePreviewCache.get(key)
   if (cachedUrl) {
     comparisonPagePreviewCache.delete(key)
@@ -2987,7 +3565,7 @@ async function fetchComparisonPagePreview(relationId, side, pageNumber) {
   }
   if (comparisonPagePreviewRequests.has(key)) return comparisonPagePreviewRequests.get(key)
   const request = governanceApi
-    .getRelationLayoutComparisonPage(relationId, side, pageNumber)
+    .getRelationLayoutComparisonPage(relationId, side, pageNumber, density)
     .then((response) => response.blob())
     .then((blob) => {
       const url = URL.createObjectURL(blob)
@@ -3006,9 +3584,11 @@ async function fetchComparisonPagePreview(relationId, side, pageNumber) {
 async function loadComparisonPagePreview(side) {
   const relationId = activeRelation.value?.relation_id
   const pageNumber = comparisonPageNumbers[side]
+  const density = comparisonPreviewDensity(side)
   const requestId = ++comparisonPagePreviewRequestSeq[side]
   if (!relationId || !pageNumber) return
-  const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  const page =
+    side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
   if (page?.render_mode === 'grid') {
     comparisonPagePreviewUrls[side] = ''
     comparisonPagePreviewErrors[side] = ''
@@ -3017,11 +3597,12 @@ async function loadComparisonPagePreview(side) {
   comparisonPagePreviewLoading[side] = true
   comparisonPagePreviewErrors[side] = ''
   try {
-    const url = await fetchComparisonPagePreview(relationId, side, pageNumber)
+    const url = await fetchComparisonPagePreview(relationId, side, pageNumber, density)
     if (
       requestId !== comparisonPagePreviewRequestSeq[side] ||
       relationId !== activeRelation.value?.relation_id ||
-      pageNumber !== comparisonPageNumbers[side]
+      pageNumber !== comparisonPageNumbers[side] ||
+      density !== comparisonPreviewDensity(side)
     )
       return
     comparisonPagePreviewUrls[side] = url
@@ -3044,11 +3625,11 @@ async function preloadComparisonPagePreview(side, pageNumber) {
     !relationId ||
     !page ||
     page.render_mode === 'grid' ||
-    comparisonPagePreviewCache.has(comparisonPageCacheKey(relationId, side, pageNumber))
+    comparisonPagePreviewCache.has(comparisonPageCacheKey(relationId, side, pageNumber, 1))
   )
     return
   try {
-    await fetchComparisonPagePreview(relationId, side, pageNumber)
+    await fetchComparisonPagePreview(relationId, side, pageNumber, 1)
   } catch {
     // 相邻页预取失败不影响当前证据页，实际翻页时会重试。
   }
@@ -3090,6 +3671,8 @@ async function loadRelationLayoutComparison(comparison) {
 async function selectComparisonMatch(match) {
   if (!match) return
   selectedComparisonMatchId.value = match.match_id
+  comparisonGridBlockIds.source = ''
+  comparisonGridBlockIds.target = ''
   comparisonPageNumbers.source = match.source_page_number || comparisonPageNumbers.source
   comparisonPageNumbers.target = match.target_page_number || comparisonPageNumbers.target
   if (!comparisonMatchPagesAligned.value) comparisonSyncPages.value = false
@@ -3102,10 +3685,15 @@ async function changeComparisonPage(side, offset) {
   const next = Math.max(1, Math.min(pages.length, current + offset))
   if (next === current) return
   comparisonPageNumbers[side] = next
+  comparisonGridBlockIds[side] = ''
   if (comparisonSyncPages.value && comparisonMatchPagesAligned.value) {
     const other = side === 'source' ? 'target' : 'source'
-    const otherPages = other === 'source' ? comparisonSourcePages.value : comparisonTargetPages.value
-    comparisonPageNumbers[other] = Math.max(1, Math.min(otherPages.length, comparisonPageNumbers[other] + offset))
+    const otherPages =
+      other === 'source' ? comparisonSourcePages.value : comparisonTargetPages.value
+    comparisonPageNumbers[other] = Math.max(
+      1,
+      Math.min(otherPages.length, comparisonPageNumbers[other] + offset)
+    )
     await Promise.all([loadComparisonPagePreview(side), loadComparisonPagePreview(other)])
     return
   }
@@ -3113,12 +3701,21 @@ async function changeComparisonPage(side, offset) {
 }
 
 function comparisonBlockClass(side, block) {
-  const match = comparisonMatchForBlock(side, block)
-  const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  const page =
+    side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  const isGrid = page?.render_mode === 'grid'
+  const isActiveMatch = comparisonMatchBlockIds(
+    activeComparisonMatch.value,
+    side,
+    page?.page_number
+  ).includes(block.block_id)
+  const isSelected =
+    isActiveMatch &&
+    (!isGrid || comparisonGridFocusBlock(side)?.block_id === block.block_id)
   return {
-    'comparison-block-match': Boolean(match),
-    'comparison-block-selected': match?.match_id === selectedComparisonMatchId.value,
-    'comparison-block-grid': page?.render_mode === 'grid'
+    'comparison-block-match': isActiveMatch,
+    'comparison-block-selected': isSelected,
+    'comparison-block-grid': isGrid
   }
 }
 
@@ -3134,18 +3731,98 @@ function comparisonMatchNumber(side, block) {
   return index >= 0 ? index + 1 : ''
 }
 
+function comparisonBlockMarker(side, block) {
+  const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  if (page?.render_mode === 'grid') return block.locator?.cell || ''
+  return comparisonMatchNumber(side, block)
+}
+
 function comparisonMatchLocator(match) {
-  const sourcePage = match?.source_page_number || match?.source_locator?.page
-  const targetPage = match?.target_page_number || match?.target_locator?.page
-  if (sourcePage || targetPage) return `来源一第 ${sourcePage || '-'} 页 ↔ 来源二第 ${targetPage || '-'} 页`
+  const sourcePages = comparisonMatchPages(match, 'source')
+  const targetPages = comparisonMatchPages(match, 'target')
+  if (sourcePages.length || targetPages.length)
+    return `来源一第 ${sourcePages.join('、') || '-'} 页 ↔ 来源二第 ${targetPages.join('、') || '-'} 页`
   return match?.source_overlap_excerpt || match?.source_excerpt || '已定位片段'
+}
+
+function comparisonMatchPages(match, side) {
+  const pages = match?.[`${side}_page_numbers`]
+  if (Array.isArray(pages) && pages.length) return pages
+  const byPage = match?.[`${side}_block_ids_by_page`]
+  if (byPage && typeof byPage === 'object') {
+    const values = Object.keys(byPage)
+      .map(Number)
+      .filter((value) => Number.isFinite(value))
+    if (values.length) return values
+  }
+  const page = match?.[`${side}_page_number`] || match?.[`${side}_locator`]?.page
+  return page ? [page] : []
+}
+
+function comparisonMatchBlockIds(match, side, pageNumber) {
+  if (!match || !pageNumber) return []
+  const byPage = match[`${side}_block_ids_by_page`]
+  const pageBlockIds = byPage?.[pageNumber] || byPage?.[String(pageNumber)]
+  if (Array.isArray(pageBlockIds)) return pageBlockIds
+  return Number(match[`${side}_page_number`]) === Number(pageNumber)
+    ? match[`${side}_block_ids`] || []
+    : []
 }
 
 function comparisonMatchForBlock(side, block) {
   const matches = relationLayoutComparison.value?.matches || []
+  const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  const pageNumber = page?.page_number
+  const activeMatch = activeComparisonMatch.value
+  if (comparisonMatchBlockIds(activeMatch, side, pageNumber).includes(block.block_id))
+    return activeMatch
   return matches.find((match) =>
-    (match?.[`${side}_block_ids`] || []).includes(block.block_id)
+    comparisonMatchBlockIds(match, side, pageNumber).includes(block.block_id)
   )
+}
+
+function comparisonGridMatchBlocks(side) {
+  const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  if (page?.render_mode !== 'grid') return []
+  const matchBlockIds = new Set(
+    comparisonMatchBlockIds(activeComparisonMatch.value, side, page.page_number)
+  )
+  return (page.blocks || []).filter((block) => matchBlockIds.has(block.block_id))
+}
+
+function comparisonGridMatchCells(side) {
+  return (
+    comparisonGridMatchBlocks(side)
+      .map((block) => block.locator?.cell)
+      .filter(Boolean)
+      .join('、') || '-'
+  )
+}
+
+function comparisonGridFocusBlock(side) {
+  const page =
+    side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  if (page?.render_mode !== 'grid') return null
+  const blocks = page.blocks || []
+  const selected = blocks.find((block) => block.block_id === comparisonGridBlockIds[side])
+  if (selected) return selected
+  return comparisonGridMatchBlocks(side).reduce(
+    (longest, block) =>
+      String(block.content || '').length > String(longest?.content || '').length ? block : longest,
+    null
+  )
+}
+
+async function selectComparisonBlock(side, block) {
+  if (!block) return
+  const isGrid =
+    (side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value)
+      ?.render_mode === 'grid'
+  const match = comparisonMatchForBlock(side, block)
+  if (match && match.match_id !== activeComparisonMatch.value?.match_id) {
+    await selectComparisonMatch(match)
+  }
+  if (isGrid) comparisonGridBlockIds[side] = block.block_id
 }
 
 function comparisonBlockStyle(block) {
@@ -5560,6 +6237,77 @@ loadReviewers()
 .comparison-review {
   min-width: 0;
 }
+:global(body.comparison-workspace-fullscreen) {
+  overflow: hidden;
+}
+.comparison-review.is-fullscreen {
+  display: grid;
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  height: 100dvh;
+  padding: 10px 12px 12px;
+  overflow: hidden;
+  background: var(--gray-10);
+}
+.comparison-review.is-fullscreen .comparison-navigator {
+  position: relative;
+  top: auto;
+}
+.comparison-review.is-fullscreen .comparison-evidence-layout {
+  min-height: 0;
+  height: 100%;
+  align-items: stretch;
+  overflow: hidden;
+}
+.comparison-review.is-fullscreen .comparison-layout-main,
+.comparison-review.is-fullscreen :deep(.ant-spin-nested-loading),
+.comparison-review.is-fullscreen :deep(.ant-spin-container) {
+  min-height: 0;
+  height: 100%;
+}
+.comparison-review.is-fullscreen .comparison-layout-review {
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 100%;
+  margin-top: 0;
+  overflow: hidden;
+}
+.comparison-review.is-fullscreen .comparison-match-panel {
+  position: relative;
+  top: auto;
+}
+.comparison-review.is-fullscreen .comparison-layout-columns {
+  min-height: 0;
+  height: 100%;
+}
+.comparison-review.is-fullscreen .comparison-layout-pane {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.comparison-review.is-fullscreen .comparison-layout-stage {
+  min-height: 0;
+  height: 100%;
+}
+.comparison-review.is-fullscreen .comparison-layout-canvas {
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: 100%;
+  place-self: center;
+}
+.comparison-review.is-fullscreen .comparison-layout-canvas.is-grid {
+  height: 100%;
+}
+.comparison-review.is-fullscreen .comparison-evidence-layout > .comparison-card {
+  position: static;
+  top: auto;
+  max-height: none;
+  height: 100%;
+  overflow-y: auto;
+}
 .comparison-navigator {
   display: grid;
   position: sticky;
@@ -5671,7 +6419,6 @@ loadReviewers()
 }
 .comparison-evidence-layout > .comparison-card .duplicate-match section + section {
   padding-top: 7px;
-  padding-left: 0;
   border-top: 1px solid var(--gray-100);
   border-left: 0;
 }
@@ -5683,9 +6430,10 @@ loadReviewers()
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
 }
-.comparison-layout-toolbar > div {
+.comparison-layout-heading {
   display: flex;
   min-width: 0;
   align-items: baseline;
@@ -5711,6 +6459,62 @@ loadReviewers()
 }
 .comparison-sync-toggle input {
   accent-color: var(--main-color);
+}
+.comparison-view-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.comparison-zoom-controls {
+  display: inline-grid;
+  grid-template-columns: 27px 46px 27px 27px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--gray-150);
+  border-radius: 5px;
+  background: var(--gray-0);
+}
+.comparison-zoom-controls button,
+.comparison-fullscreen-toggle {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: var(--gray-0);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.comparison-zoom-controls button + button,
+.comparison-zoom-controls button:last-child {
+  border-left: 1px solid var(--gray-100);
+}
+.comparison-zoom-controls button:hover:not(:disabled),
+.comparison-fullscreen-toggle:hover {
+  background: var(--main-30);
+  color: var(--main-700);
+}
+.comparison-zoom-controls button:disabled {
+  color: var(--gray-300);
+  cursor: not-allowed;
+}
+.comparison-zoom-controls output {
+  display: grid;
+  height: 27px;
+  place-items: center;
+  border-right: 1px solid var(--gray-100);
+  border-left: 1px solid var(--gray-100);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.comparison-fullscreen-toggle {
+  border: 1px solid var(--gray-150);
+  border-radius: 5px;
 }
 .comparison-match-panel {
   display: grid;
@@ -5766,6 +6570,54 @@ loadReviewers()
   color: var(--color-text-tertiary);
   font-size: 9px;
 }
+.comparison-layout-stage {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+}
+.comparison-layout-stage.has-grid {
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 5px;
+}
+.comparison-grid-cell-detail {
+  display: grid;
+  gap: 5px;
+  max-height: 90px;
+  padding: 6px 8px;
+  overflow: auto;
+  border: 1px solid var(--main-100);
+  border-radius: 4px;
+  background: var(--main-10);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+  scrollbar-color: var(--gray-300) transparent;
+  scrollbar-width: thin;
+}
+.comparison-grid-cell-summary,
+.comparison-grid-cell-current {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+}
+.comparison-grid-cell-summary {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--main-100);
+}
+.comparison-grid-cell-summary > span {
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+.comparison-grid-cell-detail strong {
+  color: var(--main-700);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.comparison-grid-cell-current > span {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .comparison-page-actions {
   display: flex;
   flex: 0 0 auto;
@@ -5800,24 +6652,49 @@ loadReviewers()
   border: 1px solid var(--gray-100);
   border-radius: 5px;
   background: var(--gray-25);
+  touch-action: none;
 }
-.comparison-layout-canvas > img {
+.comparison-layout-canvas.is-grid {
+  width: 100%;
+  height: min(52vh, 560px);
+  min-height: 320px;
+  overflow: auto;
+  touch-action: auto;
+  scrollbar-color: var(--gray-300) transparent;
+  scrollbar-width: thin;
+}
+.comparison-layout-canvas.is-pannable {
+  cursor: grab;
+}
+.comparison-layout-canvas.is-pannable:active {
+  cursor: grabbing;
+}
+.comparison-layout-content {
+  position: absolute;
+  transform: translate(-50%, -50%);
+}
+.comparison-layout-content.is-grid {
+  position: relative;
+  top: auto;
+  left: auto;
+  transform: none;
+}
+.comparison-layout-content > img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
+  user-select: none;
 }
 .comparison-layout-grid-hint {
   position: absolute;
   inset: 0;
   padding: 7px;
-  background: repeating-linear-gradient(
-    0deg,
-    var(--gray-0),
-    var(--gray-0) 24px,
-    var(--gray-100) 25px,
-    var(--gray-0) 26px
-  );
+  background-color: var(--gray-0);
+  background-image:
+    linear-gradient(var(--gray-100) 1px, transparent 1px),
+    linear-gradient(90deg, var(--gray-100) 1px, transparent 1px);
+  background-size: var(--sheet-column-width, 156px) var(--sheet-row-height, 56px);
   color: var(--color-text-tertiary);
   font-size: 9px;
   pointer-events: none;
@@ -5882,8 +6759,9 @@ loadReviewers()
   color: inherit;
   font-size: inherit;
   line-height: inherit;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 .comparison-layout-block.comparison-block-grid.comparison-block-match {
   border-color: var(--color-warning-500);
@@ -5908,11 +6786,11 @@ loadReviewers()
   position: absolute;
   top: -18px;
   left: -1px;
-  width: 16px;
+  min-width: 16px;
   height: 16px;
   place-items: center;
   padding: 0;
-  border-radius: 50%;
+  border-radius: 8px;
   background: var(--main-700);
   color: var(--gray-0);
   font-size: 9px;
@@ -6637,6 +7515,10 @@ loadReviewers()
     align-items: flex-start;
     flex-direction: column;
   }
+  .comparison-view-toolbar {
+    width: 100%;
+    justify-content: flex-start;
+  }
   .comparison-evidence-layout {
     grid-template-columns: 1fr;
   }
@@ -6653,7 +7535,6 @@ loadReviewers()
   }
   .duplicate-match section + section {
     padding-top: 9px;
-    padding-left: 0;
     border-top: 1px solid var(--gray-100);
     border-left: 0;
   }
