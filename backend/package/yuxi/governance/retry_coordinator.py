@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import or_, select
 
-from yuxi.governance.notification_service import NotificationService
+from yuxi.governance.domain import ReviewItemStatus, ReviewOutcome, ReviewPackageStatus, ReviewSubjectType
+from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
+from yuxi.governance.notification_service import NotificationService, auto_close_enabled
+from yuxi.governance.quality_gate_service import QualityGateService
+from yuxi.governance.review_package_service import ReviewPackageService
+from yuxi.governance.schemas import ReviewItemDecisionRequest, ReviewPackageResolveRequest
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     FeishuKnowledgeUnit,
     FeishuMaterialVersion,
+    FeishuReviewItem,
+    FeishuReviewPackage,
     FeishuSourceItem,
 )
 from yuxi.utils.datetime_utils import coerce_any_to_utc_datetime, utc_now
@@ -47,13 +55,18 @@ class FeishuRetryCoordinator:
                 logger.warning("Governance retry failed for {}: {}", version_id, exc)
 
         notified = await self._notify_due_reviews(current_time)
+        notification_activated = await self._activate_suppressed_notifications()
         notification_retried = await self._retry_failed_notifications(current_time)
+        quality_evaluated, auto_closed = await self._evaluate_and_auto_close_reviews()
         return {
             "due": len(due),
             "retried": retried,
             "failed": failed,
             "expiry_notified": notified,
+            "notification_activated": notification_activated,
             "notification_retried": notification_retried,
+            "quality_evaluated": quality_evaluated,
+            "auto_closed": auto_closed,
         }
 
     async def _claim_due_versions(self, now: datetime) -> list[tuple[str, str]]:
@@ -160,6 +173,94 @@ class FeishuRetryCoordinator:
     async def _retry_failed_notifications(self, now: datetime) -> int:
         async with pg_manager.get_async_session_context() as session:
             return await NotificationService(session).retry_failed_feishu(now=now)
+
+    async def _activate_suppressed_notifications(self) -> int:
+        async with pg_manager.get_async_session_context() as session:
+            activated = await NotificationService(session).activate_suppressed()
+            await session.commit()
+            return activated
+
+    async def _evaluate_and_auto_close_reviews(self, *, limit: int = 50) -> tuple[int, int]:
+        async with pg_manager.get_async_session_context() as session:
+            package_ids = list(
+                await session.scalars(
+                    select(FeishuReviewPackage.package_id)
+                    .where(FeishuReviewPackage.workflow_status == ReviewPackageStatus.OPEN)
+                    .order_by(FeishuReviewPackage.quality_computed_at.asc().nullsfirst())
+                    .limit(limit)
+                )
+            )
+
+        evaluated = 0
+        closed = 0
+        for package_id in package_ids:
+            try:
+                async with pg_manager.get_async_session_context() as session:
+                    package = await session.scalar(
+                        select(FeishuReviewPackage)
+                        .where(FeishuReviewPackage.package_id == package_id)
+                        .with_for_update()
+                    )
+                    if package is None or package.workflow_status != ReviewPackageStatus.OPEN:
+                        continue
+                    await KnowledgeUnitService(session).ensure_for_package(package)
+                    quality = await QualityGateService(session).evaluate_package(package.package_id)
+                    evaluated += 1
+                    if not auto_close_enabled() or not quality["autoCloseEligible"]:
+                        await session.commit()
+                        continue
+
+                    items = list(
+                        await session.scalars(
+                            select(FeishuReviewItem).where(
+                                FeishuReviewItem.package_id == package.package_id,
+                                FeishuReviewItem.item_status == ReviewItemStatus.PENDING,
+                                FeishuReviewItem.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT,
+                            )
+                        )
+                    )
+                    request_hash = hashlib.sha256(
+                        f"{package.package_id}:{package.lock_version}".encode()
+                    ).hexdigest()[:32]
+                    result = await ReviewPackageService(session).resolve(
+                        package.package_id,
+                        ReviewPackageResolveRequest(
+                            request_id=f"auto-close-{request_hash}",
+                            lock_version=package.lock_version,
+                            decisions=[
+                                ReviewItemDecisionRequest(
+                                    review_item_id=item.review_item_id,
+                                    outcome=ReviewOutcome.KEEP_CURRENT,
+                                    decision_comment="系统确认无业务变化，自动保留当前正式知识。",
+                                )
+                                for item in items
+                            ],
+                        ),
+                        operator_id="system-governance-auto-close",
+                        automated=True,
+                    )
+                    from server.routers.feishu_knowledge_router import FeishuReviewService
+
+                    review_service = FeishuReviewService(session)
+                    for candidate in result["reject_candidates"]:
+                        await review_service.reject(
+                            candidate["version_id"],
+                            operator_id="system-governance-auto-close",
+                            reason=candidate["reason"],
+                        )
+                    await NotificationService(session).notify_admins(
+                        object_type="REVIEW_PACKAGE",
+                        object_id=package.package_id,
+                        assignee_id=package.assignee_id,
+                        event_key="review-package-auto-closed",
+                        title="无业务变化审核包已自动关闭",
+                        body=f"{package.title_snapshot or '未命名资料'} 未发现正文、图片、版式或知识单元变化。",
+                    )
+                    await session.commit()
+                    closed += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Governance auto-close failed for {}: {}", package_id, exc)
+        return evaluated, closed
 
     @classmethod
     def _is_due(cls, version: FeishuMaterialVersion, now: datetime) -> bool:
