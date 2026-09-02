@@ -4,6 +4,7 @@ import hashlib
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from difflib import SequenceMatcher
 
 from sqlalchemy import select
@@ -14,14 +15,26 @@ from yuxi.governance.domain import (
     DuplicateResolutionStrategy,
     KnowledgeSourceRole,
     ReviewAction,
+    ReviewDecision,
+    ReviewItemStatus,
+    ReviewOutcome,
+    ReviewPackageStatus,
+    ReviewSubjectType,
 )
+from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
+from yuxi.governance.review_backfill import backfill_legacy_governance_reviews
 from yuxi.governance.schemas import DuplicateRelationResolutionRequest
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuDuplicateRelationDecision,
+    FeishuGovernanceReview,
     FeishuKnowledgeSourceFragment,
+    FeishuKnowledgeUnit,
     FeishuLogicalKnowledge,
     FeishuMaterialVersion,
+    FeishuProcessingEvent,
+    FeishuReviewItem,
+    FeishuReviewPackage,
     FeishuSourceItem,
     FeishuSourceSegment,
     KnowledgeChunk,
@@ -169,7 +182,18 @@ class DuplicateKnowledgeService:
                 FeishuDuplicateRelationDecision.relation_id == relation.relation_id
             )
         )
-        return self._candidate_response(relation, versions, items, matches, decision)
+        response = self._candidate_response(relation, versions, items, matches, decision)
+        if decision and decision.strategy != DuplicateResolutionStrategy.KEEP_SEPARATE:
+            alias_version_id = (
+                relation.target_version_id
+                if decision.primary_version_id == relation.source_version_id
+                else relation.source_version_id
+            )
+            response["review_automation"] = await self._review_automation_summary(
+                alias_version_id,
+                relation_id=relation.relation_id,
+            )
+        return response
 
     async def resolve_relation(
         self,
@@ -204,6 +228,7 @@ class DuplicateKnowledgeService:
 
         primary_version_id = None
         logical_knowledge_ids: list[str] = []
+        review_automation = None
         if payload.strategy != DuplicateResolutionStrategy.KEEP_SEPARATE:
             primary_version_id = (
                 relation.source_version_id
@@ -244,11 +269,260 @@ class DuplicateKnowledgeService:
         relation.human_comment = payload.comment
         relation.resolved_by = operator_id
         relation.resolved_at = utc_now_naive()
+        if primary_version_id is not None:
+            alias_version_id = (
+                relation.target_version_id
+                if primary_version_id == relation.source_version_id
+                else relation.source_version_id
+            )
+            review_automation = await self._close_duplicate_review_items(
+                alias_version_id,
+                relation_id=relation.relation_id,
+                matches=matches,
+                operator_id=operator_id,
+                now=relation.resolved_at,
+            )
         await self.session.flush()
 
         response = self._candidate_response(relation, versions, items, matches, decision)
+        if review_automation is not None:
+            response["review_automation"] = review_automation
         response["idempotent_replay"] = False
         return response
+
+    async def _close_duplicate_review_items(
+        self,
+        alias_version_id: str,
+        *,
+        relation_id: str,
+        matches: list[dict],
+        operator_id: str,
+        now: datetime,
+    ) -> dict:
+        relation = await self.session.scalar(
+            select(FeishuCrossDocumentRelation).where(FeishuCrossDocumentRelation.relation_id == relation_id)
+        )
+        if relation is None:
+            raise LookupError(f"Cross-document relation not found: {relation_id}")
+        if alias_version_id == relation.source_version_id:
+            alias_segment_ids = {match["source_segment_id"] for match in matches if match.get("source_segment_id")}
+        elif alias_version_id == relation.target_version_id:
+            alias_segment_ids = {match["target_segment_id"] for match in matches if match.get("target_segment_id")}
+        else:
+            raise ValueError("规范来源与重复来源不属于当前跨文档关系")
+        if not alias_segment_ids:
+            return await self._review_automation_summary(alias_version_id, relation_id=relation_id)
+
+        await backfill_legacy_governance_reviews(self.session, version_ids=[alias_version_id])
+        packages = list(
+            await self.session.scalars(
+                select(FeishuReviewPackage)
+                .where(
+                    FeishuReviewPackage.source_version_id == alias_version_id,
+                    FeishuReviewPackage.workflow_status.not_in(
+                        {ReviewPackageStatus.COMPLETED, ReviewPackageStatus.INVALIDATED}
+                    ),
+                )
+                .with_for_update()
+            )
+        )
+        auto_decided_count = 0
+        for package in packages:
+            await KnowledgeUnitService(self.session).ensure_for_package(package)
+            review_items = list(
+                await self.session.scalars(
+                    select(FeishuReviewItem).where(FeishuReviewItem.package_id == package.package_id).with_for_update()
+                )
+            )
+            unit_ids = [
+                item.subject_id for item in review_items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT
+            ]
+            units = {
+                unit.unit_id: unit
+                for unit in await self.session.scalars(
+                    select(FeishuKnowledgeUnit).where(FeishuKnowledgeUnit.unit_id.in_(unit_ids)).with_for_update()
+                )
+            }
+            related_relation_ids = {
+                str(linked_id)
+                for item in review_items
+                for linked_id in (item.relation_ids or [])
+                if str(linked_id) != relation_id
+            }
+            open_relation_ids = (
+                set(
+                    await self.session.scalars(
+                        select(FeishuCrossDocumentRelation.relation_id).where(
+                            FeishuCrossDocumentRelation.relation_id.in_(related_relation_ids),
+                            FeishuCrossDocumentRelation.status == "open",
+                        )
+                    )
+                )
+                if related_relation_ids
+                else set()
+            )
+            package_decided_count = 0
+            for item in review_items:
+                if (
+                    item.subject_type != ReviewSubjectType.KNOWLEDGE_UNIT
+                    or item.item_status
+                    not in {ReviewItemStatus.PENDING, ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION}
+                    or open_relation_ids.intersection(str(value) for value in (item.relation_ids or []))
+                ):
+                    continue
+                unit = units.get(item.subject_id)
+                source_segment_ids = {str(value) for value in (unit.source_segment_ids or [])} if unit else set()
+                if not source_segment_ids or not source_segment_ids.issubset(alias_segment_ids):
+                    continue
+                item.item_status = ReviewItemStatus.DECIDED
+                item.outcome = ReviewOutcome.DUPLICATE_SOURCE
+                item.internal_action = ReviewAction.MARK_DUPLICATE
+                item.decision_comment = "已作为规范知识的重复来源保留，无需再次审批。"
+                item.decision_payload = {
+                    "request_id": f"duplicate:{relation_id}",
+                    "outcome": ReviewOutcome.DUPLICATE_SOURCE,
+                    "duplicate_relation_id": relation_id,
+                    "automated": True,
+                }
+                item.decided_by = operator_id
+                item.decided_at = now
+                unit.publication_state = "ALIAS"
+                package_decided_count += 1
+            if not package_decided_count:
+                continue
+            auto_decided_count += package_decided_count
+            previous_status = package.workflow_status
+            package.workflow_status = self._aggregate_package_status(review_items)
+            package.completed_at = now if package.workflow_status == ReviewPackageStatus.COMPLETED else None
+            package.lock_version += 1
+            self.session.add(
+                FeishuProcessingEvent(
+                    source_id=package.source_id,
+                    item_id=package.source_item_id,
+                    version_id=package.source_version_id,
+                    event_type="duplicate_review_items_auto_decided",
+                    operator_id=operator_id,
+                    message=f"已自动处理 {package_decided_count} 个重复来源知识单元",
+                    payload_json={
+                        "package_id": package.package_id,
+                        "relation_id": relation_id,
+                        "review_item_count": package_decided_count,
+                    },
+                )
+            )
+            if package.workflow_status == ReviewPackageStatus.COMPLETED and previous_status != package.workflow_status:
+                self.session.add(
+                    FeishuProcessingEvent(
+                        source_id=package.source_id,
+                        item_id=package.source_item_id,
+                        version_id=package.source_version_id,
+                        event_type="review_package_completed",
+                        operator_id=operator_id,
+                        message="全部知识单元均已作为重复来源保留，无需再次审批。",
+                        payload_json={"package_id": package.package_id, "relation_id": relation_id},
+                    )
+                )
+
+        summary = await self._review_automation_summary(alias_version_id, relation_id=relation_id)
+        if summary["remaining_unit_count"] == 0 and summary["open_package_count"] == 0 and auto_decided_count:
+            version = await self.session.scalar(
+                select(FeishuMaterialVersion)
+                .where(FeishuMaterialVersion.version_id == alias_version_id)
+                .with_for_update()
+            )
+            source_item = (
+                await self.session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == version.item_id))
+                if version
+                else None
+            )
+            if (
+                version
+                and source_item
+                and source_item.active_version_id != version.version_id
+                and version.processing_status in {"parsed", "awaiting_review"}
+            ):
+                version.processing_status = "skipped"
+                version.review_status = "not_required"
+                version.reviewer_id = operator_id
+                version.reviewed_at = now
+                version.review_comment = "全部知识单元均已作为其他规范知识的重复来源保留。"
+                legacy_review = await self.session.scalar(
+                    select(FeishuGovernanceReview).where(FeishuGovernanceReview.version_id == alias_version_id)
+                )
+                if legacy_review is not None:
+                    legacy_review.status = "resolved"
+                    legacy_review.decision = ReviewDecision.REJECT
+                    legacy_review.action = ReviewAction.MARK_DUPLICATE
+                    legacy_review.decision_comment = version.review_comment
+                    legacy_review.decided_by = operator_id
+                    legacy_review.decided_at = now
+        await self.session.flush()
+        return await self._review_automation_summary(alias_version_id, relation_id=relation_id)
+
+    async def _review_automation_summary(self, alias_version_id: str, *, relation_id: str) -> dict:
+        packages = list(
+            await self.session.scalars(
+                select(FeishuReviewPackage).where(FeishuReviewPackage.source_version_id == alias_version_id)
+            )
+        )
+        package_ids = [package.package_id for package in packages]
+        review_items = (
+            list(
+                await self.session.scalars(select(FeishuReviewItem).where(FeishuReviewItem.package_id.in_(package_ids)))
+            )
+            if package_ids
+            else []
+        )
+        duplicate_items = [
+            item for item in review_items if (item.decision_payload or {}).get("duplicate_relation_id") == relation_id
+        ]
+        remaining = sum(
+            item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT
+            and item.item_status
+            in {
+                ReviewItemStatus.PENDING,
+                ReviewItemStatus.WAITING_SOURCE_CHANGE,
+                ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION,
+            }
+            for item in review_items
+        )
+        package_statuses = {package.package_id: package.workflow_status for package in packages}
+        completed_package_ids = {
+            item.package_id
+            for item in duplicate_items
+            if package_statuses.get(item.package_id) == ReviewPackageStatus.COMPLETED
+        }
+        version = await self.session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == alias_version_id)
+        )
+        return {
+            "alias_version_id": alias_version_id,
+            "auto_decided_unit_count": len(duplicate_items),
+            "remaining_unit_count": remaining,
+            "completed_package_count": len(completed_package_ids),
+            "open_package_count": sum(
+                status not in {ReviewPackageStatus.COMPLETED, ReviewPackageStatus.INVALIDATED}
+                for status in package_statuses.values()
+            ),
+            "source_review_closed": bool(
+                version and version.processing_status == "skipped" and version.review_status == "not_required"
+            ),
+        }
+
+    @staticmethod
+    def _aggregate_package_status(items: list[FeishuReviewItem]) -> str:
+        statuses = {item.item_status for item in items}
+        if ReviewItemStatus.WAITING_SOURCE_CHANGE in statuses:
+            return ReviewPackageStatus.WAITING_SOURCE_CHANGE
+        if ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION in statuses:
+            return ReviewPackageStatus.WAITING_BUSINESS_CONFIRMATION
+        if statuses and statuses <= {
+            ReviewItemStatus.DECIDED,
+            ReviewItemStatus.SOURCE_UPDATED,
+            ReviewItemStatus.INVALIDATED,
+        }:
+            return ReviewPackageStatus.COMPLETED
+        return ReviewPackageStatus.OPEN
 
     async def _load_context(
         self,

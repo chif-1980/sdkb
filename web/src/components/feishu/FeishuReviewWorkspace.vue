@@ -110,6 +110,9 @@
             <span class="queue-unit-attention">待处理 {{ item.remaining_unit_count || 0 }}</span>
             <span class="queue-unit-ready">已纳入 {{ item.included_unit_count || 0 }}</span>
             <span class="queue-unit-excluded">不纳入 {{ item.excluded_unit_count || 0 }}</span>
+            <span v-if="item.duplicate_unit_count" class="queue-unit-duplicate"
+              >重复来源 {{ item.duplicate_unit_count }}</span
+            >
           </div>
           <div v-else class="queue-type-counts">
             <span v-for="(count, type) in item.review_type_counts" :key="type"
@@ -1633,14 +1636,11 @@
                                   duplicateCandidates[activeRelation.relation_id]
                                 )
                               }}</strong>
-                              <span
-                                >已处理
-                                {{
-                                  duplicateCandidates[activeRelation.relation_id].decision
-                                    .fragment_match_ids?.length || 0
-                                }}
-                                组重复片段，其他独有内容继续审核。</span
-                              >
+                              <span>{{
+                                duplicateResolutionSummary(
+                                  duplicateCandidates[activeRelation.relation_id]
+                                )
+                              }}</span>
                             </div>
                           </div>
                           <template v-else-if="activeDuplicateMatch">
@@ -2112,7 +2112,8 @@ const completionResultOptions = [
   { value: 'all', label: '全部' },
   { value: 'all_included', label: '全部纳入' },
   { value: 'partial', label: '部分纳入' },
-  { value: 'all_excluded', label: '全部不纳入' }
+  { value: 'all_excluded', label: '全部不纳入' },
+  { value: 'all_duplicate', label: '全部为重复来源' }
 ]
 const reviewTypeOptions = [
   { label: '全部审核类型', value: '' },
@@ -2536,7 +2537,7 @@ watch(activeEvidenceView, (view) => {
   if (view !== 'comparisons' && comparisonFullscreen.value) toggleComparisonFullscreen(false)
 })
 
-async function loadPackages() {
+async function loadPackages(options = {}) {
   if (!props.sourceId) return
   loadingPackages.value = true
   packagePage.value = 1
@@ -2545,6 +2546,12 @@ async function loadPackages() {
     packages.value = response.items || []
     packageResponse.value = response
     emit('count-change', response.counts?.mine || 0)
+    if (
+      options?.preserveDetail === true &&
+      packages.value.some((item) => item.package_id === selectedPackageId.value)
+    ) {
+      return
+    }
     const target = normalizedReviewTarget()
     const hasRequestedTarget = target.packageIds.length > 0 || target.versionIds.length > 0
     let requested = findTargetPackage(packages.value, target)
@@ -4109,8 +4116,8 @@ function confirmDuplicateResolution(comparison, strategy) {
     title: strategy === 'KEEP_SEPARATE' ? '确认分别保留？' : `将“${primaryTitle}”作为规范内容？`,
     content:
       strategy === 'KEEP_SEPARATE'
-        ? '两边片段将继续作为不同知识处理，不建立重复来源关系。'
-        : '匹配到的另一边片段会记录为重复来源，不会重复创建正式知识；两篇文档的独有内容不受影响。',
+        ? '两边片段将继续作为不同知识处理，不建立重复来源关系；两边知识单元仍需分别完成审批。'
+        : '匹配到的另一边片段会记录为重复来源，不会重复创建正式知识。完全由重复片段组成、且没有其他未解决关系的知识单元会自动结束审核；含独有内容的知识单元继续待审，所选规范来源仍需正常审批。两篇文档的独有内容不受影响。',
     okText: '确认处理',
     cancelText: '返回',
     async onOk() {
@@ -4130,9 +4137,17 @@ async function resolveDuplicateRelation(relationId, strategy) {
       strategy
     })
     duplicateCandidates[relationId] = response
-    message.success(
-      strategy === 'KEEP_SEPARATE' ? '已分别保留两边内容' : '已建立规范内容和重复来源关系'
-    )
+    const automation = response.review_automation
+    if (strategy === 'KEEP_SEPARATE') {
+      message.success('已分别保留两边内容，两边知识单元继续独立审批')
+    } else if (automation?.source_review_closed) {
+      message.success('已处理重复来源，另一来源无需再次审批')
+    } else {
+      message.success(
+        `已处理重复来源${automation ? `，另一来源还剩 ${automation.remaining_unit_count || 0} 个知识单元待审核` : ''}`
+      )
+    }
+    await loadPackages({ preserveDetail: true })
   } catch (error) {
     message.error(governanceApi.getErrorMessage(error, '处理重复片段失败'))
   } finally {
@@ -4227,7 +4242,8 @@ function completionResultLabel(value) {
     {
       all_included: '全部纳入',
       partial: '部分纳入',
-      all_excluded: '全部不纳入'
+      all_excluded: '全部不纳入',
+      all_duplicate: '全部为重复来源'
     }[value] || ''
   )
 }
@@ -4344,6 +4360,17 @@ function duplicateDecisionTitle(candidate) {
       ? candidate.source
       : candidate.target
   return `已将“${primary?.title || '所选来源'}”设为规范内容`
+}
+function duplicateResolutionSummary(candidate) {
+  const matchCount = candidate?.decision?.fragment_match_ids?.length || 0
+  if (candidate?.decision?.strategy === 'KEEP_SEPARATE') {
+    return `已核对 ${matchCount} 组重复片段，两边知识单元继续独立审批。`
+  }
+  const automation = candidate?.review_automation
+  if (!automation) return `已处理 ${matchCount} 组重复片段，其他独有内容继续审核。`
+  const prefix = `已处理 ${matchCount} 组重复片段，自动标记 ${automation.auto_decided_unit_count || 0} 个重复来源知识单元。`
+  if (automation.source_review_closed) return `${prefix} 另一来源无需再次审批。`
+  return `${prefix} 另一来源还剩 ${automation.remaining_unit_count || 0} 个知识单元待审核。`
 }
 function comparisonClass(value) {
   return `comparison-${String(value || '').toLowerCase()}`
@@ -4685,6 +4712,10 @@ loadReviewers()
   background: var(--gray-100);
   color: var(--color-text-secondary);
 }
+.queue-unit-summary .queue-unit-duplicate {
+  background: var(--color-info-50);
+  color: var(--color-info-700);
+}
 .queue-meta .completion-result-badge {
   padding: 1px 4px;
   border-radius: 3px;
@@ -4699,6 +4730,10 @@ loadReviewers()
 .queue-meta .completion-partial {
   background: var(--color-warning-50);
   color: var(--color-warning-700);
+}
+.queue-meta .completion-all_duplicate {
+  background: var(--color-info-50);
+  color: var(--color-info-700);
 }
 .queue-meta {
   display: flex;

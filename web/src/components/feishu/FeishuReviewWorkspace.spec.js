@@ -315,7 +315,7 @@ function unchangedUpdatePackageDetail({ mixed = false } = {}) {
   return detail
 }
 
-function duplicateCandidates(decision = null) {
+function duplicateCandidates(decision = null, reviewAutomation = null) {
   return {
     relation_id: 'relation-duplicate',
     relation_type: 'EXACT_DUPLICATE',
@@ -346,7 +346,8 @@ function duplicateCandidates(decision = null) {
         similarity: 1
       }
     ],
-    decision
+    decision,
+    review_automation: reviewAutomation
   }
 }
 
@@ -2347,12 +2348,22 @@ describe('FeishuReviewWorkspace', () => {
     apiAdminPost.mockImplementation((url, payload) => {
       if (url === '/api/governance/relations/relation-duplicate/resolve-duplicate') {
         return Promise.resolve(
-          duplicateCandidates({
-            strategy: payload.strategy,
-            primary_version_id: 'version-duplicate',
-            logical_knowledge_ids: ['logical-1'],
-            fragment_match_ids: ['match-1']
-          })
+          duplicateCandidates(
+            {
+              strategy: payload.strategy,
+              primary_version_id: 'version-duplicate',
+              logical_knowledge_ids: ['logical-1'],
+              fragment_match_ids: ['match-1']
+            },
+            {
+              alias_version_id: 'version-other',
+              auto_decided_unit_count: 1,
+              remaining_unit_count: 2,
+              completed_package_count: 0,
+              open_package_count: 1,
+              source_review_closed: false
+            }
+          )
         )
       }
       return Promise.resolve({})
@@ -2372,6 +2383,8 @@ describe('FeishuReviewWorkspace', () => {
 
     expect(Modal.confirm).toHaveBeenCalledOnce()
     expect(Modal.confirm.mock.calls[0][0].content).toContain('独有内容不受影响')
+    expect(Modal.confirm.mock.calls[0][0].content).toContain('完全由重复片段组成')
+    expect(Modal.confirm.mock.calls[0][0].content).toContain('其他未解决关系')
     await Modal.confirm.mock.calls[0][0].onOk()
     await flushPromises()
 
@@ -2383,6 +2396,80 @@ describe('FeishuReviewWorkspace', () => {
       '已将“产品介绍 A”设为规范内容'
     )
     expect(wrapper.get('.duplicate-decision-result').text()).toContain('1 组重复片段')
+    expect(wrapper.get('.duplicate-decision-result').text()).toContain(
+      '自动标记 1 个重复来源知识单元'
+    )
+    expect(wrapper.get('.duplicate-decision-result').text()).toContain('还剩 2 个知识单元待审核')
+  })
+
+  it('另一来源全部重复时明确提示无需再次审批', async () => {
+    const detail = duplicatePackageDetail()
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              package_id: detail.package_id,
+              source_version_id: detail.source_version_id,
+              title: detail.title
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-duplicate')
+        return Promise.resolve(detail)
+      if (url === '/api/governance/relations/relation-duplicate/duplicate-candidates')
+        return Promise.resolve(duplicateCandidates())
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-duplicate/content'))
+        return Promise.resolve({ content: '# 产品介绍 A', lines: [] })
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockImplementation((url, payload) => {
+      if (url === '/api/governance/relations/relation-duplicate/resolve-duplicate') {
+        return Promise.resolve(
+          duplicateCandidates(
+            {
+              strategy: payload.strategy,
+              primary_version_id: 'version-duplicate',
+              logical_knowledge_ids: ['logical-1'],
+              fragment_match_ids: ['match-1']
+            },
+            {
+              alias_version_id: 'version-other',
+              auto_decided_unit_count: 3,
+              remaining_unit_count: 0,
+              completed_package_count: 1,
+              open_package_count: 0,
+              source_review_closed: true
+            }
+          )
+        )
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    await wrapper
+      .findAll('.evidence-tabs button')
+      .find((button) => button.text().includes('跨文档证据'))
+      .trigger('click')
+    await flushPromises()
+    await wrapper
+      .findAll('.duplicate-actions button')
+      .find((button) => button.text().includes('保留来源一'))
+      .trigger('click')
+    await Modal.confirm.mock.calls[0][0].onOk()
+    await flushPromises()
+
+    expect(wrapper.get('.duplicate-decision-result').text()).toContain(
+      '自动标记 3 个重复来源知识单元'
+    )
+    expect(wrapper.get('.duplicate-decision-result').text()).toContain('另一来源无需再次审批')
   })
 
   it('可以明确决定两边内容分别保留', async () => {
@@ -2749,6 +2836,7 @@ describe('FeishuReviewWorkspace', () => {
       remaining_unit_count: 0,
       included_unit_count: 2,
       excluded_unit_count: 1,
+      duplicate_unit_count: 1,
       completion_result: 'partial'
     }
     const completedDetail = knowledgeUnitPackageDetail()
@@ -2786,6 +2874,7 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.queue-result-filter').text()).toContain('全部纳入')
     expect(wrapper.get('.queue-result-filter').text()).toContain('部分纳入')
     expect(wrapper.get('.queue-result-filter').text()).toContain('全部不纳入')
+    expect(wrapper.get('.queue-result-filter').text()).toContain('全部为重复来源')
 
     await wrapper
       .findAll('.queue-result-filter button')
@@ -2799,6 +2888,7 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.queue-unit-summary').text()).toContain('3/3 已处理')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 2')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('不纳入 1')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('重复来源 1')
     expect(wrapper.get('.completion-result-badge').text()).toBe('部分纳入')
   })
 
