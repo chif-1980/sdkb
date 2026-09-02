@@ -2194,6 +2194,29 @@ async def test_minio_archive_adapter_uses_stable_ids_and_safe_extension(monkeypa
     ]
 
 
+async def test_minio_archive_adapter_preserves_markdown_extension(monkeypatch):
+    calls = []
+
+    class FakeMinio:
+        async def aupload_file(self, bucket_name, object_name, data, content_type=None):
+            calls.append((object_name, content_type))
+
+    monkeypatch.setattr(router_module, "get_minio_client", lambda: FakeMinio())
+
+    object_path = await router_module.MinioFeishuArchiveAdapter().archive(
+        source_id="source-1",
+        item_id="item-1",
+        version_id="version-1",
+        item_type="attachment",
+        title="产品说明.Markdown",
+        content=b"# Product",
+        content_type="text/markdown",
+    )
+
+    assert object_path.endswith("/source.markdown")
+    assert calls == [("feishu/source-1/item-1/version-1/source.markdown", "text/markdown")]
+
+
 async def test_minio_archive_adapter_ignores_unsafe_extension(monkeypatch):
     calls = []
 

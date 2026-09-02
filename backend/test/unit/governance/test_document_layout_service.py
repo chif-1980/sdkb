@@ -9,9 +9,11 @@ from PIL import Image
 import yuxi.governance.document_layout_service as document_layout_service
 from yuxi.governance.document_layout_service import (
     extract_image_layout,
+    extract_markdown_layout,
     extract_pdf_layout,
     extract_xlsx_layout,
     render_document_page,
+    supported_layout_suffix,
 )
 
 
@@ -47,6 +49,31 @@ def test_extract_xlsx_layout_preserves_sheet_and_cell_edit_targets() -> None:
     cells = {block["locator"]["cell"]: block for block in layout["pages"][0]["blocks"]}
     assert cells["A2"]["content"] == "数据接入"
     assert cells["A2"]["kind"] == "cell"
+
+
+def test_extract_markdown_layout_preserves_structure_and_segment_mapping() -> None:
+    content = "# 产品说明\n\n支持知识问答和资料检索。\n\n- 可追溯引用\n- 跨文档检查".encode()
+    segments = [
+        {
+            "segment_id": "segment-1",
+            "content": "支持知识问答和资料检索。",
+            "locator_json": {"section": 2},
+        }
+    ]
+
+    layout = extract_markdown_layout(content, filename="产品说明.md", segments=segments)
+
+    assert layout["supported"] is True
+    assert layout["editable"] is False
+    assert layout["pages"][0]["render_mode"] == "markdown"
+    assert [block["content"] for block in layout["pages"][0]["blocks"]] == [
+        "# 产品说明",
+        "支持知识问答和资料检索。",
+        "- 可追溯引用\n- 跨文档检查",
+    ]
+    assert layout["pages"][0]["blocks"][1]["source_segment_ids"] == ["segment-1"]
+    assert supported_layout_suffix(".md")
+    assert supported_layout_suffix(".MARKDOWN")
 
 
 def test_extract_image_layout_uses_ocr_bbox_when_available() -> None:

@@ -633,12 +633,23 @@ async def test_attachment_rename_without_content_change_reuses_version(repositor
 
 async def test_attachment_extensions_and_media_statuses_are_classified(repository, session):
     root = node("root", "Root")
-    names = ["a.pdf", "b.docx", "c.pptx", "d.xlsx", "e.txt", "f.JPEG", "g.mp3", "h.mov"]
+    names = [
+        "a.pdf",
+        "b.docx",
+        "c.pptx",
+        "d.xlsx",
+        "e.txt",
+        "f.md",
+        "g.Markdown",
+        "h.JPEG",
+        "i.mp3",
+        "j.mov",
+    ]
     attachments = [FeishuAttachment(file_token=f"file-{index}", name=name) for index, name in enumerate(names)]
     contents = {"obj-root": b"page"} | {
         item.file_token: item.name.encode()
         for item in attachments
-        if item.name.lower().endswith(("pdf", "docx", "pptx", "xlsx", "txt", "jpeg"))
+        if item.name.lower().endswith(("pdf", "docx", "pptx", "xlsx", "txt", "md", "markdown", "jpeg"))
     }
     fake = FakeFeishuClient(
         nodes={"root": root},
@@ -657,15 +668,15 @@ async def test_attachment_extensions_and_media_statuses_are_classified(repositor
         )
     ).all()
     assert result.status == "succeeded"
-    assert result.new_count == 7
+    assert result.new_count == 9
     assert result.unsupported_count == 2
     assert {(item_type, status) for _, item_type, status in rows} == {
         ("attachment", "discovered"),
         ("audio", "unsupported"),
         ("video", "unsupported"),
     }
-    assert "file-6" not in fake.download_calls
-    assert "file-7" not in fake.download_calls
+    assert "file-8" not in fake.download_calls
+    assert "file-9" not in fake.download_calls
 
 
 @pytest.mark.parametrize(

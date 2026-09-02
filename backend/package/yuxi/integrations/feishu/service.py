@@ -23,6 +23,8 @@ SUPPORTED_EXTENSIONS = {
     ".xls",
     ".xlsx",
     ".txt",
+    ".md",
+    ".markdown",
     ".png",
     ".jpg",
     ".jpeg",

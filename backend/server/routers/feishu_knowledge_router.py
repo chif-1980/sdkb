@@ -106,6 +106,7 @@ class MinioFeishuArchiveAdapter:
         ".jpeg",
         ".jpg",
         ".md",
+        ".markdown",
         ".pdf",
         ".png",
         ".pptx",

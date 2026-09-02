@@ -218,8 +218,8 @@
                 :aria-expanded="!queueCollapsed"
                 @click="queueCollapsed = !queueCollapsed"
               >
-                <PanelLeftOpen v-if="queueCollapsed" :size="22" />
-                <PanelLeftClose v-else :size="22" />
+                <PanelLeftOpen v-if="queueCollapsed" :size="18" />
+                <PanelLeftClose v-else :size="18" />
               </button>
               <button
                 v-if="isUpdateReview"
@@ -1202,7 +1202,9 @@
                             <div
                               class="comparison-layout-stage"
                               :class="{
-                                'has-grid': activeComparisonSourcePage?.render_mode === 'grid'
+                                'has-grid': activeComparisonSourcePage?.render_mode === 'grid',
+                                'has-markdown':
+                                  activeComparisonSourcePage?.render_mode === 'markdown'
                               }"
                             >
                               <div
@@ -1225,8 +1227,12 @@
                                 class="comparison-layout-canvas"
                                 :class="{
                                   'is-grid': activeComparisonSourcePage?.render_mode === 'grid',
+                                  'is-markdown':
+                                    activeComparisonSourcePage?.render_mode === 'markdown',
                                   'is-pannable':
-                                    activeComparisonSourcePage?.render_mode !== 'grid' &&
+                                    !['grid', 'markdown'].includes(
+                                      activeComparisonSourcePage?.render_mode
+                                    ) &&
                                     comparisonViews.source.scale > COMPARISON_MIN_SCALE
                                 }"
                                 :style="comparisonCanvasStyle(activeComparisonSourcePage)"
@@ -1240,7 +1246,9 @@
                                 <div
                                   class="comparison-layout-content"
                                   :class="{
-                                    'is-grid': activeComparisonSourcePage?.render_mode === 'grid'
+                                    'is-grid': activeComparisonSourcePage?.render_mode === 'grid',
+                                    'is-markdown':
+                                      activeComparisonSourcePage?.render_mode === 'markdown'
                                   }"
                                   :style="comparisonViewStyle('source', activeComparisonSourcePage)"
                                 >
@@ -1249,6 +1257,41 @@
                                     class="comparison-layout-grid-hint"
                                   >
                                     表格版式
+                                  </div>
+                                  <div
+                                    v-else-if="
+                                      activeComparisonSourcePage?.render_mode === 'markdown'
+                                    "
+                                    class="comparison-markdown-document"
+                                  >
+                                    <article
+                                      v-for="block in activeComparisonSourcePage?.blocks || []"
+                                      :key="`source-markdown-${block.block_id}`"
+                                      class="comparison-markdown-block"
+                                      :class="comparisonBlockClass('source', block)"
+                                      role="button"
+                                      tabindex="0"
+                                      @click="selectComparisonBlock('source', block)"
+                                      @keydown.enter.prevent="selectComparisonBlock('source', block)"
+                                      @keydown.space.prevent="selectComparisonBlock('source', block)"
+                                    >
+                                      <span
+                                        v-if="
+                                          comparisonBlockClass('source', block)[
+                                            'comparison-block-match'
+                                          ]
+                                        "
+                                        class="comparison-markdown-block-number"
+                                        >{{ comparisonBlockMarker('source', block) }}</span
+                                      >
+                                      <MarkdownPreview :content="block.content" />
+                                    </article>
+                                    <div
+                                      v-if="!activeComparisonSourcePage?.blocks?.length"
+                                      class="comparison-layout-state"
+                                    >
+                                      <CircleAlert :size="18" /><span>Markdown 正文为空</span>
+                                    </div>
                                   </div>
                                   <img
                                     v-else-if="comparisonPagePreviewUrls.source"
@@ -1261,45 +1304,49 @@
                                       comparisonPagePreviewErrors.source || '正在生成页面预览…'
                                     }}</span>
                                   </div>
-                                  <button
-                                    v-for="block in activeComparisonSourcePage?.blocks || []"
-                                    :key="`source-${block.block_id}`"
-                                    type="button"
-                                    class="comparison-layout-block"
-                                    :class="comparisonBlockClass('source', block)"
-                                    :style="comparisonBlockStyle(block)"
-                                    :title="block.content"
-                                    @click="selectComparisonBlock('source', block)"
+                                  <template
+                                    v-if="activeComparisonSourcePage?.render_mode !== 'markdown'"
                                   >
-                                    <span
-                                      v-if="
-                                        comparisonBlockClass('source', block)[
-                                          'comparison-block-grid'
-                                        ]
-                                      "
-                                      class="comparison-block-content"
-                                      >{{ block.content }}</span
-                                    ><span
-                                      v-if="
-                                        comparisonBlockClass('source', block)[
-                                          'comparison-block-grid'
-                                        ] &&
-                                        comparisonBlockClass('source', block)[
-                                          'comparison-block-match'
-                                        ]
-                                      "
-                                      class="comparison-layout-block-number"
-                                      >{{ comparisonBlockMarker('source', block) }}</span
-                                    ><span
-                                      v-else-if="
-                                        comparisonBlockClass('source', block)[
-                                          'comparison-block-match'
-                                        ]
-                                      "
-                                      class="comparison-layout-block-number"
-                                      >{{ comparisonBlockMarker('source', block) }}</span
+                                    <button
+                                      v-for="block in activeComparisonSourcePage?.blocks || []"
+                                      :key="`source-${block.block_id}`"
+                                      type="button"
+                                      class="comparison-layout-block"
+                                      :class="comparisonBlockClass('source', block)"
+                                      :style="comparisonBlockStyle(block)"
+                                      :title="block.content"
+                                      @click="selectComparisonBlock('source', block)"
                                     >
-                                  </button>
+                                      <span
+                                        v-if="
+                                          comparisonBlockClass('source', block)[
+                                            'comparison-block-grid'
+                                          ]
+                                        "
+                                        class="comparison-block-content"
+                                        >{{ block.content }}</span
+                                      ><span
+                                        v-if="
+                                          comparisonBlockClass('source', block)[
+                                            'comparison-block-grid'
+                                          ] &&
+                                          comparisonBlockClass('source', block)[
+                                            'comparison-block-match'
+                                          ]
+                                        "
+                                        class="comparison-layout-block-number"
+                                        >{{ comparisonBlockMarker('source', block) }}</span
+                                      ><span
+                                        v-else-if="
+                                          comparisonBlockClass('source', block)[
+                                            'comparison-block-match'
+                                          ]
+                                        "
+                                        class="comparison-layout-block-number"
+                                        >{{ comparisonBlockMarker('source', block) }}</span
+                                      >
+                                    </button>
+                                  </template>
                                 </div>
                               </div>
                             </div>
@@ -1338,7 +1385,9 @@
                             <div
                               class="comparison-layout-stage"
                               :class="{
-                                'has-grid': activeComparisonTargetPage?.render_mode === 'grid'
+                                'has-grid': activeComparisonTargetPage?.render_mode === 'grid',
+                                'has-markdown':
+                                  activeComparisonTargetPage?.render_mode === 'markdown'
                               }"
                             >
                               <div
@@ -1361,8 +1410,12 @@
                                 class="comparison-layout-canvas"
                                 :class="{
                                   'is-grid': activeComparisonTargetPage?.render_mode === 'grid',
+                                  'is-markdown':
+                                    activeComparisonTargetPage?.render_mode === 'markdown',
                                   'is-pannable':
-                                    activeComparisonTargetPage?.render_mode !== 'grid' &&
+                                    !['grid', 'markdown'].includes(
+                                      activeComparisonTargetPage?.render_mode
+                                    ) &&
                                     comparisonViews.target.scale > COMPARISON_MIN_SCALE
                                 }"
                                 :style="comparisonCanvasStyle(activeComparisonTargetPage)"
@@ -1376,7 +1429,9 @@
                                 <div
                                   class="comparison-layout-content"
                                   :class="{
-                                    'is-grid': activeComparisonTargetPage?.render_mode === 'grid'
+                                    'is-grid': activeComparisonTargetPage?.render_mode === 'grid',
+                                    'is-markdown':
+                                      activeComparisonTargetPage?.render_mode === 'markdown'
                                   }"
                                   :style="comparisonViewStyle('target', activeComparisonTargetPage)"
                                 >
@@ -1385,6 +1440,41 @@
                                     class="comparison-layout-grid-hint"
                                   >
                                     表格版式
+                                  </div>
+                                  <div
+                                    v-else-if="
+                                      activeComparisonTargetPage?.render_mode === 'markdown'
+                                    "
+                                    class="comparison-markdown-document"
+                                  >
+                                    <article
+                                      v-for="block in activeComparisonTargetPage?.blocks || []"
+                                      :key="`target-markdown-${block.block_id}`"
+                                      class="comparison-markdown-block"
+                                      :class="comparisonBlockClass('target', block)"
+                                      role="button"
+                                      tabindex="0"
+                                      @click="selectComparisonBlock('target', block)"
+                                      @keydown.enter.prevent="selectComparisonBlock('target', block)"
+                                      @keydown.space.prevent="selectComparisonBlock('target', block)"
+                                    >
+                                      <span
+                                        v-if="
+                                          comparisonBlockClass('target', block)[
+                                            'comparison-block-match'
+                                          ]
+                                        "
+                                        class="comparison-markdown-block-number"
+                                        >{{ comparisonBlockMarker('target', block) }}</span
+                                      >
+                                      <MarkdownPreview :content="block.content" />
+                                    </article>
+                                    <div
+                                      v-if="!activeComparisonTargetPage?.blocks?.length"
+                                      class="comparison-layout-state"
+                                    >
+                                      <CircleAlert :size="18" /><span>Markdown 正文为空</span>
+                                    </div>
                                   </div>
                                   <img
                                     v-else-if="comparisonPagePreviewUrls.target"
@@ -1397,45 +1487,49 @@
                                       comparisonPagePreviewErrors.target || '正在生成页面预览…'
                                     }}</span>
                                   </div>
-                                  <button
-                                    v-for="block in activeComparisonTargetPage?.blocks || []"
-                                    :key="`target-${block.block_id}`"
-                                    type="button"
-                                    class="comparison-layout-block"
-                                    :class="comparisonBlockClass('target', block)"
-                                    :style="comparisonBlockStyle(block)"
-                                    :title="block.content"
-                                    @click="selectComparisonBlock('target', block)"
+                                  <template
+                                    v-if="activeComparisonTargetPage?.render_mode !== 'markdown'"
                                   >
-                                    <span
-                                      v-if="
-                                        comparisonBlockClass('target', block)[
-                                          'comparison-block-grid'
-                                        ]
-                                      "
-                                      class="comparison-block-content"
-                                      >{{ block.content }}</span
-                                    ><span
-                                      v-if="
-                                        comparisonBlockClass('target', block)[
-                                          'comparison-block-grid'
-                                        ] &&
-                                        comparisonBlockClass('target', block)[
-                                          'comparison-block-match'
-                                        ]
-                                      "
-                                      class="comparison-layout-block-number"
-                                      >{{ comparisonBlockMarker('target', block) }}</span
-                                    ><span
-                                      v-else-if="
-                                        comparisonBlockClass('target', block)[
-                                          'comparison-block-match'
-                                        ]
-                                      "
-                                      class="comparison-layout-block-number"
-                                      >{{ comparisonBlockMarker('target', block) }}</span
+                                    <button
+                                      v-for="block in activeComparisonTargetPage?.blocks || []"
+                                      :key="`target-${block.block_id}`"
+                                      type="button"
+                                      class="comparison-layout-block"
+                                      :class="comparisonBlockClass('target', block)"
+                                      :style="comparisonBlockStyle(block)"
+                                      :title="block.content"
+                                      @click="selectComparisonBlock('target', block)"
                                     >
-                                  </button>
+                                      <span
+                                        v-if="
+                                          comparisonBlockClass('target', block)[
+                                            'comparison-block-grid'
+                                          ]
+                                        "
+                                        class="comparison-block-content"
+                                        >{{ block.content }}</span
+                                      ><span
+                                        v-if="
+                                          comparisonBlockClass('target', block)[
+                                            'comparison-block-grid'
+                                          ] &&
+                                          comparisonBlockClass('target', block)[
+                                            'comparison-block-match'
+                                          ]
+                                        "
+                                        class="comparison-layout-block-number"
+                                        >{{ comparisonBlockMarker('target', block) }}</span
+                                      ><span
+                                        v-else-if="
+                                          comparisonBlockClass('target', block)[
+                                            'comparison-block-match'
+                                          ]
+                                        "
+                                        class="comparison-layout-block-number"
+                                        >{{ comparisonBlockMarker('target', block) }}</span
+                                      >
+                                    </button>
+                                  </template>
                                 </div>
                               </div>
                             </div>
@@ -3473,12 +3567,18 @@ function setComparisonCanvasRef(side, element) {
 }
 
 function comparisonCanvasStyle(page) {
-  if (page?.render_mode === 'grid') return {}
+  if (['grid', 'markdown'].includes(page?.render_mode)) return {}
   return { aspectRatio: String(page?.aspect_ratio || 16 / 9) }
 }
 
 function comparisonViewStyle(side, page) {
   const view = comparisonViews[side]
+  if (page?.render_mode === 'markdown') {
+    return {
+      width: `${view.scale * 100}%`,
+      minHeight: '100%'
+    }
+  }
   if (page?.render_mode === 'grid') {
     const columns = Math.max(Number(page.width) || 1, 1)
     const rows = Math.max(Number(page.height) || 1, 1)
@@ -3588,7 +3688,7 @@ function startComparisonPan(side, event) {
     side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
   if (
     event.button !== 0 ||
-    page?.render_mode === 'grid' ||
+    ['grid', 'markdown'].includes(page?.render_mode) ||
     comparisonViews[side].scale <= COMPARISON_MIN_SCALE ||
     event.target?.closest?.('.comparison-layout-block')
   )
@@ -3729,7 +3829,7 @@ async function loadComparisonPagePreview(side) {
   if (!relationId || !pageNumber) return
   const page =
     side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
-  if (page?.render_mode === 'grid') {
+  if (['grid', 'markdown'].includes(page?.render_mode)) {
     comparisonPagePreviewUrls[side] = ''
     comparisonPagePreviewErrors[side] = ''
     return
@@ -3764,7 +3864,7 @@ async function preloadComparisonPagePreview(side, pageNumber) {
   if (
     !relationId ||
     !page ||
-    page.render_mode === 'grid' ||
+    ['grid', 'markdown'].includes(page.render_mode) ||
     comparisonPagePreviewCache.has(comparisonPageCacheKey(relationId, side, pageNumber, 1))
   )
     return
@@ -3793,10 +3893,10 @@ async function loadRelationLayoutComparison(comparison) {
     if (!comparisonMatchPagesAligned.value) comparisonSyncPages.value = false
     if (response.supported) {
       const previewRequests = []
-      if (activeComparisonSourcePage.value?.render_mode !== 'grid') {
+      if (!['grid', 'markdown'].includes(activeComparisonSourcePage.value?.render_mode)) {
         previewRequests.push(loadComparisonPagePreview('source'))
       }
-      if (activeComparisonTargetPage.value?.render_mode !== 'grid') {
+      if (!['grid', 'markdown'].includes(activeComparisonTargetPage.value?.render_mode)) {
         previewRequests.push(loadComparisonPagePreview('target'))
       }
       await Promise.all(previewRequests)
@@ -5339,25 +5439,25 @@ loadReviewers()
   box-shadow: inset 0 -2px 0 var(--main-color);
 }
 .evidence-tabs-main > .evidence-queue-toggle {
-  width: 36px;
-  flex: 0 0 36px;
+  width: 32px;
+  min-height: 32px;
+  flex: 0 0 32px;
   justify-content: center;
-  margin-right: 2px;
+  margin-right: 4px;
   padding: 0;
-  border-right: 1px solid var(--gray-150) !important;
-  border-radius: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
   color: var(--color-text-secondary) !important;
 }
 .evidence-queue-toggle svg {
-  flex: 0 0 22px;
+  flex: 0 0 18px;
 }
-.evidence-queue-toggle:hover {
-  background: var(--main-20) !important;
-  color: var(--main-700) !important;
-}
+.evidence-queue-toggle:hover,
 .evidence-queue-toggle:focus-visible {
-  outline: 2px solid var(--main-300);
-  outline-offset: -2px;
+  border-color: var(--main-50) !important;
+  background: var(--main-20) !important;
+  color: var(--main-color) !important;
+  outline: none;
 }
 .tab-count {
   display: inline-grid;
@@ -6531,7 +6631,8 @@ loadReviewers()
   max-height: 100%;
   place-self: center;
 }
-.comparison-review.is-fullscreen .comparison-layout-canvas.is-grid {
+.comparison-review.is-fullscreen .comparison-layout-canvas.is-grid,
+.comparison-review.is-fullscreen .comparison-layout-canvas.is-markdown {
   height: 100%;
 }
 .comparison-review.is-fullscreen .comparison-evidence-layout > .comparison-card {
@@ -6812,6 +6913,9 @@ loadReviewers()
   grid-template-rows: auto minmax(0, 1fr);
   gap: 5px;
 }
+.comparison-layout-stage.has-markdown {
+  min-height: 320px;
+}
 .comparison-grid-cell-detail {
   display: grid;
   gap: 5px;
@@ -6896,6 +7000,16 @@ loadReviewers()
   scrollbar-color: var(--gray-300) transparent;
   scrollbar-width: thin;
 }
+.comparison-layout-canvas.is-markdown {
+  width: 100%;
+  height: min(58vh, 640px);
+  min-height: 320px;
+  overflow: auto;
+  background: var(--gray-0);
+  touch-action: auto;
+  scrollbar-color: var(--gray-300) transparent;
+  scrollbar-width: thin;
+}
 .comparison-layout-canvas.is-pannable {
   cursor: grab;
 }
@@ -6911,6 +7025,61 @@ loadReviewers()
   top: auto;
   left: auto;
   transform: none;
+}
+.comparison-layout-content.is-markdown {
+  position: relative;
+  top: auto;
+  left: auto;
+  transform: none;
+}
+.comparison-markdown-document {
+  display: grid;
+  gap: 8px;
+  min-height: 100%;
+  padding: 18px 20px 36px;
+  background: var(--gray-0);
+}
+.comparison-markdown-block {
+  position: relative;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.comparison-markdown-block:hover,
+.comparison-markdown-block:focus-visible {
+  border-color: var(--main-200);
+  background: var(--main-20);
+  outline: none;
+}
+.comparison-markdown-block.comparison-block-match {
+  border-color: var(--color-warning-500);
+  background: var(--color-warning-50);
+  box-shadow: inset 3px 0 0 var(--color-warning-500);
+}
+.comparison-markdown-block.comparison-block-selected {
+  border-color: var(--main-color);
+  background: var(--main-30);
+  box-shadow: inset 3px 0 0 var(--main-color);
+}
+.comparison-markdown-block-number {
+  display: inline-grid;
+  position: absolute;
+  z-index: 1;
+  top: -7px;
+  left: -7px;
+  min-width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--main-700);
+  color: var(--gray-0);
+  font-size: 9px;
+  line-height: 1;
+}
+.comparison-markdown-block :deep(.yk-markdown-preview) {
+  font-size: 12px;
+  line-height: 1.65;
 }
 .comparison-layout-content > img {
   display: block;
