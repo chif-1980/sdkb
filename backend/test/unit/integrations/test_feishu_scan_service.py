@@ -162,7 +162,16 @@ async def test_scan_recurses_from_configured_root_and_builds_page_paths(reposito
         },
     )
 
-    result = await FeishuScanService(repository=repository, client=fake).scan(source_id="source-1", mode="full")
+    progress_events = []
+
+    async def on_progress(processed, title):
+        progress_events.append((processed, title))
+
+    result = await FeishuScanService(repository=repository, client=fake).scan(
+        source_id="source-1",
+        mode="full",
+        progress_callback=on_progress,
+    )
 
     items = await _items(session)
     assert result.status == "succeeded"
@@ -170,6 +179,7 @@ async def test_scan_recurses_from_configured_root_and_builds_page_paths(reposito
     assert fake.get_calls == ["root"]
     assert fake.children_calls == ["root", "child", "grandchild"]
     assert [item.path_text for item in items] == ["Root", "Root / Child", "Root / Child / Grandchild"]
+    assert progress_events == [(1, "Root"), (2, "Child"), (3, "Grandchild")]
 
 
 async def test_title_only_page_with_children_is_directory_and_skips_review(repository, session):

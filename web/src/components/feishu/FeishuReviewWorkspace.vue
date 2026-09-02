@@ -277,7 +277,7 @@
                 size="small"
                 class="whole-review-button"
                 :loading="batchResolving"
-                :disabled="batchResolving"
+                :disabled="writeDisabled || batchResolving"
                 @click="confirmNoUpdate"
               >
                 <ClipboardCheck :size="14" />确认无需更新
@@ -287,7 +287,7 @@
                 size="small"
                 class="whole-review-button"
                 :loading="batchResolving"
-                :disabled="!bulkActionableItems.length || batchResolving"
+                :disabled="writeDisabled || !bulkActionableItems.length || batchResolving"
                 :title="wholeReviewButtonTitle"
                 @click="confirmWholePackage"
               >
@@ -297,6 +297,7 @@
                 v-if="currentItem?.can_reopen_exclusion && !isDocumentLayoutReview && !isPptxReview"
                 size="small"
                 :loading="reopening"
+                :disabled="writeDisabled || reopening"
                 @click="confirmReopenExcludedItem"
               >
                 <RotateCcw :size="14" />重新申请纳入
@@ -307,6 +308,7 @@
                 "
                 type="primary"
                 size="small"
+                :disabled="writeDisabled"
                 @click="decisionPanelOpen = true"
               >
                 <ClipboardCheck :size="14" />{{
@@ -317,7 +319,7 @@
                 v-if="knowledgeUnitMode"
                 type="button"
                 class="batch-action-secondary"
-                :disabled="!bulkExcludeItems.length || batchResolving"
+                :disabled="writeDisabled || !bulkExcludeItems.length || batchResolving"
                 @click="confirmBulkOutcome('EXCLUDE')"
               >
                 批量不纳入
@@ -326,7 +328,7 @@
                 v-if="knowledgeUnitMode"
                 type="button"
                 class="batch-action-secondary"
-                :disabled="!bulkOutcomeItems('REQUEST_SOURCE_CHANGE').length || batchResolving"
+                :disabled="writeDisabled || !bulkOutcomeItems('REQUEST_SOURCE_CHANGE').length || batchResolving"
                 @click="confirmBulkOutcome('REQUEST_SOURCE_CHANGE')"
               >
                 批量退回
@@ -911,7 +913,9 @@
                         <button
                           type="button"
                           class="document-layout-save"
-                          :disabled="documentEditSaving || !documentBlockDraft.trim()"
+                          :disabled="
+                            writeDisabled || documentEditSaving || !documentBlockDraft.trim()
+                          "
                           @click="saveDocumentBlockEdit"
                         >
                           {{ documentEditSaving ? '保存中…' : '保存此处修改' }}
@@ -1614,18 +1618,21 @@
                                 <a-button
                                   size="small"
                                   :loading="duplicateResolving === activeRelation.relation_id"
+                                  :disabled="writeDisabled"
                                   @click="confirmDuplicateResolution(activeRelation, 'USE_SOURCE')"
                                   >保留来源一</a-button
                                 >
                                 <a-button
                                   size="small"
                                   :loading="duplicateResolving === activeRelation.relation_id"
+                                  :disabled="writeDisabled"
                                   @click="confirmDuplicateResolution(activeRelation, 'USE_TARGET')"
                                   >保留来源二</a-button
                                 >
                                 <a-button
                                   size="small"
                                   :loading="duplicateResolving === activeRelation.relation_id"
+                                  :disabled="writeDisabled"
                                   @click="
                                     confirmDuplicateResolution(activeRelation, 'KEEP_SEPARATE')
                                   "
@@ -1668,6 +1675,7 @@
                     size="small"
                     danger
                     class="cancel-change-request"
+                    :disabled="writeDisabled"
                     @click="confirmCancelChangeRequest(request)"
                     >取消修改任务</a-button
                   >
@@ -1720,7 +1728,10 @@
                 </p>
               </div>
               <div class="decision-heading-actions">
-                <a-button size="small" @click="transferOpen = !transferOpen"
+                <a-button
+                  size="small"
+                  :disabled="writeDisabled"
+                  @click="transferOpen = !transferOpen"
                   ><UserRoundCog :size="14" />转交</a-button
                 >
                 <button
@@ -1741,10 +1752,12 @@
                 class="field-control"
                 placeholder="选择知识管理员"
                 :options="reviewerOptions"
+                :disabled="writeDisabled"
               /><a-textarea
                 v-model:value="transferForm.comment"
                 :rows="2"
                 placeholder="说明转交原因"
+                :disabled="writeDisabled"
               />
               <div>
                 <a-button size="small" @click="transferOpen = false">取消</a-button
@@ -1752,6 +1765,7 @@
                   size="small"
                   type="primary"
                   :loading="transferring"
+                  :disabled="writeDisabled"
                   @click="transferPackage"
                   >确认转交</a-button
                 >
@@ -1770,7 +1784,9 @@
                   :key="outcome.value"
                   type="button"
                   :class="{ active: form.outcome === outcome.value }"
-                  :disabled="publishOutcome(outcome.value) && publishUnavailable"
+                  :disabled="
+                    writeDisabled || (publishOutcome(outcome.value) && publishUnavailable)
+                  "
                   @click="form.outcome = outcome.value"
                 >
                   <span>{{ outcome.label }}</span
@@ -1793,6 +1809,7 @@
                     type="button"
                     class="problem-tag"
                     :class="{ active: form.problem_tags.includes(tag.value) }"
+                    :disabled="writeDisabled"
                     @click="toggleProblemTag(tag.value)"
                   >
                     {{ tag.label }}
@@ -1804,6 +1821,7 @@
                 ><a-input
                   v-model:value="form.responsible_user_name"
                   placeholder="填写飞书原文修改负责人"
+                  :disabled="writeDisabled"
                 />
                 <p>后台不会修改飞书正文；责任人完成修改后，由下一次扫描自动重新打开审核。</p>
               </div>
@@ -1813,15 +1831,25 @@
                   v-model:value="form.decision_comment"
                   :rows="4"
                   :placeholder="decisionCommentPlaceholder"
+                  :disabled="writeDisabled"
                 />
               </div>
               <div class="decision-footer">
-                <a-button size="small" :loading="savingDraft" @click="saveDraft">保存草稿</a-button
+                <a-button
+                  size="small"
+                  :loading="savingDraft"
+                  :disabled="writeDisabled"
+                  @click="saveDraft"
+                  >保存草稿</a-button
                 ><a-button
                   type="primary"
                   size="small"
                   :loading="resolving"
-                  :disabled="!form.outcome || (publishOutcome(form.outcome) && publishUnavailable)"
+                  :disabled="
+                    writeDisabled ||
+                    !form.outcome ||
+                    (publishOutcome(form.outcome) && publishUnavailable)
+                  "
                   @click="resolveItem"
                   >提交审核结果</a-button
                 >
@@ -1871,7 +1899,8 @@ import { mergeChunks } from '@/utils/chunkUtils'
 
 const props = defineProps({
   sourceId: { type: String, default: '' },
-  targetReviewId: { type: [String, Object], default: '' }
+  targetReviewId: { type: [String, Object], default: '' },
+  writeDisabled: { type: Boolean, default: false }
 })
 const emit = defineEmits(['count-change', 'target-consumed', 'knowledge-change'])
 const packages = ref([])
@@ -2891,7 +2920,7 @@ function selectDocumentBlock(block) {
 }
 async function saveDocumentBlockEdit() {
   const block = selectedDocumentBlock.value
-  if (!block || !packageDetail.value || !documentBlockDraft.value.trim()) return
+  if (props.writeDisabled || !block || !packageDetail.value || !documentBlockDraft.value.trim()) return
   documentEditSaving.value = true
   try {
     const response = await governanceApi.saveReviewPackageLayoutEdit(selectedPackageId.value, {
@@ -3165,7 +3194,7 @@ function decisionPayload() {
   }
 }
 async function saveDraft() {
-  if (!packageDetail.value || !currentItem.value) return
+  if (props.writeDisabled || !packageDetail.value || !currentItem.value) return
   savingDraft.value = true
   try {
     const response = await governanceApi.saveReviewPackageDraft(packageDetail.value.package_id, {
@@ -3182,7 +3211,7 @@ async function saveDraft() {
   }
 }
 async function resolveItem() {
-  if (!packageDetail.value || !currentItem.value) return
+  if (props.writeDisabled || !packageDetail.value || !currentItem.value) return
   if (publishOutcome(form.outcome) && publishUnavailable.value) {
     message.warning(
       reviewContent.value.loading
@@ -3224,7 +3253,7 @@ async function resolveItem() {
   }
 }
 function confirmReopenExcludedItem() {
-  if (!currentItem.value?.can_reopen_exclusion || reopening.value) return
+  if (props.writeDisabled || !currentItem.value?.can_reopen_exclusion || reopening.value) return
   const itemTitle = currentItem.value.title || '该知识单元'
   Modal.confirm({
     title: '重新申请纳入',
@@ -3237,7 +3266,7 @@ function confirmReopenExcludedItem() {
   })
 }
 async function reopenExcludedItem() {
-  if (!currentItem.value?.review_item_id || reopening.value) return
+  if (props.writeDisabled || !currentItem.value?.review_item_id || reopening.value) return
   const reviewItemId = currentItem.value.review_item_id
   const itemTitle = currentItem.value.title || '该知识单元'
   const filtersChanged =
@@ -3262,7 +3291,7 @@ async function reopenExcludedItem() {
   }
 }
 function confirmWholePackage() {
-  if (!bulkActionableItems.value.length || batchResolving.value) return
+  if (props.writeDisabled || !bulkActionableItems.value.length || batchResolving.value) return
   const safeCount = bulkSafeItems.value.length
   const riskCount = bulkRiskCount.value
   if (!safeCount) {
@@ -3289,7 +3318,7 @@ function confirmWholePackage() {
   })
 }
 function confirmNoUpdate() {
-  if (!canConfirmNoUpdate.value || batchResolving.value) return
+  if (props.writeDisabled || !canConfirmNoUpdate.value || batchResolving.value) return
   Modal.confirm({
     title: '确认无需更新？',
     content:
@@ -3302,6 +3331,7 @@ function confirmNoUpdate() {
   })
 }
 function confirmBulkOutcome(outcome) {
+  if (props.writeDisabled) return
   const items = outcome === 'EXCLUDE' ? bulkExcludeItems.value : bulkOutcomeItems(outcome)
   if (!items.length || batchResolving.value) return
   const actionLabel = bulkOutcomeLabel(outcome)
@@ -3326,7 +3356,7 @@ function confirmBulkOutcome(outcome) {
   })
 }
 async function resolveBulkItems(items, outcomeOverride = '') {
-  if (!packageDetail.value || !items?.length) return
+  if (props.writeDisabled || !packageDetail.value || !items?.length) return
   batchResolving.value = true
   try {
     const response =
@@ -3386,7 +3416,7 @@ async function resolveBulkItems(items, outcomeOverride = '') {
   }
 }
 async function transferPackage() {
-  if (!packageDetail.value) return
+  if (props.writeDisabled || !packageDetail.value) return
   if (!transferForm.assignee_id || !transferForm.comment.trim()) {
     message.warning('请选择转交对象并填写转交原因')
     return
@@ -3408,6 +3438,7 @@ async function transferPackage() {
   }
 }
 function confirmCancelChangeRequest(request) {
+  if (props.writeDisabled) return
   Modal.confirm({
     title: '取消资料修改任务？',
     content: '取消后该轮修改任务将关闭，审核记录仍会保留。',
@@ -3965,6 +3996,7 @@ async function loadDuplicateCandidates(comparison) {
   }
 }
 function confirmDuplicateResolution(comparison, strategy) {
+  if (props.writeDisabled) return
   const candidate = duplicateCandidates[comparison.relation_id]
   if (!candidate || duplicateResolving.value) return
   const primaryTitle =
@@ -3990,6 +4022,7 @@ function duplicateActionHelp(matchCount) {
   return `以下处理会作用于全部 ${matchCount || 0} 个匹配片段；两篇文档的独有内容继续正常审核，重复内容变化时再重新判断。`
 }
 async function resolveDuplicateRelation(relationId, strategy) {
+  if (props.writeDisabled) return
   duplicateResolving.value = relationId
   try {
     const response = await governanceApi.resolveDuplicateRelation(relationId, {

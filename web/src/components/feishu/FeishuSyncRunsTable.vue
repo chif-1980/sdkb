@@ -34,9 +34,16 @@
           </div>
         </template>
         <template v-else-if="column.key === 'status'">
-          <a-tag :color="runStatus(record.status).color">{{ runStatus(record.status).label }}</a-tag>
-          <div v-if="isActive(record.status)" class="progress-track" aria-label="扫描进行中">
-            <span class="progress-bar"></span>
+          <a-tag :color="displayStatus(record).color">{{ displayStatus(record).label }}</a-tag>
+          <div v-if="isActive(record)" class="progress-track" aria-label="扫描进行中">
+            <span
+              class="progress-bar"
+              :class="{ indeterminate: !Number(record.progress) }"
+              :style="{ width: `${progressWidth(record.progress)}%` }"
+            ></span>
+          </div>
+          <div v-if="isActive(record) && record.progress_message" class="progress-message">
+            {{ record.progress_message }}
           </div>
           <a-tooltip v-if="record.error_summary" :title="record.error_summary">
             <div class="error-summary">{{ record.error_summary }}</div>
@@ -81,8 +88,21 @@ function runStatus(value) {
   return statusMap[value] || { label: value || '未知', color: 'default' }
 }
 
-function isActive(status) {
-  return status === 'queued' || status === 'running'
+function displayStatus(record) {
+  if (record?.status === 'succeeded' && isActive(record)) {
+    return { label: '资料加工中', color: 'processing' }
+  }
+  return runStatus(record?.status)
+}
+
+function isActive(record) {
+  if (record?.status === 'queued' || record?.status === 'running') return true
+  return Boolean(record?.task_status && !['success', 'failed', 'cancelled'].includes(record.task_status))
+}
+
+function progressWidth(value) {
+  const progress = Number(value)
+  return Number.isFinite(progress) && progress > 0 ? Math.min(100, Math.max(4, progress)) : 35
 }
 
 function formatTime(value) {
@@ -139,10 +159,24 @@ function customRow(record) {
 
 .progress-bar {
   display: block;
-  width: 35%;
   height: 100%;
   background: var(--main-color);
+  transition: width 240ms ease;
+}
+
+.progress-bar.indeterminate {
+  width: 35% !important;
   animation: progress 1.4s linear infinite;
+}
+
+.progress-message {
+  max-width: 220px;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .error-summary {

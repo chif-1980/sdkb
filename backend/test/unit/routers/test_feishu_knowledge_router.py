@@ -20,6 +20,7 @@ from yuxi.knowledge.utils.kb_utils import prepare_item_metadata
 from yuxi.repositories.feishu_knowledge_repository import ConcurrentSyncRunError, FeishuKnowledgeRepository
 from yuxi.storage.postgres.models_business import Base, User
 from yuxi.storage.postgres.models_knowledge import (
+    FeishuKnowledgeUnit,
     FeishuMaterialVersion,
     FeishuProcessingEvent,
     FeishuSource,
@@ -2503,6 +2504,23 @@ async def test_query_endpoints_return_sources_runs_materials_and_events(review_f
             event_type="parsed",
         )
     )
+    review_fixture.add(
+        FeishuKnowledgeUnit(
+            unit_id="unit-new",
+            unit_key="unit-key-new",
+            lineage_key="lineage-new",
+            version_id="version-new",
+            item_id="item-1",
+            unit_index=0,
+            unit_type="SECTION",
+            title="待审核知识单元",
+            content="这是已解析但尚未发布的知识单元。",
+            content_hash="unit-hash-new",
+            recommended_outcome="REVIEW",
+            recommendation_reason="需要人工审核",
+            status="ACTIVE",
+        )
+    )
     await review_fixture.commit()
 
     sources = await router_module.list_sources(db=review_fixture)
@@ -2532,7 +2550,9 @@ async def test_query_endpoints_return_sources_runs_materials_and_events(review_f
     assert runs["items"][0]["run_id"] == run["run_id"] == "run-1"
     assert runs["items"][0]["operator_id"] == run["operator_id"] == "admin-1"
     assert {entry["version_id"] for entry in materials["items"]} == {"version-old", "version-new"}
+    assert next(entry for entry in materials["items"] if entry["version_id"] == "version-new")["chunk_count"] == 1
     assert material["version_id"] == "version-new"
+    assert material["chunk_count"] == 1
     assert material["source_url"] is None
     assert events["items"][0]["event_type"] == "parsed"
 
