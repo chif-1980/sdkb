@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from yuxi.governance.notification_service import NotificationService
 from yuxi.storage.postgres.manager import pg_manager
@@ -22,6 +23,7 @@ class FeishuRetryCoordinator:
 
     RETRYABLE_STATUSES = {"parse_failed", "publish_failed"}
     MAX_RETRIES = 3
+    CLAIM_TIMEOUT = timedelta(hours=1)
 
     def __init__(self, *, interval_seconds: float | None = None) -> None:
         configured = interval_seconds
@@ -33,31 +35,56 @@ class FeishuRetryCoordinator:
 
     async def run_once(self, *, now: datetime | None = None) -> dict[str, int]:
         current_time = self._as_utc(now or utc_now())
-        async with pg_manager.get_async_session_context() as session:
-            versions = list(
-                await session.scalars(
-                    select(FeishuMaterialVersion).where(
-                        FeishuMaterialVersion.processing_status.in_(self.RETRYABLE_STATUSES),
-                        FeishuMaterialVersion.retry_count < self.MAX_RETRIES,
-                    )
-                )
-            )
-
-        due = [version for version in versions if self._is_due(version, current_time)]
+        due = await self._claim_due_versions(current_time)
         retried = 0
         failed = 0
-        for version in due:
+        for version_id, claim_token in due:
             try:
-                await self._retry_and_enqueue(version.version_id)
-                retried += 1
+                if await self._retry_and_enqueue(version_id, claim_token):
+                    retried += 1
             except Exception as exc:  # noqa: BLE001
                 failed += 1
-                logger.warning("Governance retry failed for {}: {}", version.version_id, exc)
+                logger.warning("Governance retry failed for {}: {}", version_id, exc)
 
         notified = await self._notify_due_reviews(current_time)
-        return {"due": len(due), "retried": retried, "failed": failed, "expiry_notified": notified}
+        notification_retried = await self._retry_failed_notifications(current_time)
+        return {
+            "due": len(due),
+            "retried": retried,
+            "failed": failed,
+            "expiry_notified": notified,
+            "notification_retried": notification_retried,
+        }
 
-    async def _retry_and_enqueue(self, version_id: str) -> None:
+    async def _claim_due_versions(self, now: datetime) -> list[tuple[str, str]]:
+        """Atomically lease due rows so multiple API instances do not duplicate retries."""
+        stale_before = now - self.CLAIM_TIMEOUT
+        claimed: list[tuple[str, str]] = []
+        async with pg_manager.get_async_session_context() as session:
+            statement = (
+                select(FeishuMaterialVersion)
+                .where(
+                    FeishuMaterialVersion.processing_status.in_(self.RETRYABLE_STATUSES),
+                    FeishuMaterialVersion.retry_count < self.MAX_RETRIES,
+                    or_(
+                        FeishuMaterialVersion.retry_claimed_at.is_(None),
+                        FeishuMaterialVersion.retry_claimed_at < stale_before,
+                    ),
+                )
+                .with_for_update(skip_locked=True)
+            )
+            versions = list(await session.scalars(statement))
+            for version in versions:
+                if not self._is_due(version, now):
+                    continue
+                token = f"retry_{uuid.uuid4().hex}"
+                version.retry_claimed_at = now
+                version.retry_claim_token = token
+                claimed.append((version.version_id, token))
+            await session.commit()
+        return claimed
+
+    async def _retry_and_enqueue(self, version_id: str, claim_token: str) -> bool:
         # Import at call time: the router owns the existing task enqueue functions.
         from server.routers.feishu_knowledge_router import (
             FeishuReviewService,
@@ -66,7 +93,16 @@ class FeishuRetryCoordinator:
         )
 
         async with pg_manager.get_async_session_context() as session:
+            version = await session.scalar(
+                select(FeishuMaterialVersion)
+                .where(FeishuMaterialVersion.version_id == version_id)
+                .with_for_update()
+            )
+            if version is None or version.retry_claim_token != claim_token:
+                return False
             material = await FeishuReviewService(session).retry(version_id, operator_id="system-retry")
+            version.retry_claimed_at = None
+            version.retry_claim_token = None
             await session.commit()
 
         enqueue = _enqueue_publish if material.processing_status == "publish_queued" else _enqueue_processing
@@ -79,8 +115,17 @@ class FeishuRetryCoordinator:
                     await service.mark_publish_failed(version_id, message=str(exc))
                 else:
                     await service.mark_processing_queue_failed(version_id, message=str(exc))
+                failed_version = await session.scalar(
+                    select(FeishuMaterialVersion)
+                    .where(FeishuMaterialVersion.version_id == version_id)
+                    .with_for_update()
+                )
+                if failed_version is not None:
+                    failed_version.retry_claimed_at = None
+                    failed_version.retry_claim_token = None
                 await session.commit()
             raise
+        return True
 
     async def _notify_due_reviews(self, now: datetime) -> int:
         today = now.astimezone(UTC).date().isoformat()
@@ -111,6 +156,10 @@ class FeishuRetryCoordinator:
                     feishu=True,
                 )
             return created
+
+    async def _retry_failed_notifications(self, now: datetime) -> int:
+        async with pg_manager.get_async_session_context() as session:
+            return await NotificationService(session).retry_failed_feishu(now=now)
 
     @classmethod
     def _is_due(cls, version: FeishuMaterialVersion, now: datetime) -> bool:

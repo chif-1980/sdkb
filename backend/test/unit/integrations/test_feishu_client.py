@@ -130,6 +130,30 @@ async def test_first_business_request_exchanges_app_credentials_for_tenant_token
 
 
 @pytest.mark.asyncio
+async def test_send_text_message_uses_open_id_and_text_payload():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == TENANT_TOKEN_PATH:
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        assert request.method == "POST"
+        assert request.url.params["receive_id_type"] == "open_id"
+        assert request.headers["authorization"] == "Bearer test-tenant-token"
+        payload = json.loads(request.content)
+        assert payload["receive_id"] == "ou_user"
+        assert payload["msg_type"] == "text"
+        assert json.loads(payload["content"]) == {"text": "标题\n正文"}
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_1"}})
+
+    client = _client(handler)
+    result = await client.send_text_message(open_id="ou_user", text="标题\n正文")
+    assert result["data"]["message_id"] == "om_1"
+    assert len(requests) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_tenant_token_is_reused_while_fresh() -> None:
     auth_attempts = 0
 

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.integrations.feishu.client import FeishuClient
+from yuxi.storage.postgres.models_product import FeishuUserBinding
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.postgres.models_knowledge import FeishuNotificationDelivery
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -16,9 +19,13 @@ def governance_automation_mode() -> str:
     return os.getenv("YUXI_GOVERNANCE_AUTOMATION_MODE", "observe").strip().lower()
 
 
+NOTIFICATION_RETRY_DELAYS = (1, 5, 15)
+
+
 class NotificationService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, feishu_client: FeishuClient | None = None) -> None:
         self.session = session
+        self.feishu_client = feishu_client
 
     async def create(
         self,
@@ -59,6 +66,8 @@ class NotificationService:
             async with self.session.begin_nested():
                 self.session.add(notification)
                 await self.session.flush()
+            if normalized_channel == "FEISHU" and not in_observe_mode:
+                await self._deliver_feishu(notification)
             return notification, True
         except IntegrityError:
             existing = await self.session.scalar(
@@ -114,6 +123,88 @@ class NotificationService:
                 )
         return created
 
+    async def retry_failed_feishu(self, *, now: datetime, limit: int = 50) -> int:
+        """Retry due Feishu deliveries without affecting the business task."""
+        current = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+        rows = list(
+            await self.session.scalars(
+                select(FeishuNotificationDelivery)
+                .where(
+                    FeishuNotificationDelivery.channel == "FEISHU",
+                    FeishuNotificationDelivery.status == "FAILED",
+                    FeishuNotificationDelivery.retry_count < len(NOTIFICATION_RETRY_DELAYS),
+                    or_(
+                        FeishuNotificationDelivery.next_retry_at.is_(None),
+                        FeishuNotificationDelivery.next_retry_at <= current,
+                    ),
+                )
+                .order_by(FeishuNotificationDelivery.created_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        retried = 0
+        for notification in rows:
+            await self._attempt_feishu_delivery(notification, current)
+            retried += 1
+        return retried
+
+    async def _deliver_feishu(self, notification: FeishuNotificationDelivery) -> None:
+        try:
+            open_id = await self.session.scalar(
+                select(FeishuUserBinding.feishu_open_id)
+                .join(User, User.id == FeishuUserBinding.user_id)
+                .where(
+                    User.uid == notification.recipient_id,
+                    User.is_deleted == 0,
+                    FeishuUserBinding.authorization_status == "ACTIVE",
+                )
+            )
+            if not open_id:
+                raise LookupError(f"No active Feishu binding for recipient {notification.recipient_id}")
+
+            client = self.feishu_client
+            owns_client = client is None
+            if client is None:
+                client = FeishuClient()
+            await client.send_text_message(
+                open_id=str(open_id),
+                text=f"{notification.title}\n{notification.body}",
+            )
+            notification.status = "DELIVERED"
+            notification.delivered_at = utc_now_naive()
+            notification.error_message = None
+            notification.next_retry_at = None
+        except Exception as exc:  # noqa: BLE001
+            self._mark_delivery_failed(notification, exc)
+        finally:
+            if "owns_client" in locals() and owns_client:
+                await client.aclose()
+
+    async def _attempt_feishu_delivery(self, notification: FeishuNotificationDelivery, now: datetime) -> None:
+        await self._deliver_feishu(notification)
+        if notification.status == "FAILED":
+            notification.next_retry_at = self._next_retry_at(notification.retry_count, now)
+
+    @staticmethod
+    def _mark_delivery_failed(notification: FeishuNotificationDelivery, error: Exception) -> None:
+        retry_count = int(notification.retry_count or 0) + 1
+        notification.retry_count = retry_count
+        notification.status = "FAILED"
+        notification.error_message = str(error)[:2000] or type(error).__name__
+        notification.next_retry_at = (
+            utc_now_naive() + timedelta(minutes=NOTIFICATION_RETRY_DELAYS[retry_count - 1])
+            if retry_count <= len(NOTIFICATION_RETRY_DELAYS)
+            else None
+        )
+
+    @staticmethod
+    def _next_retry_at(retry_count: int, now: datetime) -> datetime | None:
+        if retry_count <= 0 or retry_count > len(NOTIFICATION_RETRY_DELAYS):
+            return None
+        base = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+        return base + timedelta(minutes=NOTIFICATION_RETRY_DELAYS[retry_count - 1])
+
     async def list_for_recipient(
         self,
         recipient_id: str,
@@ -167,6 +258,7 @@ class NotificationService:
             "body": notification.body,
             "status": notification.status,
             "retryCount": notification.retry_count,
+            "nextRetryAt": notification.next_retry_at.isoformat() if notification.next_retry_at else None,
             "error": notification.error_message,
             "readAt": notification.read_at.isoformat() if notification.read_at else None,
             "deliveredAt": notification.delivered_at.isoformat() if notification.delivered_at else None,

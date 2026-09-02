@@ -64,6 +64,42 @@ async def test_due_failed_version_is_retried_and_enqueued(monkeypatch):
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_due_failed_version_is_claimed_once(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add(
+            FeishuMaterialVersion(
+                version_id="version-claim-once",
+                item_id="item-claim-once",
+                revision="1",
+                content_hash="hash-claim-once",
+                processing_status="parse_failed",
+                retry_count=0,
+                processing_params={
+                    "governance_retry_next_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+                },
+            )
+        )
+        await session.commit()
+
+        class Manager:
+            @asynccontextmanager
+            async def get_async_session_context(self):
+                yield session
+
+        monkeypatch.setattr(retry_module, "pg_manager", Manager())
+        first = await FeishuRetryCoordinator(interval_seconds=5)._claim_due_versions(datetime.now(UTC))
+        second = await FeishuRetryCoordinator(interval_seconds=5)._claim_due_versions(datetime.now(UTC))
+
+        assert len(first) == 1
+        assert second == []
+    await engine.dispose()
+
+
 def test_retry_coordinator_ignores_missing_schedule_and_exhausted_retries():
     now = datetime.now(UTC)
     missing = FeishuMaterialVersion(

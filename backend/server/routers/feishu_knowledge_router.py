@@ -514,6 +514,8 @@ class FeishuReviewService:
             from_status = version.processing_status
             version.processing_status = "publish_queued" if from_status == "publish_failed" else "processing_queued"
             version.retry_count = (version.retry_count or 0) + 1
+            version.retry_claimed_at = None
+            version.retry_claim_token = None
             version.error_code = None
             version.error_message = None
             params = dict(version.processing_params or {})

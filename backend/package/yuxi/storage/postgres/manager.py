@@ -527,6 +527,12 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS sync_run_id VARCHAR(64)",
+            "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS retry_claimed_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS retry_claim_token VARCHAR(64)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_material_versions_retry_claim "
+                "ON feishu_material_versions(retry_claimed_at, processing_status)"
+            ),
             "ALTER TABLE IF EXISTS feishu_sources ADD COLUMN IF NOT EXISTS "
             "scan_scope VARCHAR(16) NOT NULL DEFAULT 'root'",
             "ALTER TABLE IF EXISTS feishu_sources ALTER COLUMN scan_scope SET DEFAULT 'root'",
@@ -603,6 +609,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 body TEXT NOT NULL,
                 status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
                 retry_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TIMESTAMPTZ,
                 error_message TEXT,
                 read_at TIMESTAMPTZ,
                 delivered_at TIMESTAMPTZ,
@@ -610,6 +617,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """,
+            "ALTER TABLE IF EXISTS feishu_notification_deliveries ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ",
             (
                 "CREATE INDEX IF NOT EXISTS ix_feishu_notification_deliveries_recipient_status "
                 "ON feishu_notification_deliveries(recipient_id, status)"

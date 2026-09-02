@@ -347,6 +347,7 @@ class KnowledgeLifecycleService:
             event_key="source-change-created",
             title="知识来源需要复核",
             body=f"{item.title or '未命名资料'}：{reason}",
+            feishu=bool(change_request.responsible_user_id),
         )
         return self._revision_result(package, review_item, change_request, idempotent_replay=False)
 

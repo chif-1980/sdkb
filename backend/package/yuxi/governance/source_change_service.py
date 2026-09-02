@@ -141,7 +141,7 @@ class SourceChangeService:
                     event_key=f"source-version-received:{version.version_id}",
                     title="飞书来源有新版本",
                     body=f"{source_item.title or '未命名资料'} 已发现新的飞书版本，请复核影响内容。",
-                    feishu=package.risk_level == "HIGH",
+                    feishu=package.risk_level == "HIGH" or bool(package.assignee_id),
                 )
         await self.session.flush()
         return {
