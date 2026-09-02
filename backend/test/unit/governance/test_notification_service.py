@@ -2,7 +2,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from yuxi.governance.notification_service import NotificationService
+from yuxi.governance.notification_service import (
+    NotificationService,
+    auto_close_enabled,
+    feishu_notifications_enabled,
+    governance_automation_mode,
+    in_app_notifications_enabled,
+)
 from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import FeishuNotificationDelivery
 from yuxi.storage.postgres.models_business import User
@@ -10,7 +16,8 @@ from yuxi.storage.postgres.models_product import FeishuUserBinding
 
 
 @pytest.mark.asyncio
-async def test_notification_is_idempotent_and_read_is_scoped():
+async def test_notification_is_idempotent_and_read_is_scoped(monkeypatch):
+    monkeypatch.setenv("YUXI_GOVERNANCE_AUTOMATION_MODE", "in_app")
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -61,8 +68,47 @@ async def test_notification_is_idempotent_and_read_is_scoped():
         )
         assert feishu_created is True
         assert feishu.status == "SUPPRESSED"
-        assert feishu.error_message == "飞书通知在观察模式下未发送"
+        assert feishu.error_message == "飞书通知在当前自动化阶段未发送"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_observe_mode_records_but_does_not_expose_in_app_notification(monkeypatch):
+    monkeypatch.setenv("YUXI_GOVERNANCE_AUTOMATION_MODE", "observe")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        notification, created = await NotificationService(session).create(
+            recipient_id="admin-a",
+            channel="IN_APP",
+            object_type="REVIEW_PACKAGE",
+            object_id="package-observe",
+            idempotency_key="package-observe:admin-a",
+            title="观察模式待办",
+            body="只记录，不提醒",
+        )
+
+        assert created is True
+        assert notification.status == "SUPPRESSED"
+        assert (await NotificationService(session).list_for_recipient("admin-a"))["items"] == []
+    await engine.dispose()
+
+
+def test_automation_stages_are_safe_and_sequential(monkeypatch):
+    expectations = {
+        "observe": (False, False, False),
+        "in_app": (True, False, False),
+        "feishu": (True, True, False),
+        "active": (True, True, True),
+    }
+    for mode, expected in expectations.items():
+        monkeypatch.setenv("YUXI_GOVERNANCE_AUTOMATION_MODE", mode)
+        assert (in_app_notifications_enabled(), feishu_notifications_enabled(), auto_close_enabled()) == expected
+
+    monkeypatch.setenv("YUXI_GOVERNANCE_AUTOMATION_MODE", "typo")
+    assert governance_automation_mode() == "observe"
 
 
 @pytest.mark.asyncio
@@ -151,4 +197,31 @@ async def test_active_feishu_notification_is_delivered_and_failure_is_recorded(m
         assert missing_binding.status == "FAILED"
         assert missing_binding.retry_count == 1
         assert "No active Feishu binding" in (missing_binding.error_message or "")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_suppressed_notifications_activate_when_stage_advances(monkeypatch):
+    monkeypatch.setenv("YUXI_GOVERNANCE_AUTOMATION_MODE", "observe")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        notification, _ = await NotificationService(session).create(
+            recipient_id="admin-a",
+            channel="IN_APP",
+            object_type="REVIEW_PACKAGE",
+            object_id="package-activate",
+            idempotency_key="package-activate:admin-a",
+            title="待激活提醒",
+            body="阶段开启后可见",
+        )
+        monkeypatch.setenv("YUXI_GOVERNANCE_AUTOMATION_MODE", "in_app")
+
+        activated = await NotificationService(session).activate_suppressed()
+
+        assert activated == 1
+        assert notification.status == "DELIVERED"
+        assert len((await NotificationService(session).list_for_recipient("admin-a"))["items"]) == 1
     await engine.dispose()

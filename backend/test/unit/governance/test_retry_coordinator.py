@@ -3,13 +3,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import server.routers.feishu_knowledge_router as feishu_router
 import yuxi.governance.retry_coordinator as retry_module
 from yuxi.governance.retry_coordinator import FeishuRetryCoordinator
 from yuxi.storage.postgres.models_business import Base
-from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion
+from yuxi.storage.postgres.models_knowledge import FeishuMaterialVersion, FeishuReviewItem, FeishuReviewPackage
 
 
 @pytest.mark.asyncio
@@ -149,3 +150,95 @@ def test_failure_retry_schedule_uses_one_five_and_fifteen_minutes(monkeypatch):
         (now + timedelta(minutes=15)).isoformat(),
         None,
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode, expected_closed", [("observe", 0), ("active", 1)])
+async def test_review_quality_is_evaluated_and_auto_close_is_stage_gated(monkeypatch, mode, expected_closed):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add(
+            FeishuReviewPackage(
+                package_id="package-auto-close",
+                package_key="source-version:auto-close",
+                source_id="source-auto-close",
+                workflow_status="OPEN",
+                lock_version=1,
+                title_snapshot="无变化资料",
+            )
+        )
+        session.add(
+            FeishuReviewItem(
+                review_item_id="review-item-auto-close",
+                package_id="package-auto-close",
+                candidate_key="unit:unit-auto-close",
+                review_type="UPDATE",
+                subject_type="KNOWLEDGE_UNIT",
+                subject_id="unit-auto-close",
+                item_status="PENDING",
+            )
+        )
+        await session.commit()
+
+        class Manager:
+            @asynccontextmanager
+            async def get_async_session_context(self):
+                yield session
+
+        class FakeKnowledgeUnitService:
+            def __init__(self, _session):
+                pass
+
+            async def ensure_for_package(self, _package):
+                return []
+
+        class FakeQualityGateService:
+            def __init__(self, _session):
+                pass
+
+            async def evaluate_package(self, package_id):
+                assert package_id == "package-auto-close"
+                return {"autoCloseEligible": True}
+
+        resolved = []
+
+        class FakeReviewPackageService:
+            def __init__(self, _session):
+                pass
+
+            async def resolve(self, package_id, payload, *, operator_id, automated=False):
+                resolved.append((package_id, payload, operator_id, automated))
+                return {"reject_candidates": []}
+
+        class FakeNotificationService:
+            def __init__(self, _session):
+                pass
+
+            async def notify_admins(self, **_kwargs):
+                return 0
+
+        monkeypatch.setattr(retry_module, "pg_manager", Manager())
+        monkeypatch.setattr(retry_module, "KnowledgeUnitService", FakeKnowledgeUnitService)
+        monkeypatch.setattr(retry_module, "QualityGateService", FakeQualityGateService)
+        monkeypatch.setattr(retry_module, "ReviewPackageService", FakeReviewPackageService)
+        monkeypatch.setattr(retry_module, "NotificationService", FakeNotificationService)
+        monkeypatch.setenv("YUXI_GOVERNANCE_AUTOMATION_MODE", mode)
+
+        evaluated, closed = await FeishuRetryCoordinator(interval_seconds=5)._evaluate_and_auto_close_reviews()
+
+        assert evaluated == 1
+        assert closed == expected_closed
+        if mode == "observe":
+            assert resolved == []
+        else:
+            assert len(resolved) == 1
+            assert resolved[0][2:] == ("system-governance-auto-close", True)
+
+        package = await session.scalar(
+            select(FeishuReviewPackage).where(FeishuReviewPackage.package_id == "package-auto-close")
+        )
+        assert package.workflow_status == "OPEN"
+    await engine.dispose()

@@ -16,7 +16,20 @@ from yuxi.utils.datetime_utils import utc_now_naive
 
 
 def governance_automation_mode() -> str:
-    return os.getenv("YUXI_GOVERNANCE_AUTOMATION_MODE", "observe").strip().lower()
+    mode = os.getenv("YUXI_GOVERNANCE_AUTOMATION_MODE", "observe").strip().lower()
+    return mode if mode in {"observe", "in_app", "feishu", "active"} else "observe"
+
+
+def in_app_notifications_enabled() -> bool:
+    return governance_automation_mode() in {"in_app", "feishu", "active"}
+
+
+def feishu_notifications_enabled() -> bool:
+    return governance_automation_mode() in {"feishu", "active"}
+
+
+def auto_close_enabled() -> bool:
+    return governance_automation_mode() == "active"
 
 
 NOTIFICATION_RETRY_DELAYS = (1, 5, 15)
@@ -46,7 +59,15 @@ class NotificationService:
 
         now = utc_now_naive()
         normalized_channel = channel.upper()
-        in_observe_mode = governance_automation_mode() == "observe"
+        delivery_enabled = (
+            in_app_notifications_enabled() if normalized_channel == "IN_APP" else feishu_notifications_enabled()
+        )
+        if not delivery_enabled:
+            initial_status = "SUPPRESSED"
+        elif normalized_channel == "IN_APP":
+            initial_status = "DELIVERED"
+        else:
+            initial_status = "PENDING"
         notification = FeishuNotificationDelivery(
             notification_id=f"notification_{uuid.uuid4().hex}",
             recipient_id=recipient_id,
@@ -56,17 +77,19 @@ class NotificationService:
             idempotency_key=idempotency_key,
             title=title,
             body=body,
-            status=("DELIVERED" if normalized_channel == "IN_APP" else "SUPPRESSED" if in_observe_mode else "PENDING"),
-            delivered_at=now if normalized_channel == "IN_APP" else None,
+            status=initial_status,
+            delivered_at=now if normalized_channel == "IN_APP" and delivery_enabled else None,
             error_message=(
-                "飞书通知在观察模式下未发送" if normalized_channel == "FEISHU" and in_observe_mode else None
+                f"{('系统提醒' if normalized_channel == 'IN_APP' else '飞书通知')}在当前自动化阶段未发送"
+                if not delivery_enabled
+                else None
             ),
         )
         try:
             async with self.session.begin_nested():
                 self.session.add(notification)
                 await self.session.flush()
-            if normalized_channel == "FEISHU" and not in_observe_mode:
+            if normalized_channel == "FEISHU" and delivery_enabled:
                 await self._deliver_feishu(notification)
             return notification, True
         except IntegrityError:
@@ -149,6 +172,40 @@ class NotificationService:
             retried += 1
         return retried
 
+    async def activate_suppressed(self, *, limit: int = 100) -> int:
+        """Activate recorded notification intents when the rollout stage advances."""
+        enabled_channels = []
+        if in_app_notifications_enabled():
+            enabled_channels.append("IN_APP")
+        if feishu_notifications_enabled():
+            enabled_channels.append("FEISHU")
+        if not enabled_channels:
+            return 0
+
+        rows = list(
+            await self.session.scalars(
+                select(FeishuNotificationDelivery)
+                .where(
+                    FeishuNotificationDelivery.status == "SUPPRESSED",
+                    FeishuNotificationDelivery.channel.in_(enabled_channels),
+                )
+                .order_by(FeishuNotificationDelivery.created_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        activated = 0
+        for notification in rows:
+            notification.error_message = None
+            if notification.channel == "IN_APP":
+                notification.status = "DELIVERED"
+                notification.delivered_at = utc_now_naive()
+            else:
+                notification.status = "PENDING"
+                await self._deliver_feishu(notification)
+            activated += 1
+        return activated
+
     async def _deliver_feishu(self, notification: FeishuNotificationDelivery) -> None:
         try:
             open_id = await self.session.scalar(
@@ -216,6 +273,7 @@ class NotificationService:
         statement = select(FeishuNotificationDelivery).where(
             FeishuNotificationDelivery.recipient_id == recipient_id,
             FeishuNotificationDelivery.channel == "IN_APP",
+            FeishuNotificationDelivery.status == "DELIVERED",
         )
         if unread_only:
             statement = statement.where(FeishuNotificationDelivery.read_at.is_(None))

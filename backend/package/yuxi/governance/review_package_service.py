@@ -464,10 +464,12 @@ class ReviewPackageService:
         payload: ReviewPackageResolveRequest,
         *,
         operator_id: str,
+        automated: bool = False,
     ) -> dict:
         package = await self._load_package(package_id, lock=True)
         self._assert_not_terminal(package)
-        self._claim_or_assert_assignee(package, operator_id)
+        if not automated:
+            self._claim_or_assert_assignee(package, operator_id)
         items = await self._load_items(package.package_id, lock=True)
         items_by_id = {item.review_item_id: item for item in items}
 
@@ -526,6 +528,7 @@ class ReviewPackageService:
                 "decision_comment": decision.decision_comment,
                 "applicability_scope": scope,
                 "layout_edits": layout_edits,
+                "automated": automated,
             }
             item.decided_by = operator_id
             item.decided_at = now
@@ -558,6 +561,7 @@ class ReviewPackageService:
                     "outcome": decision.outcome,
                     "internal_action": action,
                     "request_id": payload.request_id,
+                    "automated": automated,
                 },
             )
 

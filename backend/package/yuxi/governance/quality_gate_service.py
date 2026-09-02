@@ -8,7 +8,14 @@ from datetime import UTC
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.governance.domain import CrossDocumentRelationType, ReviewSubjectType
+from yuxi.governance.domain import (
+    CrossDocumentRelationType,
+    ReviewItemStatus,
+    ReviewPackageStatus,
+    ReviewSubjectType,
+    ReviewTriggerType,
+    ReviewType,
+)
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuKnowledgeUnit,
@@ -31,6 +38,7 @@ QUALITY_DIMENSION_MAX = {
 FAILED_PROCESSING_STATUSES = {"parse_failed", "publish_failed"}
 OPEN_RELATION_STATUSES = {"open", "pending"}
 IMAGE_SEGMENT_TYPES = {"image", "figure", "ocr", "media"}
+MAX_AUTO_CLOSE_ITEMS = 500
 
 
 def _db_utc(value):
@@ -246,12 +254,32 @@ class QualityGateService:
         layout_changed = self._layout_signature(current_segments) != self._layout_signature(previous_segments)
         has_previous_evidence = bool(previous_version and previous_segments and current_segments)
         all_units_unchanged = bool(units) and all((unit.change_type or "").upper() == "UNCHANGED" for unit in units)
+        pending_items = [item for item in review_items if item.item_status == ReviewItemStatus.PENDING]
+        pending_unit_ids = {
+            item.subject_id for item in pending_items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT
+        }
+        auto_close_review_shape = bool(pending_items) and bool(units) and all(
+            item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT
+            and item.review_type == ReviewType.UPDATE
+            and not item.problem_tags
+            and not (item.evidence_json or {}).get("manual_review_required")
+            for item in pending_items
+        )
+        auto_close_review_shape = bool(
+            auto_close_review_shape
+            and len(pending_items) <= MAX_AUTO_CLOSE_ITEMS
+            and len(pending_items) == len(pending_unit_ids) == len(units)
+            and pending_unit_ids == {unit.unit_id for unit in units}
+            and getattr(package, "trigger_type", ReviewTriggerType.SOURCE_VERSION) == ReviewTriggerType.SOURCE_VERSION
+            and getattr(package, "workflow_status", ReviewPackageStatus.OPEN) == ReviewPackageStatus.OPEN
+        )
         auto_close_eligible = bool(
             has_previous_evidence
             and parsing_complete
             and not blockers
             and not relations
             and all_units_unchanged
+            and auto_close_review_shape
             and not text_changed
             and not image_changed
             and not layout_changed
