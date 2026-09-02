@@ -12,6 +12,8 @@ import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetail
 import FeishuMaterialTable from '@/components/feishu/FeishuMaterialTable.vue'
 import FeishuKnowledgeView from './FeishuKnowledgeView.vue'
 
+const taskerStoreMock = vi.hoisted(() => ({ registerQueuedTask: vi.fn() }))
+
 vi.mock('@/apis/base', () => ({
   apiAdminGet: vi.fn(),
   apiAdminPatch: vi.fn(),
@@ -28,6 +30,10 @@ vi.mock('qrcode', () => ({
   default: {
     toDataURL: vi.fn()
   }
+}))
+
+vi.mock('@/stores/tasker', () => ({
+  useTaskerStore: () => taskerStoreMock
 }))
 
 vi.mock('ant-design-vue', async (importOriginal) => {
@@ -1043,8 +1049,15 @@ describe('FeishuKnowledgeView', () => {
     expect(fullButton.attributes('data-loading')).toBe('true')
     expect(incrementalButton.attributes('disabled')).toBeDefined()
 
-    resolveScan({ run_id: 'run-1', status: 'queued' })
+    resolveScan({ task_id: 'task-1', run_id: 'run-1', status: 'queued' })
     await flushPromises()
+    expect(taskerStoreMock.registerQueuedTask).toHaveBeenCalledWith({
+      task_id: 'task-1',
+      name: '全量扫描 · 飞书产品资料',
+      task_type: 'feishu_scan',
+      message: '扫描任务已排队',
+      payload: { source_id: 'source-1', run_id: 'run-1', mode: 'full' }
+    })
     expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeDefined()
   })

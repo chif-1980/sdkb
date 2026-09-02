@@ -5,6 +5,7 @@ import { message, Modal } from 'ant-design-vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apiAdminGet, apiAdminPatch, apiAdminPost } from '@/apis/base'
+import FeishuReviewWorkspaceSource from './FeishuReviewWorkspace.vue?raw'
 import FeishuReviewWorkspace from './FeishuReviewWorkspace.vue'
 
 vi.mock('@/apis/base', () => ({
@@ -1407,6 +1408,7 @@ describe('FeishuReviewWorkspace', () => {
       .find((button) => button.text().includes('审核处理'))
       .trigger('click')
     expect(wrapper.get('.decision-panel').classes()).toContain('open')
+    expect(FeishuReviewWorkspaceSource).toMatch(/\.decision-panel\s*{[\s\S]*?z-index:\s*40;/)
 
     await wrapper.get('button[aria-label="关闭审核处理"]').trigger('click')
     expect(wrapper.get('.decision-panel').classes()).not.toContain('open')

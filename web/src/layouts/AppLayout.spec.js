@@ -7,6 +7,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import AppLayoutSource from './AppLayout.vue?raw'
 import AppLayout from './AppLayout.vue'
 
+const taskerState = vi.hoisted(() => ({
+  refs: {
+    activeCount: { value: 0 },
+    isDrawerOpen: { value: false },
+    sortedTasks: { value: [] }
+  },
+  store: null
+}))
+const userState = vi.hoisted(() => ({ isAdmin: false, isSuperAdmin: false }))
+
 vi.mock('pinia', async (importOriginal) => {
   const actual = await importOriginal()
   return {
@@ -68,19 +78,31 @@ vi.mock('@/stores/info', () => ({
 }))
 
 vi.mock('@/stores/tasker', () => ({
-  useTaskerStore: () => ({
-    __refs: { activeCount: ref(0), isDrawerOpen: ref(false) },
-    loadTasks: vi.fn(),
-    openDrawer: vi.fn()
-  })
+  useTaskerStore: () => {
+    const store = {
+      __refs: taskerState.refs,
+      loadTasks: vi.fn(),
+      openDrawer: vi.fn()
+    }
+    taskerState.store = store
+    return store
+  }
 }))
 
 vi.mock('@/stores/user', () => ({
-  useUserStore: () => ({ isAdmin: false, isSuperAdmin: false })
+  useUserStore: () => userState
 }))
 
 describe('AppLayout', () => {
   beforeEach(() => {
+    userState.isAdmin = false
+    userState.isSuperAdmin = false
+    taskerState.refs.sortedTasks.value = []
+    taskerState.refs.activeCount.value = 0
+    taskerState.refs.isDrawerOpen.value = false
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      json: async () => ({ stargazers_count: 0 })
+    })
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
       value: vi.fn((query) => ({
@@ -102,5 +124,31 @@ describe('AppLayout', () => {
 
     expect(wrapper.classes()).toContain('sidebar-collapsed')
     expect(AppLayoutSource).toMatch(/\.app-layout\s*{[\s\S]*?min-width:\s*0;/)
+  })
+
+  it('切换到其他菜单时仍显示飞书扫描全局进度，并可打开任务中心', async () => {
+    userState.isAdmin = true
+    taskerState.refs.sortedTasks.value = [
+      {
+        id: 'scan-task-1',
+        name: '全量扫描 · 飞书知识源',
+        type: 'feishu_scan',
+        status: 'running',
+        progress: 42,
+        message: '正在扫描资料 · 已处理 8 项'
+      }
+    ]
+
+    const wrapper = shallowMount(AppLayout)
+    await wrapper.vm.$nextTick()
+
+    const progress = wrapper.get('[data-testid="global-scan-progress"]')
+    expect(progress.text()).toContain('飞书知识扫描')
+    expect(progress.text()).toContain('42%')
+    expect(progress.text()).toContain('正在扫描资料 · 已处理 8 项')
+
+    await progress.trigger('click')
+    expect(taskerState.store.openDrawer).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
   })
 })

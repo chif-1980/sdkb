@@ -7407,7 +7407,7 @@ loadReviewers()
 }
 .decision-panel {
   position: absolute;
-  z-index: 8;
+  z-index: 40;
   top: 64px;
   right: 0;
   bottom: 0;

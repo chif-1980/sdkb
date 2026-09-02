@@ -480,6 +480,7 @@ import FeishuFormalKnowledgePanel from '@/components/feishu/FeishuFormalKnowledg
 import FeishuRelationsPanel from '@/components/feishu/FeishuRelationsPanel.vue'
 import FeishuReviewWorkspace from '@/components/feishu/FeishuReviewWorkspace.vue'
 import FeishuWorkItemsPanel from '@/components/feishu/FeishuWorkItemsPanel.vue'
+import { useTaskerStore } from '@/stores/tasker'
 
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 const QR_AUTH_TTL_MS = 5 * 60 * 1000
@@ -529,6 +530,7 @@ const activeModule = ref('reviews')
 const sourceOverviewExpanded = ref(false)
 const governanceCounts = reactive({ workItems: 0, reviews: 0, relations: 0, formal: 0 })
 const governanceReviewTarget = ref(null)
+const taskerStore = useTaskerStore()
 let pollTimer = null
 let qrPollTimer = null
 let formalKnowledgeRefreshTimers = []
@@ -1132,9 +1134,18 @@ async function checkCurrentSource() {
 async function startScan(mode) {
   if (!currentSource.value || scanLocked.value || initialLoading.value) return
   scanningMode.value = mode
+  const sourceId = currentSource.value.source_id
+  const sourceName = currentSource.value.name
   try {
-    const result = await feishuKnowledgeApi.scanSource(currentSource.value.source_id, mode)
+    const result = await feishuKnowledgeApi.scanSource(sourceId, mode)
     activeRunId.value = result.run_id
+    taskerStore.registerQueuedTask({
+      task_id: result.task_id,
+      name: `${mode === 'full' ? '全量' : '增量'}扫描 · ${sourceName}`,
+      task_type: 'feishu_scan',
+      message: '扫描任务已排队',
+      payload: { source_id: sourceId, run_id: result.run_id, mode }
+    })
     if (!runs.value.some((run) => run.run_id === result.run_id)) {
       runs.value = [
         {

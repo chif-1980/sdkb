@@ -197,6 +197,7 @@ const TASK_TYPE_LABELS = {
   dataset_generation: '评估集生成',
   rag_evaluation: 'RAG 评估',
   feishu_process: '飞书资料解析',
+  feishu_scan: '飞书知识扫描',
   feishu_publish: '飞书知识发布',
   feishu_compare: '跨文档检查',
   feishu_compare_backfill: '历史资料跨文档回填'
