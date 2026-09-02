@@ -119,9 +119,24 @@ def _message_response(
         content=message.content,
         answer_status=message.answer_status,
         feedback_rating=message.feedback_rating,
+        feedback_reason_type=message.feedback_reason_type,
+        feedback_reason_text=message.feedback_reason_text,
         citations=[_citation_response(citation) for citation in citations],
         created_at=format_utc_datetime(message.created_at) or "",
     )
+
+
+def _feedback_governance_reason(message: ProductMessage) -> str:
+    labels = {
+        "CONTENT_ERROR": "内容错误",
+        "OUTDATED": "内容过时",
+        "MISSING_SOURCE": "资料缺失",
+        "CITATION_ERROR": "引用错误",
+        "OTHER": "其他",
+    }
+    label = labels.get(message.feedback_reason_type, "未分类")
+    detail = f"；补充说明：{message.feedback_reason_text}" if message.feedback_reason_text else ""
+    return f"助手回答被用户标记为不满意（{label}，消息 {message.message_id}）{detail}"
 
 
 @product_chat.get("/chat/conversations", response_model=ConversationListResponse)
@@ -353,6 +368,7 @@ async def stream_message(
 @product_chat.put(
     "/chat/messages/{message_id}/feedback",
     response_model=MessageFeedbackResponse,
+    response_model_exclude_none=True,
 )
 async def set_message_feedback(
     message_id: str,
@@ -365,6 +381,8 @@ async def set_message_feedback(
                 message_id,
                 current_user.id,
                 request.rating,
+                reason_type=request.reason_type,
+                reason_text=request.reason_text,
             )
             if request.rating == "DISLIKE":
                 citations = list(
@@ -380,12 +398,14 @@ async def set_message_feedback(
                 }
                 await KnowledgeLifecycleService(db).create_feedback_requests_for_segments(
                     segment_ids,
-                    reason=f"助手回答被用户标记为不满意（消息 {message.message_id}）",
+                    reason=_feedback_governance_reason(message),
                     operator_id=current_user.uid,
                 )
             return MessageFeedbackResponse(
                 message_id=message.message_id,
                 feedback_rating=message.feedback_rating,
+                feedback_reason_type=message.feedback_reason_type,
+                feedback_reason_text=message.feedback_reason_text,
             )
     except ProductMessageNotFoundError:
         raise _message_not_found() from None

@@ -35,6 +35,7 @@ EXPECTED_ROUTES = {
     ("POST", "/feishu-knowledge/materials/{version_id}/approve"),
     ("POST", "/feishu-knowledge/materials/{version_id}/reject"),
     ("POST", "/feishu-knowledge/materials/{version_id}/retry"),
+    ("POST", "/feishu-knowledge/materials/{version_id}/reindex"),
     ("POST", "/feishu-knowledge/materials/batch-action"),
     ("POST", "/feishu-knowledge/materials/{version_id}/confirm-removal"),
 }

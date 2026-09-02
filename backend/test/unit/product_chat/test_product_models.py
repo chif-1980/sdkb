@@ -128,6 +128,8 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
         "model_version",
         "prompt_version",
         "feedback_rating",
+        "feedback_reason_type",
+        "feedback_reason_text",
         "created_at",
     }
     assert set(citation.columns.keys()) == {

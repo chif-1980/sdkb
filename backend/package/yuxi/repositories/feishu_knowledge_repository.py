@@ -281,6 +281,7 @@ class FeishuKnowledgeRepository:
         unsupported_count: int,
         failed_count: int,
         invalidated_count: int,
+        impact_summary: dict | None = None,
         error_summary: str | None = None,
     ) -> bool:
         async with self._write_transaction():
@@ -294,6 +295,7 @@ class FeishuKnowledgeRepository:
                 unsupported_count=unsupported_count,
                 failed_count=failed_count,
                 invalidated_count=invalidated_count,
+                impact_summary=impact_summary,
                 error_summary=error_summary,
             )
 
@@ -309,12 +311,20 @@ class FeishuKnowledgeRepository:
         changed_count: int,
         unchanged_count: int,
         unsupported_count: int,
+        impact_summary: dict | None = None,
     ) -> int:
         async with self._write_transaction():
             await self._mark_seen_items(source_id=source_id, item_keys=seen_item_keys, seen_at=seen_at)
             invalidated_count = await self._mark_source_invalid(
                 source_id=source_id,
                 seen_item_keys=seen_item_keys,
+            )
+            completed_impact = dict(impact_summary or {})
+            completed_impact["deleted"] = invalidated_count
+            completed_impact["affectedKnowledgeCount"] = (
+                int(completed_impact.get("new") or 0)
+                + int(completed_impact.get("modified") or 0)
+                + invalidated_count
             )
             updated = await self._finish_sync_run(
                 run_id=run_id,
@@ -326,6 +336,7 @@ class FeishuKnowledgeRepository:
                 unsupported_count=unsupported_count,
                 failed_count=0,
                 invalidated_count=invalidated_count,
+                impact_summary=completed_impact,
             )
             if not updated:
                 raise ConcurrentSyncRunError(f"Feishu sync run is no longer running: {run_id}")
@@ -682,6 +693,7 @@ class FeishuKnowledgeRepository:
         unsupported_count: int,
         failed_count: int,
         invalidated_count: int,
+        impact_summary: dict | None = None,
         error_summary: str | None = None,
     ) -> bool:
         statement = (
@@ -697,6 +709,7 @@ class FeishuKnowledgeRepository:
                 unsupported_count=unsupported_count,
                 failed_count=failed_count,
                 invalidated_count=invalidated_count,
+                impact_summary=impact_summary or {},
                 error_summary=error_summary,
             )
             .execution_options(synchronize_session="fetch")

@@ -19,6 +19,8 @@ from yuxi.governance.domain import (
     SourceChangeRequestStatus,
 )
 from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
+from yuxi.governance.notification_service import NotificationService
+from yuxi.governance.quality_gate_service import QualityGateService
 from yuxi.governance.review_backfill import backfill_legacy_governance_reviews, stable_review_id
 from yuxi.governance.schemas import (
     ReviewPackageBulkExcludeRequest,
@@ -179,8 +181,11 @@ class ReviewPackageService:
         offset = (page - 1) * page_size
         paged_packages = filtered_packages[offset : offset + page_size]
         unit_service = KnowledgeUnitService(self.session)
+        quality_service = QualityGateService(self.session)
         for package in paged_packages:
             await unit_service.ensure_for_package(package)
+            if package.quality_computed_at is None:
+                await quality_service.evaluate_package(package.package_id)
         if paged_packages:
             page_items = await self._items_by_package([package.package_id for package in paged_packages])
             items_by_package.update(page_items)
@@ -197,6 +202,7 @@ class ReviewPackageService:
     async def get_package(self, package_id: str) -> dict:
         package = await self._load_package(package_id)
         await KnowledgeUnitService(self.session).ensure_for_package(package)
+        quality_result = await QualityGateService(self.session).evaluate_package(package.package_id)
         items = await self._load_items(package.package_id)
         display_items = self._display_items(items)
         source_row = None
@@ -303,6 +309,7 @@ class ReviewPackageService:
             )
         return {
             **self._package_summary(package, display_items),
+            **quality_result,
             "source_item_id": package.source_item_id,
             "source_version_id": package.source_version_id,
             "source_url": package.source_url_snapshot,
@@ -433,6 +440,15 @@ class ReviewPackageService:
             message=comment,
             payload={"from_assignee_id": previous_assignee, "assignee_id": assignee_id},
         )
+        await NotificationService(self.session).notify_admins(
+            object_type="REVIEW_PACKAGE",
+            object_id=package.package_id,
+            assignee_id=assignee_id,
+            event_key="review-package-transferred",
+            title="审核包已指派给你",
+            body=f"{package.title_snapshot or '未命名审核包'}：{comment}",
+            feishu=True,
+        )
         await self.session.flush()
         return {
             "package_id": package.package_id,
@@ -544,6 +560,12 @@ class ReviewPackageService:
                     "request_id": payload.request_id,
                 },
             )
+
+        if any(decision.outcome in UNIT_PUBLISH_OUTCOMES for decision in payload.decisions):
+            quality_result = await QualityGateService(self.session).evaluate_package(package.package_id)
+            blockers = quality_result["qualityGate"]["blockers"]
+            if blockers:
+                raise ValueError("质量门禁未通过：" + "；".join(blocker["message"] for blocker in blockers))
 
         previous_status = package.workflow_status
         package.workflow_status = self._aggregate_status(items)
@@ -861,6 +883,16 @@ class ReviewPackageService:
             reopened_from_item_id=original.review_item_id,
         )
         self.session.add(reopened)
+
+        await NotificationService(self.session).notify_admins(
+            object_type="REVIEW_PACKAGE",
+            object_id=package.package_id,
+            assignee_id=operator_id,
+            event_key="review-package-reopened",
+            title="知识单元重新申请纳入",
+            body=f"{package.title_snapshot or '未命名资料'} 已重新进入审核。",
+            feishu=True,
+        )
 
         segment_ids = list(unit.source_segment_ids or [])
         if segment_ids:
@@ -1218,6 +1250,15 @@ class ReviewPackageService:
             "workflow_status": package.workflow_status,
             "assignee_id": package.assignee_id,
             "risk_level": package.risk_level,
+            "qualityGate": {
+                "status": package.quality_gate_status,
+                "blockers": (package.impact_summary or {}).get("blockReasons") or [],
+            },
+            "qualityScore": package.quality_score,
+            "qualityDimensions": package.quality_dimensions or {},
+            "impactSummary": package.impact_summary or {},
+            "autoCloseEligible": bool(package.auto_close_eligible),
+            "qualityComputedAt": _iso(package.quality_computed_at),
             "item_count": len(items),
             "pending_item_count": sum(item.item_status == ReviewItemStatus.PENDING for item in items),
             "review_type_counts": dict(type_counts),

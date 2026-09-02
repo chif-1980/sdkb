@@ -11,6 +11,7 @@ from yuxi.governance.domain import (
     ReviewSubjectType,
     SourceChangeRequestStatus,
 )
+from yuxi.governance.notification_service import NotificationService
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
     FeishuProcessingEvent,
@@ -129,6 +130,19 @@ class SourceChangeService:
 
         for package_id in package_ids:
             await self._refresh_package_status(package_id, now=now, operator_id=operator_id)
+            package = await self.session.scalar(
+                select(FeishuReviewPackage).where(FeishuReviewPackage.package_id == package_id)
+            )
+            if package is not None:
+                await NotificationService(self.session).notify_admins(
+                    object_type="SOURCE_CHANGE",
+                    object_id=package.package_id,
+                    assignee_id=package.assignee_id,
+                    event_key=f"source-version-received:{version.version_id}",
+                    title="飞书来源有新版本",
+                    body=f"{source_item.title or '未命名资料'} 已发现新的飞书版本，请复核影响内容。",
+                    feishu=package.risk_level == "HIGH",
+                )
         await self.session.flush()
         return {
             "version_id": version_id,
@@ -288,16 +302,12 @@ class SourceChangeService:
         if request.status not in ACTIVE_CHANGE_REQUEST_STATUSES:
             raise ValueError("Only open or newly received source-change requests can be cancelled")
         item = await self.session.scalar(
-            select(FeishuReviewItem)
-            .where(FeishuReviewItem.review_item_id == request.review_item_id)
-            .with_for_update()
+            select(FeishuReviewItem).where(FeishuReviewItem.review_item_id == request.review_item_id).with_for_update()
         )
         if item is None:
             raise LookupError(f"Review item not found: {request.review_item_id}")
         package = await self.session.scalar(
-            select(FeishuReviewPackage)
-            .where(FeishuReviewPackage.package_id == item.package_id)
-            .with_for_update()
+            select(FeishuReviewPackage).where(FeishuReviewPackage.package_id == item.package_id).with_for_update()
         )
         if package is None:
             raise LookupError(f"Review package not found: {item.package_id}")
@@ -348,9 +358,7 @@ class SourceChangeService:
         operator_id: str | None,
     ) -> None:
         package = await self.session.scalar(
-            select(FeishuReviewPackage)
-            .where(FeishuReviewPackage.package_id == package_id)
-            .with_for_update()
+            select(FeishuReviewPackage).where(FeishuReviewPackage.package_id == package_id).with_for_update()
         )
         if package is None:
             return

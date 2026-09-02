@@ -265,6 +265,9 @@ class ProductChatRepository:
         message_id: str,
         owner_user_id: int,
         rating: str | None,
+        *,
+        reason_type: str | None = None,
+        reason_text: str | None = None,
     ) -> ProductMessage:
         result = await self.session.execute(
             select(ProductMessage)
@@ -283,6 +286,8 @@ class ProductChatRepository:
         if message is None:
             raise ProductMessageNotFoundError
         message.feedback_rating = rating
+        message.feedback_reason_type = reason_type if rating == "DISLIKE" else None
+        message.feedback_reason_text = reason_text.strip() if rating == "DISLIKE" and reason_text else None
         await self.session.flush()
         return message
 

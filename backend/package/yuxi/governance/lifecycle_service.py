@@ -15,6 +15,7 @@ from yuxi.governance.domain import (
     ReviewType,
     SourceChangeRequestStatus,
 )
+from yuxi.governance.notification_service import NotificationService
 from yuxi.governance.review_backfill import stable_review_id
 from yuxi.storage.postgres.models_knowledge import (
     FeishuKnowledgeUnit,
@@ -339,6 +340,14 @@ class KnowledgeLifecycleService:
         )
         self.session.add_all([package, review_item, change_request])
         await self.session.flush()
+        await NotificationService(self.session).notify_admins(
+            object_type="SOURCE_CHANGE",
+            object_id=change_request.change_request_id,
+            assignee_id=change_request.responsible_user_id,
+            event_key="source-change-created",
+            title="知识来源需要复核",
+            body=f"{item.title or '未命名资料'}：{reason}",
+        )
         return self._revision_result(package, review_item, change_request, idempotent_replay=False)
 
     async def create_feedback_requests_for_segments(

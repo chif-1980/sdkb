@@ -22,6 +22,7 @@ from server.utils.auth_middleware import get_admin_user, get_db
 from yuxi.governance.domain import ReviewAction, ReviewDecision
 from yuxi.governance.duplicate_knowledge_service import DuplicateKnowledgeService
 from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
+from yuxi.governance.notification_service import NotificationService
 from yuxi.governance.presentation_layout_service import (
     extract_pptx_layout,
     render_pptx_slide,
@@ -49,6 +50,7 @@ from yuxi.governance.schemas import (
 from yuxi.governance.service import GovernanceService
 from yuxi.governance.source_change_service import SourceChangeService
 from yuxi.governance.source_segment_service import SourceSegmentService, source_segment_dict
+from yuxi.governance.work_item_service import WorkItemService
 from yuxi.knowledge.utils.kb_utils import parse_minio_url
 from yuxi.storage.minio import get_minio_client
 from yuxi.services.file_preview import convert_office_to_pdf
@@ -315,6 +317,78 @@ async def _duplicate_service(db: AsyncSession, relation_id: str) -> DuplicateKno
         db,
         content_loader=_parsed_content_loader(kb_id) if kb_id else None,
     )
+
+
+@governance.get("/work-items")
+async def list_work_items(
+    source_id: Annotated[str | None, Query()] = None,
+    assignee: Annotated[str | None, Query()] = "mine",
+    work_type: Annotated[str | None, Query(alias="type")] = None,
+    risk: Annotated[str | None, Query()] = None,
+    status: Annotated[str | None, Query()] = None,
+    overdue: Annotated[bool | None, Query()] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    return await WorkItemService(db).list_work_items(
+        operator_id=current_user.uid,
+        source_id=source_id,
+        assignee=assignee,
+        work_type=work_type,
+        risk=risk,
+        status=status,
+        overdue=overdue,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@governance.get("/work-items/summary")
+async def get_work_item_summary(
+    source_id: Annotated[str | None, Query()] = None,
+    assignee: Annotated[str | None, Query()] = "mine",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    return await WorkItemService(db).summary(
+        operator_id=current_user.uid,
+        source_id=source_id,
+        assignee=assignee,
+    )
+
+
+@governance.get("/notifications")
+async def list_governance_notifications(
+    unread_only: Annotated[bool, Query()] = False,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    return await NotificationService(db).list_for_recipient(
+        current_user.uid,
+        unread_only=unread_only,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@governance.post("/notifications/{notification_id}/read")
+async def read_governance_notification(
+    notification_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        result = await NotificationService(db).mark_read(notification_id, recipient_id=current_user.uid)
+        await db.commit()
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @governance.get("/review-packages")

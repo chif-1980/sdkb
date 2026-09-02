@@ -489,10 +489,20 @@ async def test_incremental_scan_creates_version_only_for_changed_item(repository
     assert result.changed_count == 1
     assert result.unchanged_count == 1
     assert result.unsupported_count == 1
+    assert result.impact_summary["layoutChanged"] == 0
+    assert result.impact_summary["layoutCheckPending"] == 1
+    assert "待核对版式" in result.impact_summary["categories"]
     assert fake.download_calls == [("pdf-1", "file")]
     assert await _version_count(session, items["Root renamed"].item_id) == 1
     assert await _version_count(session, items["guide.pdf"].item_id) == 2
     assert await _version_count(session, items["demo.mp4"].item_id) == 1
+    latest_pdf = await session.scalar(
+        select(FeishuMaterialVersion)
+        .where(FeishuMaterialVersion.item_id == items["guide.pdf"].item_id)
+        .order_by(FeishuMaterialVersion.id.desc())
+    )
+    assert latest_pdf.processing_params["scan_impact"]["layoutChanged"] is None
+    assert latest_pdf.processing_params["scan_impact"]["layoutCheckPending"] is True
 
 
 async def test_version_fallback_prefers_update_time_then_content_hash(repository, session):

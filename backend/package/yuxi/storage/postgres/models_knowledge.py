@@ -362,6 +362,7 @@ class FeishuSyncRun(Base):
     failed_count = Column(Integer, default=0)
     invalidated_count = Column(Integer, default=0)
     error_summary = Column(Text)
+    impact_summary = Column(JSON_VALUE, nullable=False, default=dict)
 
 
 class FeishuSourceItem(Base):
@@ -744,6 +745,41 @@ class FeishuReviewPackage(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
     completed_at = Column(DateTime(timezone=True))
+    quality_gate_status = Column(String(32), nullable=True, index=True)
+    quality_score = Column(Integer, nullable=True)
+    quality_dimensions = Column(JSON_VALUE, nullable=False, default=dict)
+    impact_summary = Column(JSON_VALUE, nullable=False, default=dict)
+    auto_close_eligible = Column(Boolean, nullable=False, default=False)
+    quality_computed_at = Column(DateTime(timezone=True))
+
+
+class FeishuNotificationDelivery(Base):
+    """Idempotent in-app or Feishu notification delivery record."""
+
+    __tablename__ = "feishu_notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("notification_id", name="uq_feishu_notification_deliveries_id"),
+        UniqueConstraint("idempotency_key", name="uq_feishu_notification_deliveries_key"),
+        Index("ix_feishu_notification_deliveries_recipient_status", "recipient_id", "status"),
+        Index("ix_feishu_notification_deliveries_object", "object_type", "object_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    notification_id = Column(String(64), nullable=False, unique=True, index=True)
+    recipient_id = Column(String(64), nullable=False, index=True)
+    channel = Column(String(32), nullable=False, default="IN_APP")
+    object_type = Column(String(64), nullable=False)
+    object_id = Column(String(128), nullable=False)
+    idempotency_key = Column(String(255), nullable=False, unique=True)
+    title = Column(String(512), nullable=False)
+    body = Column(Text, nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING", index=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    error_message = Column(Text)
+    read_at = Column(DateTime(timezone=True))
+    delivered_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
 
 
 class FeishuReviewItem(Base):

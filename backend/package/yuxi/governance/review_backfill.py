@@ -19,6 +19,7 @@ from yuxi.governance.domain import (
     SourceChangeRequestStatus,
 )
 from yuxi.governance.source_change_service import SourceChangeService
+from yuxi.governance.notification_service import NotificationService
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuGovernanceReview,
@@ -292,6 +293,15 @@ async def backfill_legacy_governance_reviews(
             await session.flush([package])
             packages_by_key[package_key] = package
             counts["packages_created"] += 1
+            await NotificationService(session).notify_admins(
+                object_type="REVIEW_PACKAGE",
+                object_id=package.package_id,
+                assignee_id=package.assignee_id,
+                event_key="review-package-created",
+                title="新增知识审核待办",
+                body=f"{source_item.title or '未命名资料'} 已进入知识审核，请复核处理。",
+                feishu=package.risk_level == "HIGH",
+            )
 
         candidate_key = f"legacy-review:{review.review_id}"
         review_item_id = stable_review_id("review-item", review.review_id)

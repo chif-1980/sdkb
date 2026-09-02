@@ -29,6 +29,14 @@ class SendMessageRequest(StrictRequest):
 
 class MessageFeedbackRequest(StrictRequest):
     rating: Literal["LIKE", "DISLIKE"] | None
+    reason_type: Literal[
+        "CONTENT_ERROR",
+        "OUTDATED",
+        "MISSING_SOURCE",
+        "CITATION_ERROR",
+        "OTHER",
+    ] | None = Field(default=None, alias="reasonType")
+    reason_text: str | None = Field(default=None, max_length=500, alias="reasonText")
 
 
 class ProductUserResponse(ProductResponse):
@@ -75,6 +83,8 @@ class MessageResponse(ProductResponse):
     content: str
     answer_status: Literal["SUPPORTED", "INSUFFICIENT", "CONFLICTING"] | None
     feedback_rating: Literal["LIKE", "DISLIKE"] | None = None
+    feedback_reason_type: str | None = None
+    feedback_reason_text: str | None = None
     citations: list[CitationResponse]
     created_at: str
 
@@ -82,6 +92,8 @@ class MessageResponse(ProductResponse):
 class MessageFeedbackResponse(ProductResponse):
     message_id: str
     feedback_rating: Literal["LIKE", "DISLIKE"] | None
+    feedback_reason_type: str | None = None
+    feedback_reason_text: str | None = None
 
 
 class ConversationListResponse(ProductResponse):

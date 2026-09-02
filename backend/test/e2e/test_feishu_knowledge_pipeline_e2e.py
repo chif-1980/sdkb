@@ -45,8 +45,8 @@ class FakeFeishuTransport:
         self.page_revisions = {"root": 1, "child": 1, "grandchild": 1}
         self.page_contents = {
             "root": "# Quickdone launch handbook v1",
-            "child": "# Product operations",
-            "grandchild": "# Support playbook",
+            "child": "# Product operations\nOperations details",
+            "grandchild": "# Support playbook\nSupport details",
         }
         self.page_titles = {
             "root": "Quickdone Handbook",
@@ -183,6 +183,10 @@ class LocalMilvus:
         record = self.files[file_id]
         record["parsed_content"] = self.minio.objects[record["object_path"]].decode("utf-8", errors="replace")
         return {"status": "parsed"}
+
+    async def get_file_content(self, kb_id, file_id):
+        assert kb_id == TARGET_KB_ID
+        return {"content": self.files[file_id]["parsed_content"] or ""}
 
     async def index_file(self, kb_id, file_id, *, operator_id, params):
         assert kb_id == TARGET_KB_ID

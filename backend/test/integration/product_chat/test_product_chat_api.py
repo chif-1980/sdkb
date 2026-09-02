@@ -473,7 +473,7 @@ async def test_assistant_feedback_can_be_set_switched_cleared_and_reloaded(
     assert liked.json() == {"messageId": assistant_id, "feedbackRating": "LIKE"}
     assert detail.json()["messages"][1]["feedbackRating"] == "LIKE"
     assert disliked.json() == {"messageId": assistant_id, "feedbackRating": "DISLIKE"}
-    assert cleared.json() == {"messageId": assistant_id, "feedbackRating": None}
+    assert cleared.json() == {"messageId": assistant_id}
     async with context.factory() as session:
         stored = await session.scalar(select(ProductMessage).where(ProductMessage.message_id == assistant_id))
     assert stored.feedback_rating is None
