@@ -6,7 +6,13 @@
         <p>先筛选高相关资料，再比较关键差异；检查在后台运行，不影响资料审核。</p>
       </div>
       <div class="heading-actions">
-        <a-button size="small" :loading="backfillLoading" @click="startBackfill">
+        <a-button
+          size="small"
+          :loading="backfillLoading"
+          :disabled="writeDisabled"
+          :title="writeDisabled ? '扫描进行中，检查完成后可补跑' : '补跑跨文档检查'"
+          @click="startBackfill"
+        >
           <ScanSearch :size="15" />补跑检查
         </a-button>
         <a-button size="small" :loading="loading" @click="loadRelations"
@@ -150,7 +156,10 @@ import { RefreshCw, ScanSearch } from 'lucide-vue-next'
 import { governanceApi } from '@/apis/governance_api'
 import { taskerApi } from '@/apis/tasker'
 
-const props = defineProps({ sourceId: { type: String, default: '' } })
+const props = defineProps({
+  sourceId: { type: String, default: '' },
+  writeDisabled: { type: Boolean, default: false }
+})
 const emit = defineEmits(['open-review', 'count-change'])
 const relations = ref([])
 const loading = ref(false)
@@ -242,7 +251,7 @@ async function loadRelations() {
   }
 }
 async function startBackfill() {
-  if (!props.sourceId || backfillLoading.value) return
+  if (!props.sourceId || backfillLoading.value || props.writeDisabled) return
   backfillLoading.value = true
   try {
     const response = await governanceApi.backfillComparisons(props.sourceId)

@@ -27,6 +27,7 @@ from yuxi.utils import logger
 SUPPORTED_FILE_EXTENSIONS: tuple[str, ...] = (
     ".txt",
     ".md",
+    ".markdown",
     ".docx",
     ".html",
     ".htm",
@@ -367,7 +368,7 @@ async def _process_file_to_markdown_core(
             text = await parse_pdf_async(str(file_path_obj), params=params)
             result = f"{text}"
 
-        elif file_ext in [".txt", ".md"]:
+        elif file_ext in [".txt", ".md", ".markdown"]:
             async with aiofiles.open(file_path_obj, encoding="utf-8") as f:
                 content = await f.read()
             result = f"{content}"

@@ -40,7 +40,7 @@ const databaseStore = useDatabaseStore()
 const infoStore = useInfoStore()
 const taskerStore = useTaskerStore()
 const userStore = useUserStore()
-const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
+const { activeCount: activeCountRef, isDrawerOpen, sortedTasks } = storeToRefs(taskerStore)
 const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
   storeToRefs(chatThreadsStore)
 
@@ -118,6 +118,27 @@ const route = useRoute()
 const router = useRouter()
 
 const activeTaskCount = computed(() => activeCountRef.value || 0)
+const ACTIVE_TASK_STATUSES = new Set(['pending', 'queued', 'running'])
+const activeFeishuScanTasks = computed(() =>
+  (sortedTasks.value || []).filter(
+    (task) => task.type === 'feishu_scan' && ACTIVE_TASK_STATUSES.has(task.status)
+  )
+)
+const activeFeishuScanTask = computed(() => activeFeishuScanTasks.value[0] || null)
+const activeFeishuScanProgress = computed(() => {
+  const value = Number(activeFeishuScanTask.value?.progress)
+  return Number.isFinite(value) ? Math.min(100, Math.max(0, Math.round(value))) : 0
+})
+const activeFeishuScanMessage = computed(() => {
+  const task = activeFeishuScanTask.value
+  if (!task) return ''
+  if (task.message) return task.message
+  return task.status === 'queued' ? '任务已排队，等待开始…' : '正在执行扫描…'
+})
+
+const openTaskCenter = () => {
+  taskerStore.openDrawer()
+}
 const activeConversationThreadId = computed(() => {
   return route.path.startsWith('/agent') ? currentThreadId.value : null
 })
@@ -438,6 +459,27 @@ provide('settingsModal', {
       </keep-alive>
       <component :is="Component" v-else />
     </router-view>
+
+    <button
+      v-if="userStore.isAdmin && activeFeishuScanTask"
+      type="button"
+      class="global-scan-progress"
+      data-testid="global-scan-progress"
+      :aria-label="`${activeFeishuScanTask.name}，${activeFeishuScanProgress}%`"
+      @click="openTaskCenter"
+    >
+      <span class="global-scan-progress-heading">
+        <span class="global-scan-progress-title">飞书知识扫描</span>
+        <span>{{ activeFeishuScanProgress }}%</span>
+      </span>
+      <span class="global-scan-progress-track" aria-hidden="true">
+        <span :style="{ width: `${activeFeishuScanProgress}%` }"></span>
+      </span>
+      <span class="global-scan-progress-message">{{ activeFeishuScanMessage }}</span>
+      <span v-if="activeFeishuScanTasks.length > 1" class="global-scan-progress-more">
+        还有 {{ activeFeishuScanTasks.length - 1 }} 个扫描任务
+      </span>
+    </button>
 
     <ConversationSearchModal
       v-model:open="conversationSearchOpen"
@@ -930,6 +972,88 @@ div.header,
         }
       }
     }
+  }
+}
+
+.global-scan-progress {
+  position: fixed;
+  z-index: 1100;
+  top: 12px;
+  right: 16px;
+  display: flex;
+  width: min(360px, calc(100vw - 32px));
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--main-color) 28%, var(--gray-150));
+  border-radius: 8px;
+  background: var(--gray-0);
+  color: var(--color-text);
+  box-shadow: 0 8px 24px rgba(0, 10, 20, 0.12);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+
+  &:hover,
+  &:focus-visible {
+    border-color: var(--main-color);
+    box-shadow: 0 10px 28px rgba(0, 10, 20, 0.16);
+    outline: none;
+  }
+}
+
+.global-scan-progress-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.global-scan-progress-title {
+  color: var(--main-color);
+}
+
+.global-scan-progress-track {
+  display: block;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--main-30);
+}
+
+.global-scan-progress-track > span {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: inherit;
+  background: var(--main-color);
+  transition: width 240ms ease;
+}
+
+.global-scan-progress-message,
+.global-scan-progress-more {
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-scan-progress-more {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .global-scan-progress {
+    top: 8px;
+    right: 8px;
+    width: calc(100vw - 16px);
   }
 }
 </style>

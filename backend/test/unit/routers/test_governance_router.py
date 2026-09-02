@@ -14,6 +14,7 @@ from yuxi.storage.postgres.models_business import Base, User
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuDuplicateRelationDecision,
+    FeishuKnowledgeUnit,
     FeishuKnowledgeSourceFragment,
     FeishuLogicalKnowledge,
     FeishuMaterialVersion,
@@ -302,6 +303,8 @@ async def add_duplicate_relation_data(
     relation_type: str = "EXACT_DUPLICATE",
     matching_chunks: bool = True,
     create_chunks: bool = True,
+    create_segments: bool = False,
+    target_has_unique_segment: bool = False,
 ):
     target_item_id = f"item-{suffix}"
     target_version_id = f"version-{suffix}"
@@ -338,7 +341,7 @@ async def add_duplicate_relation_data(
                 relation_type=relation_type,
                 similarity=0.98,
                 confidence=0.96,
-                same_content=["公司简介一致"],
+                same_content=["正文：公司简介一致"] if create_segments else ["公司简介一致"],
                 different_content=[],
                 scope_difference={},
                 reasoning="两份资料包含相同的公司简介",
@@ -372,6 +375,56 @@ async def add_duplicate_relation_data(
                 ),
             ]
         )
+    if create_segments:
+        session.add_all(
+            [
+                FeishuSourceSegment(
+                    segment_id=f"segment-source-{suffix}",
+                    segment_key=f"segment-source-{suffix}",
+                    version_id="version-1",
+                    item_id="item-1",
+                    yuxi_file_id="file-1",
+                    segment_index=0,
+                    segment_type="text",
+                    title_path=["公司简介"],
+                    locator_json={"page": 1},
+                    content=source_content,
+                    content_hash=f"segment-source-hash-{suffix}",
+                    token_count=48,
+                ),
+                FeishuSourceSegment(
+                    segment_id=f"segment-target-{suffix}",
+                    segment_key=f"segment-target-{suffix}",
+                    version_id=target_version_id,
+                    item_id=target_item_id,
+                    yuxi_file_id=target_file_id,
+                    segment_index=0,
+                    segment_type="text",
+                    title_path=["公司简介"],
+                    locator_json={"page": 1},
+                    content=source_content,
+                    content_hash=f"segment-target-hash-{suffix}",
+                    token_count=48,
+                ),
+            ]
+        )
+        if target_has_unique_segment:
+            session.add(
+                FeishuSourceSegment(
+                    segment_id=f"segment-target-unique-{suffix}",
+                    segment_key=f"segment-target-unique-{suffix}",
+                    version_id=target_version_id,
+                    item_id=target_item_id,
+                    yuxi_file_id=target_file_id,
+                    segment_index=1,
+                    segment_type="text",
+                    title_path=["产品能力"],
+                    locator_json={"page": 2},
+                    content="产品还提供部署巡检、权限核验和运行状态监控等独有能力。",
+                    content_hash=f"segment-target-unique-hash-{suffix}",
+                    token_count=32,
+                )
+            )
     await session.commit()
     return relation_id
 
@@ -1464,6 +1517,172 @@ async def test_duplicate_resolution_can_keep_sources_separate(governance_api_fix
     assert await session.scalar(select(func.count()).select_from(FeishuLogicalKnowledge)) == 0
     assert relation.status == "resolved"
     assert relation.human_decision == "KEEP_SEPARATE"
+
+
+async def test_duplicate_resolution_auto_closes_only_fully_duplicate_units(governance_api_fixture):
+    client, session, _, _ = governance_api_fixture
+    suffix = "partial-review"
+    relation_id = await add_duplicate_relation_data(
+        session,
+        suffix=suffix,
+        relation_type="OVERLAP",
+        create_segments=True,
+        target_has_unique_segment=True,
+    )
+    target_version_id = f"version-{suffix}"
+    listed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
+    target_package = next(item for item in listed.json()["items"] if item["source_version_id"] == target_version_id)
+
+    response = await client.post(
+        f"/api/governance/relations/{relation_id}/resolve-duplicate",
+        json={"request_id": "partial-review-request", "strategy": "USE_SOURCE"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["review_automation"] == {
+        "alias_version_id": target_version_id,
+        "auto_decided_unit_count": 1,
+        "remaining_unit_count": 1,
+        "completed_package_count": 0,
+        "open_package_count": 1,
+        "source_review_closed": False,
+    }
+    review_items = list(
+        await session.scalars(
+            select(FeishuReviewItem).where(FeishuReviewItem.package_id == target_package["package_id"])
+        )
+    )
+    unit_items = [item for item in review_items if item.subject_type == "KNOWLEDGE_UNIT"]
+    duplicate_item = next(item for item in unit_items if item.outcome == "DUPLICATE_SOURCE")
+    pending_item = next(item for item in unit_items if item.item_status == "PENDING")
+    duplicate_unit = await session.scalar(
+        select(FeishuKnowledgeUnit).where(FeishuKnowledgeUnit.unit_id == duplicate_item.subject_id)
+    )
+    target_package_row = await session.scalar(
+        select(FeishuReviewPackage).where(FeishuReviewPackage.package_id == target_package["package_id"])
+    )
+    source_package_row = await session.scalar(
+        select(FeishuReviewPackage).where(FeishuReviewPackage.source_version_id == "version-1")
+    )
+
+    assert duplicate_unit.publication_state == "ALIAS"
+    assert pending_item.outcome is None
+    assert target_package_row.workflow_status == "OPEN"
+    assert source_package_row.workflow_status == "OPEN"
+
+
+async def test_duplicate_resolution_closes_fully_duplicate_source_review(governance_api_fixture):
+    client, session, _, _ = governance_api_fixture
+    suffix = "complete-review"
+    relation_id = await add_duplicate_relation_data(session, suffix=suffix, create_segments=True)
+    target_version_id = f"version-{suffix}"
+
+    response = await client.post(
+        f"/api/governance/relations/{relation_id}/resolve-duplicate",
+        json={"request_id": "complete-review-request", "strategy": "USE_SOURCE"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["review_automation"]["auto_decided_unit_count"] == 1
+    assert response.json()["review_automation"]["remaining_unit_count"] == 0
+    assert response.json()["review_automation"]["source_review_closed"] is True
+    package = await session.scalar(
+        select(FeishuReviewPackage).where(FeishuReviewPackage.source_version_id == target_version_id)
+    )
+    version = await session.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == target_version_id)
+    )
+    item = await session.scalar(
+        select(FeishuReviewItem).where(
+            FeishuReviewItem.package_id == package.package_id,
+            FeishuReviewItem.subject_type == "KNOWLEDGE_UNIT",
+        )
+    )
+
+    assert package.workflow_status == "COMPLETED"
+    assert item.outcome == "DUPLICATE_SOURCE"
+    assert version.processing_status == "skipped"
+    assert version.review_status == "not_required"
+
+    completed = await client.get(
+        "/api/governance/review-packages",
+        params={
+            "source_id": "source-1",
+            "view": "all",
+            "workflow_status": "COMPLETED",
+            "completion_result": "all_duplicate",
+        },
+    )
+    assert completed.status_code == 200
+    assert completed.json()["total"] == 1
+    assert completed.json()["items"][0]["duplicate_unit_count"] == 1
+    assert completed.json()["items"][0]["completion_result"] == "all_duplicate"
+
+
+async def test_duplicate_resolution_keeps_unit_open_when_another_relation_is_unresolved(
+    governance_api_fixture,
+):
+    client, session, _, _ = governance_api_fixture
+    suffix = "blocked-review"
+    relation_id = await add_duplicate_relation_data(session, suffix=suffix, create_segments=True)
+    target_version_id = f"version-{suffix}"
+    session.add(
+        FeishuCrossDocumentRelation(
+            relation_id="relation-blocking-review",
+            comparison_key="blocking-review",
+            source_version_id="version-1",
+            target_version_id=target_version_id,
+            relation_type="CONFLICT",
+            same_content=["正文：公司简介一致"],
+            different_content=[{"field": "服务范围", "current": "全部", "candidate": "部分"}],
+            status="open",
+        )
+    )
+    await session.commit()
+    listed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
+    target_package = next(item for item in listed.json()["items"] if item["source_version_id"] == target_version_id)
+
+    response = await client.post(
+        f"/api/governance/relations/{relation_id}/resolve-duplicate",
+        json={"request_id": "blocked-review-request", "strategy": "USE_SOURCE"},
+    )
+    item = await session.scalar(
+        select(FeishuReviewItem).where(
+            FeishuReviewItem.package_id == target_package["package_id"],
+            FeishuReviewItem.subject_type == "KNOWLEDGE_UNIT",
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.json()["review_automation"]["auto_decided_unit_count"] == 0
+    assert response.json()["review_automation"]["remaining_unit_count"] == 1
+    assert item.item_status == "PENDING"
+    assert item.outcome is None
+
+
+async def test_keep_separate_does_not_auto_close_review_items(governance_api_fixture):
+    client, session, _, _ = governance_api_fixture
+    suffix = "separate-review"
+    relation_id = await add_duplicate_relation_data(session, suffix=suffix, create_segments=True)
+    target_version_id = f"version-{suffix}"
+    listed = await client.get("/api/governance/review-packages", params={"source_id": "source-1"})
+    target_package = next(item for item in listed.json()["items"] if item["source_version_id"] == target_version_id)
+
+    response = await client.post(
+        f"/api/governance/relations/{relation_id}/resolve-duplicate",
+        json={"request_id": "separate-review-request", "strategy": "KEEP_SEPARATE"},
+    )
+    item = await session.scalar(
+        select(FeishuReviewItem).where(
+            FeishuReviewItem.package_id == target_package["package_id"],
+            FeishuReviewItem.subject_type == "KNOWLEDGE_UNIT",
+        )
+    )
+
+    assert response.status_code == 200
+    assert "review_automation" not in response.json()
+    assert item.item_status == "PENDING"
+    assert item.outcome is None
 
 
 async def test_duplicate_resolution_requires_supported_relation_and_matching_fragments(

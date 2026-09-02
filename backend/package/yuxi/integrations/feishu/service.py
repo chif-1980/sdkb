@@ -5,6 +5,7 @@ from datetime import datetime
 from hashlib import sha256
 import mimetypes
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from yuxi.governance.content_quality import assess_content
@@ -22,6 +23,8 @@ SUPPORTED_EXTENSIONS = {
     ".xls",
     ".xlsx",
     ".txt",
+    ".md",
+    ".markdown",
     ".png",
     ".jpg",
     ".jpeg",
@@ -86,6 +89,7 @@ class FeishuScanService:
         self.repository = repository
         self.client = client
         self.archive_adapter = archive_adapter
+        self._progress_callback: Callable[[int, str], Awaitable[None]] | None = None
 
     async def scan(
         self,
@@ -93,6 +97,7 @@ class FeishuScanService:
         source_id: str,
         mode: str,
         operator_id: str | None = None,
+        progress_callback: Callable[[int, str], Awaitable[None]] | None = None,
     ) -> FeishuScanResult:
         if mode not in {"full", "incremental"}:
             raise ValueError("mode must be 'full' or 'incremental'")
@@ -108,6 +113,7 @@ class FeishuScanService:
         )
         run_id = run.run_id
         counts = _ScanCounts()
+        self._progress_callback = progress_callback
         seen_item_keys: set[str] = set()
         seen_at = utc_now()
         try:
@@ -418,6 +424,8 @@ class FeishuScanService:
         )
         seen_item_keys.add(item_key)
         counts.scanned += 1
+        if self._progress_callback is not None:
+            await self._progress_callback(counts.scanned, title)
         current = await self.repository.find_current_version(item.item_id)
         if not supported:
             if item_type != "directory":

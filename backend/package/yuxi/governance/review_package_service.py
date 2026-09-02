@@ -85,7 +85,7 @@ PUBLISH_OUTCOMES = {
 }
 UNIT_PUBLISH_OUTCOMES = PUBLISH_OUTCOMES | {ReviewOutcome.CONFIRM_VALID}
 REJECT_CANDIDATE_OUTCOMES = {ReviewOutcome.EXCLUDE, ReviewOutcome.KEEP_CURRENT}
-COMPLETION_RESULTS = {"all_included", "partial", "all_excluded"}
+COMPLETION_RESULTS = {"all_included", "partial", "all_excluded", "all_duplicate"}
 FINAL_ITEM_STATUSES = {
     ReviewItemStatus.DECIDED,
     ReviewItemStatus.SOURCE_UPDATED,
@@ -117,7 +117,7 @@ class ReviewPackageService:
     ) -> dict:
         await backfill_legacy_governance_reviews(self.session)
         if completion_result and completion_result not in COMPLETION_RESULTS:
-            raise ValueError("completion_result must be all_included, partial or all_excluded")
+            raise ValueError("completion_result must be all_included, partial, all_excluded or all_duplicate")
         statement = select(FeishuReviewPackage).where(FeishuReviewPackage.source_id == source_id)
         if risk_level:
             statement = statement.where(FeishuReviewPackage.risk_level == risk_level)
@@ -1086,10 +1086,13 @@ class ReviewPackageService:
         unit_items = [item for item in items if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT]
         published_count = sum(item.outcome in PUBLISH_OUTCOMES for item in unit_items)
         excluded_count = sum(item.outcome in REJECT_CANDIDATE_OUTCOMES for item in unit_items)
+        duplicate_count = sum(item.outcome == ReviewOutcome.DUPLICATE_SOURCE for item in unit_items)
         legacy_review.decision = ReviewDecision.PUBLISH if publish else ReviewDecision.REJECT
         legacy_review.action = ReviewAction.UPDATE if publish else ReviewAction.ARCHIVE
         legacy_review.problem_tags = sorted({tag for item in unit_items for tag in (item.problem_tags or [])})
-        legacy_review.decision_comment = f"知识单元审核完成：纳入 {published_count}，不纳入 {excluded_count}"
+        legacy_review.decision_comment = (
+            f"知识单元审核完成：纳入 {published_count}，不纳入 {excluded_count}，重复来源 {duplicate_count}"
+        )
         legacy_review.status = "resolved" if publish else "rejected"
         legacy_review.decided_by = operator_id
         legacy_review.decided_at = now
@@ -1288,12 +1291,14 @@ class ReviewPackageService:
         decided = sum(item.item_status in FINAL_ITEM_STATUSES for item in knowledge_units)
         included = sum(item.outcome in UNIT_PUBLISH_OUTCOMES for item in knowledge_units)
         excluded = sum(item.outcome in REJECT_CANDIDATE_OUTCOMES for item in knowledge_units)
+        duplicate = sum(item.outcome == ReviewOutcome.DUPLICATE_SOURCE for item in knowledge_units)
         return {
             "resolved_unit_count": decided,
             "decided_unit_count": decided,
             "remaining_unit_count": max(len(knowledge_units) - decided, 0),
             "included_unit_count": included,
             "excluded_unit_count": excluded,
+            "duplicate_unit_count": duplicate,
         }
 
     @staticmethod
@@ -1303,11 +1308,14 @@ class ReviewPackageService:
             return None
         included = sum(item.outcome in UNIT_PUBLISH_OUTCOMES for item in knowledge_units)
         excluded = sum(item.outcome in REJECT_CANDIDATE_OUTCOMES for item in knowledge_units)
+        duplicate = sum(item.outcome == ReviewOutcome.DUPLICATE_SOURCE for item in knowledge_units)
         if included == len(knowledge_units):
             return "all_included"
         if excluded == len(knowledge_units):
             return "all_excluded"
-        if included and excluded:
+        if duplicate == len(knowledge_units):
+            return "all_duplicate"
+        if sum(bool(count) for count in (included, excluded, duplicate)) > 1:
             return "partial"
         return None
 

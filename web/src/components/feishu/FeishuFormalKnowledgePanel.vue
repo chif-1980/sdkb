@@ -62,6 +62,8 @@
               v-if="group.sourcePublicationStatus === 'ACTIVE'"
               size="small"
               danger
+              :disabled="writeDisabled"
+              :title="writeDisabled ? '扫描进行中，操作暂不可用' : '整篇下架'"
               @click.stop="startAction('source-offline', group)"
             >
               <Archive :size="13" />整篇下架
@@ -69,6 +71,8 @@
             <a-button
               v-else-if="group.sourcePublicationStatus === 'OFFLINE'"
               size="small"
+              :disabled="writeDisabled"
+              :title="writeDisabled ? '扫描进行中，操作暂不可用' : '整篇恢复'"
               @click.stop="startAction('source-restore', group)"
             >
               <ArchiveRestore :size="13" />整篇恢复
@@ -213,41 +217,75 @@
             v-if="selectedKnowledge.stored_lifecycle_status !== 'OFFLINE'"
             size="small"
             danger
+            :disabled="writeDisabled"
+            :title="writeDisabled ? '扫描进行中，操作暂不可用' : '下架单元'"
             @click="startAction('unit-offline', selectedKnowledge)"
           >
             <Archive :size="14" />下架单元
           </a-button>
-          <a-button v-else size="small" @click="startAction('unit-restore', selectedKnowledge)">
+          <a-button
+            v-else
+            size="small"
+            :disabled="writeDisabled"
+            :title="writeDisabled ? '扫描进行中，操作暂不可用' : '恢复单元'"
+            @click="startAction('unit-restore', selectedKnowledge)"
+          >
             <ArchiveRestore :size="14" />恢复单元
           </a-button>
-          <a-button size="small" @click="startAction('unit-revision', selectedKnowledge)">
+          <a-button
+            size="small"
+            :disabled="writeDisabled"
+            :title="writeDisabled ? '扫描进行中，操作暂不可用' : '发起修订'"
+            @click="startAction('unit-revision', selectedKnowledge)"
+          >
             <PencilLine :size="14" />发起修订
           </a-button>
         </div>
         <div v-if="selectedKnowledge?.unit_id" class="metadata-editor">
           <div class="metadata-heading">
             <div><strong>治理信息</strong><span>负责人、有效期和复核日期</span></div>
-            <a-button size="small" :loading="savingMetadata" @click="saveMetadata">
+            <a-button
+              size="small"
+              :loading="savingMetadata"
+              :disabled="writeDisabled"
+              :title="writeDisabled ? '扫描进行中，操作暂不可用' : '保存治理信息'"
+              @click="saveMetadata"
+            >
               <Save :size="14" />保存
             </a-button>
           </div>
           <div class="metadata-fields">
             <label
               ><span>负责人姓名</span
-              ><a-input v-model:value="metadataForm.owner_name" placeholder="未指定"
+              ><a-input
+                v-model:value="metadataForm.owner_name"
+                placeholder="未指定"
+                :disabled="writeDisabled"
             /></label>
             <label
               ><span>负责人 ID</span
-              ><a-input v-model:value="metadataForm.owner_id" placeholder="可选"
+              ><a-input
+                v-model:value="metadataForm.owner_id"
+                placeholder="可选"
+                :disabled="writeDisabled"
             /></label>
             <label
-              ><span>生效日期</span><a-input v-model:value="metadataForm.valid_from" type="date"
+              ><span>生效日期</span><a-input
+                v-model:value="metadataForm.valid_from"
+                type="date"
+                :disabled="writeDisabled"
             /></label>
             <label
-              ><span>失效日期</span><a-input v-model:value="metadataForm.valid_until" type="date"
+              ><span>失效日期</span><a-input
+                v-model:value="metadataForm.valid_until"
+                type="date"
+                :disabled="writeDisabled"
             /></label>
             <label
-              ><span>复核日期</span><a-input v-model:value="metadataForm.review_due_at" type="date"
+              ><span>复核日期</span><a-input
+                v-model:value="metadataForm.review_due_at"
+                type="date"
+                :disabled="writeDisabled"
             /></label>
           </div>
         </div>
@@ -277,6 +315,8 @@
                 v-if="record.rollback_available"
                 type="link"
                 size="small"
+                :disabled="writeDisabled"
+                :title="writeDisabled ? '扫描进行中，操作暂不可用' : '回滚到此版本'"
                 @click="startAction('source-rollback', record)"
               >
                 <RotateCcw :size="13" />回滚到此版本
@@ -326,7 +366,10 @@ import {
 } from 'lucide-vue-next'
 import { governanceApi } from '@/apis/governance_api'
 
-const props = defineProps({ sourceId: { type: String, default: '' } })
+const props = defineProps({
+  sourceId: { type: String, default: '' },
+  writeDisabled: { type: Boolean, default: false }
+})
 const emit = defineEmits(['count-change', 'open-update-review'])
 const knowledge = ref([])
 const versions = ref([])
@@ -494,6 +537,7 @@ async function openVersions(record) {
 }
 
 function startAction(type, target) {
+  if (props.writeDisabled) return
   actionType.value = type
   actionTarget.value = target
   actionReason.value = ''
@@ -501,6 +545,7 @@ function startAction(type, target) {
 }
 
 async function confirmAction() {
+  if (props.writeDisabled) return
   const reason = actionReason.value.trim()
   if (!reason) {
     message.warning('请填写处理原因')
@@ -540,7 +585,7 @@ async function confirmAction() {
 }
 
 async function saveMetadata() {
-  if (!selectedKnowledge.value?.unit_id) return
+  if (!selectedKnowledge.value?.unit_id || props.writeDisabled) return
   const payload = {
     owner_name: normalizedOptionalText(metadataForm.value.owner_name),
     owner_id: normalizedOptionalText(metadataForm.value.owner_id),

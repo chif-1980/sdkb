@@ -8,10 +8,12 @@ Yuxi 将上传文件先保存为原文件，再解析为 Markdown 并按知识�
 
 | 类型 | 格式 | 说明 |
 |------|------|------|
-| 文本 | .txt, .md, .html, .htm | 直接提取内容 |
+| 文本 | .txt, .md, .markdown, .html, .htm | 直接提取内容 |
 | Word | .docx | 保留格式和结构 |
 | PowerPoint | .pptx | 保留主要文本结构 |
 | PDF | .pdf | 支持文本和图片 PDF |
+
+Markdown 没有固定页面坐标，跨文档审核时按标题、段落、列表、表格和代码块进行结构化对比，并高亮可定位的匹配内容。
 | 表格 | .csv, .xls, .xlsx | 识别表格结构 |
 | JSON | .json | 结构化数据 |
 

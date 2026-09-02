@@ -24,7 +24,10 @@ from yuxi.services.file_preview import (
 
 _OFFICE_EXTENSIONS = frozenset({".docx", ".xlsx", ".pptx"})
 _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"})
-_LAYOUT_EXTENSIONS = frozenset({".docx", ".xlsx", ".pptx", ".pdf", *_IMAGE_EXTENSIONS})
+_MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown"})
+_LAYOUT_EXTENSIONS = frozenset(
+    {".docx", ".xlsx", ".pptx", ".pdf", *_IMAGE_EXTENSIONS, *_MARKDOWN_EXTENSIONS}
+)
 
 # A source image can be kept at its original fidelity for traceability, but a
 # review preview must not decode an unbounded raster in the API process or the
@@ -439,6 +442,70 @@ def _pptx_layout(content: bytes, *, filename: str, segments: Sequence[Any]) -> d
     return _layout(filename, ".pptx", pages)
 
 
+def _split_markdown_blocks(markdown: str) -> list[str]:
+    blocks: list[str] = []
+    current: list[str] = []
+    fence_marker = ""
+
+    def flush() -> None:
+        content = "\n".join(current).strip()
+        if content:
+            blocks.append(content)
+        current.clear()
+
+    for line in markdown.splitlines():
+        stripped = line.lstrip()
+        marker = stripped[:3] if stripped.startswith(("```", "~~~")) else ""
+        if marker:
+            if not fence_marker:
+                fence_marker = marker
+            elif marker == fence_marker:
+                fence_marker = ""
+            current.append(line)
+            continue
+        if not stripped and not fence_marker:
+            flush()
+            continue
+        current.append(line)
+    flush()
+    return blocks
+
+
+def extract_markdown_layout(
+    content: bytes,
+    *,
+    filename: str = "source.md",
+    segments: Sequence[Any] = (),
+) -> dict[str, Any]:
+    """Build a semantic review layout for Markdown, which has no fixed page geometry."""
+    markdown = content.decode("utf-8-sig", errors="replace")
+    source_blocks = _split_markdown_blocks(markdown)
+    block_height = 100 / max(len(source_blocks), 1)
+    blocks = [
+        _block(
+            f"markdown-block-{index}",
+            block_content,
+            left=2,
+            top=(index - 1) * block_height + 1,
+            width=96,
+            height=max(1, block_height - 2),
+            kind="markdown",
+            locator={"section": index},
+            segments=segments,
+        )
+        for index, block_content in enumerate(source_blocks, start=1)
+    ]
+    page = _page(
+        1,
+        "Markdown 正文",
+        width=720,
+        height=max(len(markdown.splitlines()), 1),
+        blocks=blocks,
+        render_mode="markdown",
+    )
+    return _layout(filename, PurePosixPath(filename).suffix.lower(), [page], editable=False)
+
+
 async def build_document_layout(
     filename: str,
     content: bytes,
@@ -460,6 +527,8 @@ async def build_document_layout(
         layout = extract_pdf_layout(pdf_content, filename=filename, segments=segments)
         layout["file_type"] = ".docx"
         return layout
+    if suffix in _MARKDOWN_EXTENSIONS:
+        return extract_markdown_layout(content, filename=filename, segments=segments)
     return {
         "supported": False,
         "filename": filename,

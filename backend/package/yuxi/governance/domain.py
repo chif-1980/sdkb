@@ -67,6 +67,7 @@ class ReviewOutcome(StrEnum):
     REQUEST_SUPPORTING_SOURCE = "REQUEST_SUPPORTING_SOURCE"
     ARCHIVE = "ARCHIVE"
     DISMISS = "DISMISS"
+    DUPLICATE_SOURCE = "DUPLICATE_SOURCE"
 
 
 class SourceChangeRequestStatus(StrEnum):

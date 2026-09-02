@@ -14,7 +14,7 @@ from docx import Document
 from PIL import Image
 
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
-from yuxi.knowledge.parser.unified import Parser
+from yuxi.knowledge.parser.unified import Parser, is_supported_file_extension
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
@@ -65,6 +65,17 @@ def test_parser_parse_docx_file_returns_markdown_text(tmp_path: Path, monkeypatc
     assert isinstance(markdown, str)
     assert "Parser DOCX content" in markdown
     assert len(markdown.strip()) > 0
+
+
+@pytest.mark.parametrize("extension", [".md", ".markdown"])
+def test_parser_parse_markdown_file_returns_source_text(tmp_path: Path, extension: str):
+    file_path = tmp_path / f"parser_test{extension}"
+    file_path.write_text("# 产品说明\n\n支持 Markdown 正文。", encoding="utf-8")
+
+    assert is_supported_file_extension(file_path)
+    markdown = Parser.parse(str(file_path))
+
+    assert markdown == "# 产品说明\n\n支持 Markdown 正文。"
 
 
 def test_convert_csv_to_markdown_preserves_column_dtypes(

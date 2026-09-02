@@ -3,22 +3,22 @@
     <div v-if="selectedRowKeys.length" class="batch-bar">
       <span>已选 {{ selectedRowKeys.length }} 条</span>
       <div class="batch-actions">
-        <a-button size="small" :disabled="!canBatch('approve')" @click="emitBatch('approve')">
+        <a-button size="small" :disabled="writeDisabled || !canBatch('approve')" @click="emitBatch('approve')">
           审核通过
         </a-button>
-        <a-button size="small" :disabled="!canBatch('reject')" @click="emitBatch('reject')">
+        <a-button size="small" :disabled="writeDisabled || !canBatch('reject')" @click="emitBatch('reject')">
           驳回
         </a-button>
-        <a-button size="small" :disabled="!canBatch('retry')" @click="emitBatch('retry')">
+        <a-button size="small" :disabled="writeDisabled || !canBatch('retry')" @click="emitBatch('retry')">
           重试
         </a-button>
-        <a-button size="small" :disabled="!canBatch('reindex')" @click="emitBatch('reindex')">
+        <a-button size="small" :disabled="writeDisabled || !canBatch('reindex')" @click="emitBatch('reindex')">
           重新解析并重建索引
         </a-button>
         <a-button
           size="small"
           danger
-          :disabled="!canBatch('confirm_removal')"
+          :disabled="writeDisabled || !canBatch('confirm_removal')"
           @click="emitBatch('confirm_removal')"
         >
           确认下架
@@ -86,7 +86,13 @@
                 >详情</a-button
               >
               <a-dropdown :trigger="['click']">
-                <a-button type="text" size="small" aria-label="素材操作">
+                <a-button
+                  type="text"
+                  size="small"
+                  aria-label="素材操作"
+                  :disabled="writeDisabled"
+                  :title="writeDisabled ? '扫描进行中，操作暂不可用' : '素材操作'"
+                >
                   <MoreHorizontal :size="17" />
                 </a-button>
                 <template #overlay>
@@ -128,7 +134,8 @@ import { MoreHorizontal } from 'lucide-vue-next'
 const props = defineProps({
   materials: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
-  maxSelection: { type: Number, default: 100 }
+  maxSelection: { type: Number, default: 100 },
+  writeDisabled: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['open-detail', 'action', 'batch-action', 'selection-limit'])
@@ -227,6 +234,7 @@ function isDirectory(material) {
 }
 
 function canPerformAction(material, action) {
+  if (props.writeDisabled) return false
   const parsedReady =
     material.review_status === 'pending' &&
     ['parsed', 'awaiting_review'].includes(material.processing_status) &&
@@ -289,11 +297,13 @@ function formatTime(value) {
 }
 
 function emitBatch(action) {
+  if (props.writeDisabled) return
   if (!canBatch(action)) return
   emit('batch-action', { action, versionIds: [...selectedRowKeys.value] })
 }
 
 function emitAction(material, action) {
+  if (props.writeDisabled) return
   if (!canPerformAction(material, action)) return
   emit('action', { action, material })
 }

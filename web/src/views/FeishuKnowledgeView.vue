@@ -10,35 +10,84 @@
         </a-tooltip>
       </div>
       <div class="heading-actions">
-        <a-button :loading="checkingSource" :disabled="!currentSource" @click="checkCurrentSource">
-          <Link2 :size="16" />
-          检查连接
-        </a-button>
-        <a-button
-          data-testid="scan-incremental"
-          :loading="scanningMode === 'incremental'"
-          :disabled="!currentSource || scanLocked"
-          @click="startScan('incremental')"
-        >
-          <RefreshCw :size="16" />
-          增量扫描
-        </a-button>
-        <a-button
-          data-testid="scan-full"
-          type="primary"
-          :loading="scanningMode === 'full'"
-          :disabled="!currentSource || scanLocked"
-          @click="startScan('full')"
-        >
-          <ScanSearch :size="16" />
-          全量扫描
-        </a-button>
+        <a-tooltip title="确认当前飞书知识源是否可访问">
+          <a-button
+            :loading="checkingSource"
+            :disabled="!currentSource || initialLoading"
+            @click="checkCurrentSource"
+          >
+            <Link2 :size="16" />
+            检查连接
+          </a-button>
+        </a-tooltip>
+        <a-tooltip title="日常更新：检查新增或变更的资料；首次接入请先执行全量扫描">
+          <a-button
+            data-testid="scan-incremental"
+            :loading="scanningMode === 'incremental'"
+            :disabled="!currentSource || scanLocked || initialLoading"
+            @click="startScan('incremental')"
+          >
+            <RefreshCw :size="16" />
+            增量扫描
+          </a-button>
+        </a-tooltip>
+        <a-tooltip title="全面校准：重新核对知识空间内的全部资料">
+          <a-button
+            data-testid="scan-full"
+            type="primary"
+            :loading="scanningMode === 'full'"
+            :disabled="!currentSource || scanLocked || initialLoading"
+            @click="startScan('full')"
+          >
+            <ScanSearch :size="16" />
+            全量扫描
+          </a-button>
+        </a-tooltip>
       </div>
     </header>
 
     <a-alert v-if="pageError" class="page-alert" type="error" show-icon :message="pageError" />
 
-    <a-spin :spinning="loadingSources">
+    <section
+      v-if="initialLoading"
+      class="initial-load-banner"
+      aria-live="polite"
+      data-testid="initial-load-progress"
+    >
+      <div class="scan-progress-heading">
+        <strong>正在加载知识加工</strong>
+        <span>{{ initialLoadProgress }}%</span>
+      </div>
+      <div class="scan-progress-track">
+        <span :style="{ width: `${initialLoadProgress}%` }"></span>
+      </div>
+      <p>{{ initialLoadMessage }}</p>
+      <span class="initial-load-hint">加载完成后可继续操作</span>
+    </section>
+
+    <section
+      v-if="activeScanRun || scanningMode || scanRefreshInProgress"
+      class="scan-progress-banner"
+      aria-live="polite"
+      data-testid="scan-progress"
+    >
+      <div class="scan-progress-heading">
+        <strong>{{ scanProgressTitle }}</strong>
+        <span>{{ scanProgressPercent }}%</span>
+      </div>
+      <div class="scan-progress-track">
+        <span :style="{ width: `${scanProgressPercent}%` }"></span>
+      </div>
+      <p>{{ scanProgressMessage }}</p>
+      <span class="scan-progress-hint">扫描期间可查看资料，审核和修改操作将在扫描完成后恢复</span>
+    </section>
+
+    <div
+      :inert="initialLoading ? '' : undefined"
+      :aria-busy="loadingSources || initialLoading"
+      class="initial-load-content"
+    >
+      <a-spin :spinning="loadingSources">
       <template v-if="currentSource">
         <section
           class="source-overview"
@@ -162,7 +211,7 @@
                       type="primary"
                       :aria-label="oauthStatus.authorized ? '重新扫码授权' : '扫码授权'"
                       :loading="qrAuthorizing"
-                      :disabled="!currentSource"
+                      :disabled="!currentSource || initialLoading || scanInProgress"
                       @click="startQrOAuth"
                     >
                       <QrCode :size="16" />
@@ -176,7 +225,7 @@
                       data-testid="oauth-browser-authorize"
                       aria-label="浏览器授权"
                       :loading="authorizingUser"
-                      :disabled="!currentSource"
+                      :disabled="!currentSource || initialLoading || scanInProgress"
                       @click="startBrowserOAuth"
                     >
                       <ExternalLink :size="16" />
@@ -187,7 +236,7 @@
                     <a-button
                       aria-label="刷新知识目录"
                       :loading="loadingTree"
-                      :disabled="!oauthStatus.authorized"
+                      :disabled="!oauthStatus.authorized || initialLoading"
                       @click="loadTree(true)"
                     >
                       <RefreshCw :size="16" />
@@ -269,7 +318,7 @@
                 <h2>素材队列</h2>
                 <p>{{ selectedRunId ? '正在查看所选批次素材' : '显示当前数据源的全部素材版本' }}</p>
               </div>
-              <a-button aria-label="刷新素材" @click="loadMaterials">
+              <a-button aria-label="刷新素材" :disabled="initialLoading" @click="loadMaterials">
                 <RefreshCw :size="16" />
                 刷新
               </a-button>
@@ -311,6 +360,7 @@
               :materials="materials"
               :loading="loadingMaterials"
               :max-selection="MAX_BATCH_SIZE"
+              :write-disabled="scanInProgress"
               @open-detail="openMaterialDetail"
               @action="handleMaterialAction"
               @batch-action="handleBatchAction"
@@ -329,6 +379,7 @@
           v-else-if="activeModule === 'reviews'"
           :source-id="currentSourceId"
           :target-review-id="governanceReviewTarget"
+          :write-disabled="scanInProgress"
           @count-change="governanceCounts.reviews = $event"
           @knowledge-change="scheduleFormalKnowledgeRefresh"
           @target-consumed="governanceReviewTarget = null"
@@ -336,19 +387,22 @@
         <FeishuRelationsPanel
           v-else-if="activeModule === 'relations'"
           :source-id="currentSourceId"
+          :write-disabled="scanInProgress"
           @count-change="governanceCounts.relations = $event"
           @open-review="openGovernanceReview"
         />
         <FeishuFormalKnowledgePanel
           v-else-if="activeModule === 'formal'"
           :source-id="currentSourceId"
+          :write-disabled="scanInProgress"
           @count-change="governanceCounts.formal = $event"
           @open-update-review="openFormalKnowledgeUpdate"
         />
       </template>
 
       <a-empty v-else class="empty-source" description="尚未配置飞书知识数据源" />
-    </a-spin>
+      </a-spin>
+    </div>
 
     <FeishuMaterialDetailDrawer
       :open="detailOpen"
@@ -426,6 +480,7 @@ import FeishuFormalKnowledgePanel from '@/components/feishu/FeishuFormalKnowledg
 import FeishuRelationsPanel from '@/components/feishu/FeishuRelationsPanel.vue'
 import FeishuReviewWorkspace from '@/components/feishu/FeishuReviewWorkspace.vue'
 import FeishuWorkItemsPanel from '@/components/feishu/FeishuWorkItemsPanel.vue'
+import { useTaskerStore } from '@/stores/tasker'
 
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 const QR_AUTH_TTL_MS = 5 * 60 * 1000
@@ -443,6 +498,7 @@ const materials = ref([])
 const selectedRunId = ref('')
 const activeRunId = ref('')
 const scanningMode = ref('')
+const scanRefreshInProgress = ref(false)
 const checkingSource = ref(false)
 const authorizingUser = ref(false)
 const qrAuthorizing = ref(false)
@@ -453,6 +509,9 @@ const qrError = ref('')
 const qrStartedAt = ref('')
 const qrExpiresAt = ref(0)
 const loadingSources = ref(false)
+const initialLoading = ref(false)
+const initialLoadProgress = ref(0)
+const initialLoadMessage = ref('正在准备知识加工…')
 const loadingRuns = ref(false)
 const loadingMaterials = ref(false)
 const loadingTree = ref(false)
@@ -471,6 +530,7 @@ const activeModule = ref('reviews')
 const sourceOverviewExpanded = ref(false)
 const governanceCounts = reactive({ workItems: 0, reviews: 0, relations: 0, formal: 0 })
 const governanceReviewTarget = ref(null)
+const taskerStore = useTaskerStore()
 let pollTimer = null
 let qrPollTimer = null
 let formalKnowledgeRefreshTimers = []
@@ -566,13 +626,47 @@ const currentSource = computed(() =>
 )
 
 const hasActiveRun = computed(() =>
-  runs.value.some((run) => run.status === 'queued' || run.status === 'running')
+  runs.value.some((run) => isRunActive(run))
 )
-const scanLocked = computed(() =>
+const scanInProgress = computed(() =>
   Boolean(
-    !oauthStatus.value.authorized || scanningMode.value || activeRunId.value || hasActiveRun.value
+    scanningMode.value || activeRunId.value || hasActiveRun.value || scanRefreshInProgress.value
   )
 )
+const activeScanRun = computed(() => runs.value.find((run) => run.run_id === activeRunId.value) || null)
+const scanProgressPercent = computed(() => {
+  const value = Number(activeScanRun.value?.progress)
+  if (Number.isFinite(value) && value > 0) return Math.min(100, Math.max(0, Math.round(value)))
+  return activeScanRun.value ? 3 : 0
+})
+const scanProgressTitle = computed(() => {
+  if (scanRefreshInProgress.value) return '正在刷新扫描结果'
+  if (activeScanRun.value?.status === 'succeeded' && isRunActive(activeScanRun.value)) {
+    return '资料加工进行中'
+  }
+  const mode = activeScanRun.value?.run_type || scanningMode.value
+  return `${mode === 'full' ? '全量' : '增量'}扫描进行中`
+})
+const scanProgressMessage = computed(() => {
+  if (scanRefreshInProgress.value) return '正在刷新资料、审核任务和统计…'
+  if (activeScanRun.value?.progress_message) return activeScanRun.value.progress_message
+  return scanningMode.value ? '正在提交扫描任务…' : '任务已排队，等待开始…'
+})
+const scanLocked = computed(() =>
+  Boolean(
+    !oauthStatus.value.authorized ||
+      scanningMode.value ||
+      activeRunId.value ||
+      hasActiveRun.value ||
+      scanRefreshInProgress.value
+  )
+)
+
+function isRunActive(run) {
+  if (!run) return false
+  if (run.status === 'queued' || run.status === 'running') return true
+  return Boolean(run.task_status && !['success', 'failed', 'cancelled'].includes(run.task_status))
+}
 
 const oauthStatusLabel = computed(() => {
   if (oauthStatus.value.authorized) {
@@ -616,7 +710,7 @@ function readWorkspaceCache() {
     const restored = Boolean(currentSourceId.value)
     const cachedTree = restored ? readTreeCache(currentSourceId.value) : null
     if (cachedTree) treeData.value = cachedTree
-    const activeRun = runs.value.find((run) => run.status === 'queued' || run.status === 'running')
+    const activeRun = runs.value.find((run) => isRunActive(run))
     if (activeRun) {
       activeRunId.value = activeRun.run_id
       schedulePoll()
@@ -669,6 +763,19 @@ async function loadReviewCount() {
   }
 }
 
+async function loadWorkItemCount() {
+  if (!currentSourceId.value) return
+  try {
+    const response = await governanceApi.getWorkItemSummary({
+      source_id: currentSourceId.value,
+      assignee: 'mine'
+    })
+    governanceCounts.workItems = response.total ?? 0
+  } catch {
+    // 首屏统计失败时保留缓存值，避免把未知状态误显示为 0。
+  }
+}
+
 async function loadRelationCount() {
   if (!currentSourceId.value) return
   try {
@@ -704,7 +811,7 @@ async function loadRuns() {
   try {
     const response = await feishuKnowledgeApi.listRuns(currentSourceId.value)
     runs.value = response.items || []
-    const activeRun = runs.value.find((run) => run.status === 'queued' || run.status === 'running')
+    const activeRun = runs.value.find((run) => isRunActive(run))
     if (activeRun && !activeRunId.value) {
       activeRunId.value = activeRun.run_id
       schedulePoll()
@@ -798,18 +905,53 @@ async function loadTree(force = false) {
   }
 }
 
-async function refreshAll({ forceTree = false } = {}) {
+async function refreshAll({ forceTree = false, onProgress = null } = {}) {
+  const report = (progress, message) => {
+    if (onProgress) onProgress(progress, message)
+  }
+
+  report(8, '正在加载飞书数据源…')
   await loadSources()
+  report(22, '正在检查飞书授权状态…')
   if (currentSourceId.value) {
     await loadOAuthStatus()
-    await Promise.all([
-      loadRuns(),
-      loadMaterials(),
-      loadTree(forceTree),
-      loadReviewCount(),
-      loadRelationCount(),
-      loadFormalKnowledgeCount()
-    ])
+    const loaders = [
+      ['审核任务', loadRuns],
+      ['资料列表', loadMaterials],
+      ['知识目录', () => loadTree(forceTree)],
+      ['审核统计', loadReviewCount],
+      ['运营待办', loadWorkItemCount],
+      ['跨文档检查', loadRelationCount],
+      ['正式知识', loadFormalKnowledgeCount]
+    ]
+    let completed = 0
+    report(32, '正在加载审核任务、资料列表和知识目录…')
+    const results = await Promise.allSettled(
+      loaders.map(async ([label, loader]) => {
+        let failed = false
+        try {
+          await loader()
+        } catch (error) {
+          failed = true
+          throw error
+        } finally {
+          completed += 1
+          report(
+            32 + (completed / loaders.length) * 63,
+            `${failed ? `${label}加载失败` : `已加载${label}`}（${completed}/${loaders.length}）`
+          )
+        }
+      })
+    )
+    const failedResults = results
+      .map((result, index) => (result.status === 'rejected' ? { label: loaders[index][0], reason: result.reason } : null))
+      .filter(Boolean)
+    if (failedResults.length) {
+      const reason = failedResults[0].reason
+      const detail = reason instanceof Error ? reason.message : String(reason)
+      throw new Error(`${failedResults.map(({ label }) => label).join('、')}加载失败：${detail}`)
+    }
+    report(100, '知识加工工作台加载完成')
     writeWorkspaceCache()
   }
 }
@@ -952,19 +1094,32 @@ function handleOAuthCallbackResult() {
 async function initialize() {
   const cacheState = readWorkspaceCache()
   loadingSources.value = !cacheState.restored
+  initialLoading.value = !cacheState.fresh
+  initialLoadProgress.value = initialLoading.value ? 3 : 0
+  initialLoadMessage.value = initialLoading.value ? '正在准备知识加工…' : ''
   pageError.value = ''
-  if (cacheState.fresh) return
+  if (cacheState.fresh) {
+    // 工作台缓存用于快速首屏，但运营待办数量需要及时反映最新状态。
+    void loadWorkItemCount()
+    return
+  }
   try {
-    await refreshAll()
+    await refreshAll({
+      onProgress: (progress, message) => {
+        initialLoadProgress.value = Math.round(progress)
+        initialLoadMessage.value = message
+      }
+    })
   } catch (error) {
     pageError.value = feishuKnowledgeApi.getErrorMessage(error, '加载知识加工工作台失败')
   } finally {
     loadingSources.value = false
+    initialLoading.value = false
   }
 }
 
 async function checkCurrentSource() {
-  if (!currentSource.value) return
+  if (!currentSource.value || initialLoading.value) return
   checkingSource.value = true
   try {
     await feishuKnowledgeApi.checkSource(currentSource.value.source_id)
@@ -977,11 +1132,20 @@ async function checkCurrentSource() {
 }
 
 async function startScan(mode) {
-  if (!currentSource.value || scanLocked.value) return
+  if (!currentSource.value || scanLocked.value || initialLoading.value) return
   scanningMode.value = mode
+  const sourceId = currentSource.value.source_id
+  const sourceName = currentSource.value.name
   try {
-    const result = await feishuKnowledgeApi.scanSource(currentSource.value.source_id, mode)
+    const result = await feishuKnowledgeApi.scanSource(sourceId, mode)
     activeRunId.value = result.run_id
+    taskerStore.registerQueuedTask({
+      task_id: result.task_id,
+      name: `${mode === 'full' ? '全量' : '增量'}扫描 · ${sourceName}`,
+      task_type: 'feishu_scan',
+      message: '扫描任务已排队',
+      payload: { source_id: sourceId, run_id: result.run_id, mode }
+    })
     if (!runs.value.some((run) => run.run_id === result.run_id)) {
       runs.value = [
         {
@@ -1018,14 +1182,19 @@ async function pollActiveRun() {
     const runType = run.run_type || (index >= 0 ? runs.value[index].run_type : '')
     if (index >= 0) runs.value.splice(index, 1, run)
     else runs.value.unshift(run)
-    if (TERMINAL_RUN_STATUSES.has(run.status)) {
+    if (TERMINAL_RUN_STATUSES.has(run.status) && !isRunActive(run)) {
+      scanRefreshInProgress.value = true
       activeRunId.value = ''
-      await refreshAll({ forceTree: true })
-      if (!isAlive) return
-      if (run.status === 'succeeded') {
-        message.success(`${runType === 'full' ? '全量' : '增量'}扫描完成`)
-      } else {
-        message.error(run.error_summary || '扫描任务未成功完成')
+      try {
+        await refreshAll({ forceTree: true })
+        if (!isAlive) return
+        if (run.status === 'succeeded') {
+          message.success(`${runType === 'full' ? '全量' : '增量'}扫描完成`)
+        } else {
+          message.error(run.error_summary || '扫描任务未成功完成')
+        }
+      } finally {
+        scanRefreshInProgress.value = false
       }
       return
     }
@@ -1154,6 +1323,10 @@ function confirmAction(title, content, onConfirm, danger = false) {
 }
 
 async function executeSingle(action, material, reason) {
+  if (scanInProgress.value) {
+    message.info('扫描进行中，审核和修改操作将在扫描完成后恢复')
+    return
+  }
   try {
     if (action === 'approve') await feishuKnowledgeApi.approveMaterial(material.version_id)
     if (action === 'reject') await feishuKnowledgeApi.rejectMaterial(material.version_id, reason)
@@ -1169,6 +1342,7 @@ async function executeSingle(action, material, reason) {
 }
 
 function handleMaterialAction({ action, material }) {
+  if (initialLoading.value || scanInProgress.value) return
   if (action === 'reject') {
     askRejectReason(`驳回“${material.title || '未命名素材'}”？`, (reason) =>
       executeSingle(action, material, reason)
@@ -1196,6 +1370,10 @@ function handleMaterialAction({ action, material }) {
 }
 
 async function executeBatch(action, versionIds, reason) {
+  if (scanInProgress.value) {
+    message.info('扫描进行中，审核和修改操作将在扫描完成后恢复')
+    return
+  }
   try {
     const result = await feishuKnowledgeApi.batchAction(action, versionIds, reason)
     const failed = result.failed || 0
@@ -1210,6 +1388,7 @@ async function executeBatch(action, versionIds, reason) {
 }
 
 function handleBatchAction({ action, versionIds }) {
+  if (initialLoading.value || scanInProgress.value) return
   if (!versionIds.length) return
   if (versionIds.length > MAX_BATCH_SIZE) {
     message.warning(`单次批量操作最多选择 ${MAX_BATCH_SIZE} 条素材`)
@@ -1344,6 +1523,71 @@ onBeforeUnmount(() => {
 
 .page-alert {
   margin: 12px var(--page-padding) 0;
+}
+
+.scan-progress-banner {
+  margin: 12px var(--page-padding) 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--main-color) 26%, var(--gray-150));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--main-color) 6%, var(--gray-0));
+}
+
+.initial-load-banner {
+  margin: 12px var(--page-padding) 0;
+  padding: 10px 12px;
+  border: 1px solid var(--gray-150);
+  border-radius: 6px;
+  background: var(--gray-0);
+}
+
+.scan-progress-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.scan-progress-track {
+  height: 5px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--main-30);
+}
+
+.scan-progress-track span {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: inherit;
+  background: var(--main-color);
+  transition: width 240ms ease;
+}
+
+.scan-progress-banner p,
+.initial-load-banner p {
+  margin: 6px 0 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scan-progress-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.initial-load-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
 }
 
 .source-overview {

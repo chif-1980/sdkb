@@ -12,6 +12,8 @@ import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetail
 import FeishuMaterialTable from '@/components/feishu/FeishuMaterialTable.vue'
 import FeishuKnowledgeView from './FeishuKnowledgeView.vue'
 
+const taskerStoreMock = vi.hoisted(() => ({ registerQueuedTask: vi.fn() }))
+
 vi.mock('@/apis/base', () => ({
   apiAdminGet: vi.fn(),
   apiAdminPatch: vi.fn(),
@@ -28,6 +30,10 @@ vi.mock('qrcode', () => ({
   default: {
     toDataURL: vi.fn()
   }
+}))
+
+vi.mock('@/stores/tasker', () => ({
+  useTaskerStore: () => taskerStoreMock
 }))
 
 vi.mock('ant-design-vue', async (importOriginal) => {
@@ -108,18 +114,28 @@ function mountView() {
         },
         FeishuSyncRunsTable: true,
         FeishuWorkItemsPanel: true,
-        FeishuMaterialTable: true,
+        FeishuMaterialTable: {
+          name: 'FeishuMaterialTable',
+          props: ['materials', 'loading', 'maxSelection', 'writeDisabled'],
+          emits: ['open-detail', 'action', 'batch-action', 'selection-limit'],
+          template: '<div data-testid="material-table" />'
+        },
         FeishuMaterialDetailDrawer: true,
         FeishuReviewWorkspace: {
           name: 'FeishuReviewWorkspace',
-          props: ['sourceId', 'targetReviewId'],
+          props: ['sourceId', 'targetReviewId', 'writeDisabled'],
           emits: ['knowledge-change'],
           template: '<div data-testid="review-workspace" />'
         },
-        FeishuRelationsPanel: true,
+        FeishuRelationsPanel: {
+          name: 'FeishuRelationsPanel',
+          props: ['sourceId', 'writeDisabled'],
+          emits: ['count-change', 'open-review'],
+          template: '<div data-testid="relations-panel" />'
+        },
         FeishuFormalKnowledgePanel: {
           name: 'FeishuFormalKnowledgePanel',
-          props: ['sourceId'],
+          props: ['sourceId', 'writeDisabled'],
           emits: ['count-change', 'open-update-review'],
           template: '<div data-testid="formal-knowledge-panel" />'
         }
@@ -604,6 +620,34 @@ describe('FeishuMaterialTable', () => {
       { action: 'reindex', versionIds: ['reindexable-1', 'reindexable-2'] }
     ])
   })
+
+  it('扫描进行时锁定素材写操作，但仍可查看素材详情', async () => {
+    const wrapper = mountMaterialTable({ writeDisabled: true })
+    const rowSelection = wrapper.findComponent({ name: 'ATable' }).props('rowSelection')
+
+    rowSelection.onChange(['version-page'])
+    await wrapper.vm.$nextTick()
+
+    expect(
+      wrapper
+        .get('.batch-actions')
+        .findAll('button')
+        .every((button) => button.attributes('disabled') !== undefined)
+    ).toBe(true)
+    expect(
+      wrapper
+        .get('[data-version-id="version-page"]')
+        .findAll('.menu-action')
+        .every((button) => button.attributes('disabled') !== undefined)
+    ).toBe(true)
+
+    await wrapper
+      .get('.batch-actions')
+      .findAll('button')
+      .find((button) => button.text() === '审核通过')
+      .trigger('click')
+    expect(wrapper.emitted('batch-action')).toBeUndefined()
+  })
 })
 
 describe('FeishuMaterialDetailDrawer', () => {
@@ -691,6 +735,93 @@ describe('FeishuKnowledgeView', () => {
     expect(wrapper.get('.source-details').attributes('style') || '').not.toContain('display: none')
     expect(wrapper.get('.source-details').text()).toContain('Wiki 根节点')
     expect(wrapper.get('.source-details').text()).toContain('目标知识库')
+    wrapper.unmount()
+  })
+
+  it('首次加载期间显示初始化阶段和进度', async () => {
+    let resolveSources
+    let resolveMaterials
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') {
+        return new Promise((resolve) => {
+          resolveSources = resolve
+        })
+      }
+      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: true, status: 'active' })
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) {
+        return new Promise((resolve) => {
+          resolveMaterials = resolve
+        })
+      }
+      return Promise.resolve({ nodes: [] })
+    })
+
+    const wrapper = mountView()
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get('[data-testid="initial-load-progress"]').text()).toContain('正在加载飞书数据源')
+
+    resolveSources({ items: [source] })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="initial-load-progress"]').text()).toMatch(/正在加载知识加工\d+%/)
+    expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.initial-load-content').attributes('inert')).toBeDefined()
+
+    resolveMaterials({ items: [] })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="initial-load-progress"]').exists()).toBe(false)
+    expect(wrapper.get('.initial-load-content').attributes('inert')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('初始化请求部分失败时，仍等待其他请求结束后再解除操作锁定', async () => {
+    let resolveMaterials
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: true, status: 'active' })
+      if (url.endsWith('/runs')) return Promise.reject(new Error('扫描批次暂不可用'))
+      if (url.includes('/materials')) {
+        return new Promise((resolve) => {
+          resolveMaterials = resolve
+        })
+      }
+      return Promise.resolve({ items: [], nodes: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="initial-load-progress"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
+
+    resolveMaterials({ items: [] })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="initial-load-progress"]').exists()).toBe(false)
+    expect(wrapper.vm.pageError).toContain('审核任务加载失败')
+    wrapper.unmount()
+  })
+
+  it('首次加载时就显示运营待办数量，无需先点击标签', async () => {
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: true, status: 'active' })
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/work-items/summary')) return Promise.resolve({ total: 5 })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({ items: [], nodes: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const workItemsTab = wrapper
+      .findAll('.governance-tab')
+      .find((tab) => tab.text().includes('运营待办'))
+    expect(workItemsTab.text()).toContain('运营待办')
+    expect(workItemsTab.text()).toContain('5')
     wrapper.unmount()
   })
 
@@ -918,10 +1049,101 @@ describe('FeishuKnowledgeView', () => {
     expect(fullButton.attributes('data-loading')).toBe('true')
     expect(incrementalButton.attributes('disabled')).toBeDefined()
 
-    resolveScan({ run_id: 'run-1', status: 'queued' })
+    resolveScan({ task_id: 'task-1', run_id: 'run-1', status: 'queued' })
     await flushPromises()
+    expect(taskerStoreMock.registerQueuedTask).toHaveBeenCalledWith({
+      task_id: 'task-1',
+      name: '全量扫描 · 飞书产品资料',
+      task_type: 'feishu_scan',
+      message: '扫描任务已排队',
+      payload: { source_id: 'source-1', run_id: 'run-1', mode: 'full' }
+    })
     expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('扫描进行时向业务面板传递写操作锁，完成后自动恢复', async () => {
+    let resolveScan
+    apiAdminPost.mockImplementation(
+      () => new Promise((resolve) => (resolveScan = resolve))
+    )
+    const wrapper = mountView()
+    await flushPromises()
+
+    const reviewWorkspace = wrapper.findComponent({ name: 'FeishuReviewWorkspace' })
+    expect(reviewWorkspace.props('writeDisabled')).toBe(false)
+
+    await wrapper.get('[data-testid="scan-full"]').trigger('click')
+    expect(reviewWorkspace.props('writeDisabled')).toBe(true)
+
+    reviewWorkspace.vm.$emit('action', {
+      action: 'approve',
+      material: { version_id: 'version-during-scan', title: '扫描中的素材' }
+    })
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenCalledTimes(1)
+
+    await openMaterials(wrapper)
+    expect(wrapper.findComponent({ name: 'FeishuMaterialTable' }).props('writeDisabled')).toBe(true)
+
+    resolveScan({ run_id: 'run-lock', status: 'queued' })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'FeishuMaterialTable' }).props('writeDisabled')).toBe(
+      false
+    )
+    wrapper.unmount()
+  })
+
+  it('扫描终态后的结果刷新完成前继续锁定写操作', async () => {
+    let resolveScan
+    let resolveRefreshSources
+    let deferRefresh = false
+    apiAdminPost.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveScan = resolve
+      })
+    )
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') {
+        if (deferRefresh) {
+          return new Promise((resolve) => {
+            resolveRefreshSources = resolve
+          })
+        }
+        return Promise.resolve({ items: [source] })
+      }
+      if (url.endsWith('/oauth/status')) {
+        return Promise.resolve({ authorized: true, status: 'active' })
+      }
+      if (url.endsWith('/runs/run-refresh')) {
+        return Promise.resolve({ run_id: 'run-refresh', run_type: 'incremental', status: 'succeeded' })
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({ nodes: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    const reviewWorkspace = wrapper.findComponent({ name: 'FeishuReviewWorkspace' })
+    await wrapper.get('[data-testid="scan-incremental"]').trigger('click')
+    resolveScan({ run_id: 'run-refresh', status: 'queued' })
+    await flushPromises()
+
+    deferRefresh = true
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(reviewWorkspace.props('writeDisabled')).toBe(true)
+    expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
+
+    resolveRefreshSources({ items: [source] })
+    await flushPromises()
+    expect(reviewWorkspace.props('writeDisabled')).toBe(false)
+    wrapper.unmount()
   })
 
   it('未授权飞书用户时禁止扫描并提供授权入口', async () => {
@@ -1035,6 +1257,57 @@ describe('FeishuKnowledgeView', () => {
       apiAdminGet.mock.calls.filter(([url]) => url === '/api/feishu-knowledge/sources')
     ).toHaveLength(2)
     expect(message.success).toHaveBeenCalledWith('增量扫描完成')
+  })
+
+  it('扫描已完成但资料加工排队仍在进行时继续展示并轮询进度', async () => {
+    let runRequests = 0
+    apiAdminPost.mockResolvedValue({ run_id: 'run-queue', status: 'queued' })
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
+      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: true, status: 'active' })
+      if (url.endsWith('/runs/run-queue')) {
+        runRequests += 1
+        return Promise.resolve(
+          runRequests === 1
+            ? {
+                run_id: 'run-queue',
+                run_type: 'incremental',
+                status: 'succeeded',
+                progress: 68,
+                progress_message: '正在安排资料加工 · 2/5',
+                task_status: 'running'
+              }
+            : {
+                run_id: 'run-queue',
+                run_type: 'incremental',
+                status: 'succeeded',
+                progress: 100,
+                progress_message: '任务已完成',
+                task_status: 'success'
+              }
+        )
+      }
+      if (url.endsWith('/runs')) return Promise.resolve({ items: [] })
+      if (url.includes('/materials')) return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="scan-incremental"]').trigger('click')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="scan-progress"]').text()).toContain('68%')
+    expect(wrapper.get('[data-testid="scan-progress"]').text()).toContain('2/5')
+    expect(wrapper.get('[data-testid="scan-progress"]').text()).toContain('资料加工进行中')
+
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    expect(runRequests).toBe(2)
+    expect(message.success).toHaveBeenCalledWith('增量扫描完成')
+    wrapper.unmount()
   })
 
   it('进度和批次列表连续失败后仍轮询同一批次直至终态', async () => {

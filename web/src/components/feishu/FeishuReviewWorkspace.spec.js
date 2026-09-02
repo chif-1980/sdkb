@@ -5,6 +5,7 @@ import { message, Modal } from 'ant-design-vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apiAdminGet, apiAdminPatch, apiAdminPost } from '@/apis/base'
+import FeishuReviewWorkspaceSource from './FeishuReviewWorkspace.vue?raw'
 import FeishuReviewWorkspace from './FeishuReviewWorkspace.vue'
 
 vi.mock('@/apis/base', () => ({
@@ -314,7 +315,7 @@ function unchangedUpdatePackageDetail({ mixed = false } = {}) {
   return detail
 }
 
-function duplicateCandidates(decision = null) {
+function duplicateCandidates(decision = null, reviewAutomation = null) {
   return {
     relation_id: 'relation-duplicate',
     relation_type: 'EXACT_DUPLICATE',
@@ -345,7 +346,8 @@ function duplicateCandidates(decision = null) {
         similarity: 1
       }
     ],
-    decision
+    decision,
+    review_automation: reviewAutomation
   }
 }
 
@@ -1407,6 +1409,7 @@ describe('FeishuReviewWorkspace', () => {
       .find((button) => button.text().includes('审核处理'))
       .trigger('click')
     expect(wrapper.get('.decision-panel').classes()).toContain('open')
+    expect(FeishuReviewWorkspaceSource).toMatch(/\.decision-panel\s*{[\s\S]*?z-index:\s*40;/)
 
     await wrapper.get('button[aria-label="关闭审核处理"]').trigger('click')
     expect(wrapper.get('.decision-panel').classes()).not.toContain('open')
@@ -2017,6 +2020,115 @@ describe('FeishuReviewWorkspace', () => {
     ).toBe(targetPageTwoCallCount)
   })
 
+  it('Markdown 资料使用结构化正文参与版式对比并高亮匹配段落', async () => {
+    const detail = duplicatePackageDetail()
+    detail.title = '产品介绍.md'
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:relation-page')
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [{ ...packages[0], package_id: detail.package_id, title: detail.title }],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-duplicate')
+        return Promise.resolve(detail)
+      if (url === '/api/governance/relations/relation-duplicate/duplicate-candidates')
+        return Promise.resolve(duplicateCandidates())
+      if (url === '/api/governance/relations/relation-duplicate/layout-comparison') {
+        return Promise.resolve({
+          supported: true,
+          relation_id: 'relation-duplicate',
+          relation_type: 'EXACT_DUPLICATE',
+          source: {
+            title: '产品介绍.md',
+            revision: '2',
+            pages: [
+              {
+                page_number: 1,
+                label: 'Markdown 正文',
+                render_mode: 'markdown',
+                blocks: [
+                  {
+                    block_id: 'markdown-block-1',
+                    content: '# 产品介绍',
+                    source_segment_ids: []
+                  },
+                  {
+                    block_id: 'markdown-block-2',
+                    content: '公司专注企业数字化服务。',
+                    source_segment_ids: []
+                  }
+                ]
+              }
+            ]
+          },
+          target: {
+            title: '产品介绍.docx',
+            revision: '1',
+            pages: [
+              {
+                page_number: 1,
+                aspect_ratio: 0.75,
+                blocks: [
+                  {
+                    block_id: 'target-block-1',
+                    content: '公司专注企业数字化服务。',
+                    left: 10,
+                    top: 20,
+                    width: 70,
+                    height: 10,
+                    source_segment_ids: []
+                  }
+                ]
+              }
+            ]
+          },
+          matches: [
+            {
+              match_id: 'match-1',
+              similarity: 1,
+              source_page_number: 1,
+              target_page_number: 1,
+              source_block_ids: ['markdown-block-2'],
+              target_block_ids: ['target-block-1']
+            }
+          ]
+        })
+      }
+      if (url.includes('/layout-comparison/target/pages/'))
+        return Promise.resolve({ blob: () => Promise.resolve(new Blob(['image'])) })
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url === '/api/knowledge/databases/kb-1/documents/file-duplicate/content')
+        return Promise.resolve({ content: '# 产品介绍', lines: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    await wrapper
+      .findAll('.evidence-tabs button')
+      .find((button) => button.text().includes('跨文档证据'))
+      .trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.comparison-markdown-document').text()).toContain('产品介绍')
+    expect(wrapper.findAll('.comparison-markdown-block')).toHaveLength(2)
+    expect(wrapper.findAll('.comparison-markdown-block.comparison-block-match')).toHaveLength(1)
+    expect(wrapper.findAll('.comparison-markdown-block.comparison-block-selected')).toHaveLength(1)
+    expect(
+      apiAdminGet.mock.calls.some(([url]) => url.includes('/layout-comparison/source/pages/'))
+    ).toBe(false)
+    expect(
+      apiAdminGet.mock.calls.some(([url]) => url.includes('/layout-comparison/target/pages/'))
+    ).toBe(true)
+  })
+
   it('Word 与 Excel 对比时完整展示证据单元格并允许滚动查看自然宽度表格', async () => {
     const detail = duplicatePackageDetail()
     Object.defineProperty(URL, 'createObjectURL', {
@@ -2236,12 +2348,22 @@ describe('FeishuReviewWorkspace', () => {
     apiAdminPost.mockImplementation((url, payload) => {
       if (url === '/api/governance/relations/relation-duplicate/resolve-duplicate') {
         return Promise.resolve(
-          duplicateCandidates({
-            strategy: payload.strategy,
-            primary_version_id: 'version-duplicate',
-            logical_knowledge_ids: ['logical-1'],
-            fragment_match_ids: ['match-1']
-          })
+          duplicateCandidates(
+            {
+              strategy: payload.strategy,
+              primary_version_id: 'version-duplicate',
+              logical_knowledge_ids: ['logical-1'],
+              fragment_match_ids: ['match-1']
+            },
+            {
+              alias_version_id: 'version-other',
+              auto_decided_unit_count: 1,
+              remaining_unit_count: 2,
+              completed_package_count: 0,
+              open_package_count: 1,
+              source_review_closed: false
+            }
+          )
         )
       }
       return Promise.resolve({})
@@ -2261,6 +2383,8 @@ describe('FeishuReviewWorkspace', () => {
 
     expect(Modal.confirm).toHaveBeenCalledOnce()
     expect(Modal.confirm.mock.calls[0][0].content).toContain('独有内容不受影响')
+    expect(Modal.confirm.mock.calls[0][0].content).toContain('完全由重复片段组成')
+    expect(Modal.confirm.mock.calls[0][0].content).toContain('其他未解决关系')
     await Modal.confirm.mock.calls[0][0].onOk()
     await flushPromises()
 
@@ -2272,6 +2396,80 @@ describe('FeishuReviewWorkspace', () => {
       '已将“产品介绍 A”设为规范内容'
     )
     expect(wrapper.get('.duplicate-decision-result').text()).toContain('1 组重复片段')
+    expect(wrapper.get('.duplicate-decision-result').text()).toContain(
+      '自动标记 1 个重复来源知识单元'
+    )
+    expect(wrapper.get('.duplicate-decision-result').text()).toContain('还剩 2 个知识单元待审核')
+  })
+
+  it('另一来源全部重复时明确提示无需再次审批', async () => {
+    const detail = duplicatePackageDetail()
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              package_id: detail.package_id,
+              source_version_id: detail.source_version_id,
+              title: detail.title
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-duplicate')
+        return Promise.resolve(detail)
+      if (url === '/api/governance/relations/relation-duplicate/duplicate-candidates')
+        return Promise.resolve(duplicateCandidates())
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-duplicate/content'))
+        return Promise.resolve({ content: '# 产品介绍 A', lines: [] })
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockImplementation((url, payload) => {
+      if (url === '/api/governance/relations/relation-duplicate/resolve-duplicate') {
+        return Promise.resolve(
+          duplicateCandidates(
+            {
+              strategy: payload.strategy,
+              primary_version_id: 'version-duplicate',
+              logical_knowledge_ids: ['logical-1'],
+              fragment_match_ids: ['match-1']
+            },
+            {
+              alias_version_id: 'version-other',
+              auto_decided_unit_count: 3,
+              remaining_unit_count: 0,
+              completed_package_count: 1,
+              open_package_count: 0,
+              source_review_closed: true
+            }
+          )
+        )
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    await wrapper
+      .findAll('.evidence-tabs button')
+      .find((button) => button.text().includes('跨文档证据'))
+      .trigger('click')
+    await flushPromises()
+    await wrapper
+      .findAll('.duplicate-actions button')
+      .find((button) => button.text().includes('保留来源一'))
+      .trigger('click')
+    await Modal.confirm.mock.calls[0][0].onOk()
+    await flushPromises()
+
+    expect(wrapper.get('.duplicate-decision-result').text()).toContain(
+      '自动标记 3 个重复来源知识单元'
+    )
+    expect(wrapper.get('.duplicate-decision-result').text()).toContain('另一来源无需再次审批')
   })
 
   it('可以明确决定两边内容分别保留', async () => {
@@ -2638,6 +2836,7 @@ describe('FeishuReviewWorkspace', () => {
       remaining_unit_count: 0,
       included_unit_count: 2,
       excluded_unit_count: 1,
+      duplicate_unit_count: 1,
       completion_result: 'partial'
     }
     const completedDetail = knowledgeUnitPackageDetail()
@@ -2675,6 +2874,7 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.queue-result-filter').text()).toContain('全部纳入')
     expect(wrapper.get('.queue-result-filter').text()).toContain('部分纳入')
     expect(wrapper.get('.queue-result-filter').text()).toContain('全部不纳入')
+    expect(wrapper.get('.queue-result-filter').text()).toContain('全部为重复来源')
 
     await wrapper
       .findAll('.queue-result-filter button')
@@ -2688,6 +2888,7 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.queue-unit-summary').text()).toContain('3/3 已处理')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 2')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('不纳入 1')
+    expect(wrapper.get('.queue-unit-summary').text()).toContain('重复来源 1')
     expect(wrapper.get('.completion-result-badge').text()).toBe('部分纳入')
   })
 

@@ -47,6 +47,7 @@ from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
+    FeishuKnowledgeUnit,
     FeishuProcessingEvent,
     FeishuReviewPackage,
     FeishuSource,
@@ -105,6 +106,7 @@ class MinioFeishuArchiveAdapter:
         ".jpeg",
         ".jpg",
         ".md",
+        ".markdown",
         ".pdf",
         ".png",
         ".pptx",
@@ -1448,8 +1450,8 @@ def _source_dict(source: FeishuSource, summary: FeishuSourceSummary | None = Non
     return data
 
 
-def _run_dict(run: FeishuSyncRun) -> dict:
-    return {
+def _run_dict(run: FeishuSyncRun, task: dict | None = None) -> dict:
+    data = {
         "run_id": run.run_id,
         "source_id": run.source_id,
         "run_type": run.run_type,
@@ -1467,9 +1469,34 @@ def _run_dict(run: FeishuSyncRun) -> dict:
         "impact_summary": run.impact_summary or {},
         "error_summary": run.error_summary,
     }
+    if task:
+        data.update(
+            {
+                "task_id": task.get("id"),
+                "progress": float(task.get("progress") or 0),
+                "progress_message": task.get("message") or "",
+                "task_status": task.get("status"),
+            }
+        )
+    else:
+        data.update(
+            {
+                "task_id": None,
+                "progress": 100.0 if run.status == "succeeded" else 0.0,
+                "progress_message": "",
+                "task_status": None,
+            }
+        )
+    return data
 
 
-def _material_dict(version: FeishuMaterialVersion, item: FeishuSourceItem, source: FeishuSource) -> dict:
+def _material_dict(
+    version: FeishuMaterialVersion,
+    item: FeishuSourceItem,
+    source: FeishuSource,
+    *,
+    parsed_unit_count: int | None = None,
+) -> dict:
     content_quality = (version.processing_params or {}).get("content_quality") or {}
     is_directory = item.item_type == "directory" or content_quality.get("classification") == "directory"
     return {
@@ -1500,7 +1527,9 @@ def _material_dict(version: FeishuMaterialVersion, item: FeishuSourceItem, sourc
         "review_comment": version.review_comment,
         "retry_count": version.retry_count or 0,
         "yuxi_file_id": version.yuxi_file_id,
-        "chunk_count": version.chunk_count or 0,
+        # 审核包阶段还没有写入知识库文件的 chunk_count；此时用已解析的
+        # 活跃知识单元数兜底，避免资料队列错误显示为 0。
+        "chunk_count": int(version.chunk_count or parsed_unit_count or 0),
         "token_count": version.token_count or 0,
         "content_quality": content_quality,
         "is_directory": is_directory,
@@ -1703,6 +1732,16 @@ async def scan_source(
                         if worker_source is None:
                             raise LookupError(f"Feishu source not found: {source_id}")
                         client = create_user_authorized_feishu_client(source_id)
+
+                        async def report_scan_progress(processed: int, title: str) -> None:
+                            # 扫描总量只有遍历完成后才能确定；先展示已处理数量和阶段，
+                            # 百分比用于给用户稳定的阶段性反馈，最终由任务器收敛到 100%。
+                            if hasattr(context, "set_progress"):
+                                await context.set_progress(
+                                    min(60.0, 5.0 + processed * 0.5),
+                                    f"正在扫描资料 · 已处理 {processed} 项 · {title}",
+                                )
+
                         result = await FeishuScanService(
                             repository=worker_repository,
                             client=client,
@@ -1711,6 +1750,7 @@ async def scan_source(
                             source_id=source_id,
                             mode=payload.mode,
                             operator_id=current_user.uid,
+                            progress_callback=report_scan_progress,
                         )
                     except Exception as exc:
                         await worker_repository.fail_sync_run(
@@ -1746,9 +1786,15 @@ async def scan_source(
                     )
                     await session.commit()
                     queued_version_ids = claimed_version_ids
+                    if hasattr(context, "set_progress"):
+                        await context.set_progress(
+                            65.0,
+                            f"扫描完成，正在安排 {len(queued_version_ids)} 项资料加工",
+                        )
                     await context.set_result({"run_id": result.run_id, "status": result.status})
                     enqueue_errors = []
-                    for version_id in queued_version_ids:
+                    total_to_enqueue = len(queued_version_ids)
+                    for index, version_id in enumerate(queued_version_ids, start=1):
                         try:
                             await _enqueue_processing(version_id, operator_id=current_user.uid)
                             enqueued_version_ids.add(version_id)
@@ -1759,6 +1805,11 @@ async def scan_source(
                                 message=str(exc),
                             )
                             await session.commit()
+                        if hasattr(context, "set_progress"):
+                            await context.set_progress(
+                                65.0 + (35.0 * index / total_to_enqueue if total_to_enqueue else 35.0),
+                                f"正在安排资料加工 · {index}/{total_to_enqueue}",
+                            )
                     if enqueue_errors:
                         raise enqueue_errors[0]
                     return {"run_id": result.run_id, "status": result.status}
@@ -1866,7 +1917,15 @@ async def list_source_runs(source_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(FeishuSyncRun).where(FeishuSyncRun.source_id == source_id).order_by(FeishuSyncRun.started_at.desc())
     )
-    return {"items": [_run_dict(run) for run in result.scalars()]}
+    runs = list(result.scalars())
+    items = []
+    for run in runs:
+        task = await tasker.find_task_by_payload(
+            task_type="feishu_scan",
+            payload_match={"run_id": run.run_id},
+        )
+        items.append(_run_dict(run, task.to_dict() if task else None))
+    return {"items": items}
 
 
 @feishu_knowledge.get("/runs/{run_id}")
@@ -1875,7 +1934,11 @@ async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
     run = result.scalar_one_or_none()
     if run is None:
         raise HTTPException(status_code=404, detail="Feishu sync run not found")
-    return _run_dict(run)
+    task = await tasker.find_task_by_payload(
+        task_type="feishu_scan",
+        payload_match={"run_id": run.run_id},
+    )
+    return _run_dict(run, task.to_dict() if task else None)
 
 
 @feishu_knowledge.get("/sources/{source_id}/materials")
@@ -1893,8 +1956,17 @@ async def list_materials(
 ):
     if await FeishuKnowledgeRepository(db).get_source(source_id) is None:
         raise HTTPException(status_code=404, detail="Feishu source not found")
+    parsed_unit_count = (
+        select(func.count(FeishuKnowledgeUnit.unit_id))
+        .where(
+            FeishuKnowledgeUnit.version_id == FeishuMaterialVersion.version_id,
+            FeishuKnowledgeUnit.status == "ACTIVE",
+        )
+        .correlate(FeishuMaterialVersion)
+        .scalar_subquery()
+    )
     statement = (
-        select(FeishuMaterialVersion, FeishuSourceItem, FeishuSource)
+        select(FeishuMaterialVersion, FeishuSourceItem, FeishuSource, parsed_unit_count.label("parsed_unit_count"))
         .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
         .join(FeishuSource, FeishuSource.source_id == FeishuSourceItem.source_id)
         .where(FeishuSourceItem.source_id == source_id)
@@ -1924,7 +1996,12 @@ async def list_materials(
     if run_id:
         statement = statement.where(FeishuMaterialVersion.sync_run_id == run_id)
     rows = (await db.execute(statement)).all()
-    return {"items": [_material_dict(version, item, source) for version, item, source in rows]}
+    return {
+        "items": [
+            _material_dict(version, item, source, parsed_unit_count=int(unit_count or 0))
+            for version, item, source, unit_count in rows
+        ]
+    }
 
 
 @feishu_knowledge.get("/materials/{version_id}")
@@ -1933,7 +2010,13 @@ async def get_material(version_id: str, db: AsyncSession = Depends(get_db)):
         version, item, source = await FeishuReviewService(db)._get_material(version_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _material_dict(version, item, source)
+    unit_count = await db.scalar(
+        select(func.count(FeishuKnowledgeUnit.unit_id)).where(
+            FeishuKnowledgeUnit.version_id == version.version_id,
+            FeishuKnowledgeUnit.status == "ACTIVE",
+        )
+    )
+    return _material_dict(version, item, source, parsed_unit_count=int(unit_count or 0))
 
 
 @feishu_knowledge.get("/materials/{version_id}/events")
