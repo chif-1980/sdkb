@@ -17,6 +17,7 @@ from yuxi.utils import logger
 from yuxi.agents.backends.sandbox import init_sandbox_provider, shutdown_sandbox_provider
 from yuxi import get_version
 from yuxi.config import config
+from yuxi.governance.retry_coordinator import retry_coordinator
 
 
 async def _recover_recent_feishu_processing_tasks() -> int:
@@ -157,6 +158,7 @@ async def lifespan(app: FastAPI):
     print("LangGraph Checkpoint tables verified/created!")
 
     await tasker.start()
+    await retry_coordinator.start()
     try:
         async with pg_manager.get_async_session_context() as session:
             await FeishuKnowledgeRepository(session).reconcile_interrupted_work()
@@ -182,6 +184,7 @@ async def lifespan(app: FastAPI):
     logger.info("Yuxi backend startup complete")
     yield
     await tasker.shutdown()
+    await retry_coordinator.stop()
     shutdown_sandbox_provider()
     await close_queue_clients()
     close_shared_neo4j_connection()

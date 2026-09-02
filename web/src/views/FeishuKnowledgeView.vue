@@ -110,6 +110,14 @@
           <button
             type="button"
             class="governance-tab"
+            :class="{ active: activeModule === 'work-items' }"
+            @click="activeModule = 'work-items'"
+          >
+            运营待办 <span class="governance-count">{{ governanceCounts.workItems }}</span>
+          </button>
+          <button
+            type="button"
+            class="governance-tab"
             :class="{ active: activeModule === 'relations' }"
             @click="activeModule = 'relations'"
           >
@@ -311,6 +319,12 @@
           </section>
         </section>
 
+        <FeishuWorkItemsPanel
+          v-else-if="activeModule === 'work-items'"
+          :source-id="currentSourceId"
+          @count-change="governanceCounts.workItems = $event"
+          @navigate="openWorkItem"
+        />
         <FeishuReviewWorkspace
           v-else-if="activeModule === 'reviews'"
           :source-id="currentSourceId"
@@ -411,6 +425,7 @@ import FeishuSyncRunsTable from '@/components/feishu/FeishuSyncRunsTable.vue'
 import FeishuFormalKnowledgePanel from '@/components/feishu/FeishuFormalKnowledgePanel.vue'
 import FeishuRelationsPanel from '@/components/feishu/FeishuRelationsPanel.vue'
 import FeishuReviewWorkspace from '@/components/feishu/FeishuReviewWorkspace.vue'
+import FeishuWorkItemsPanel from '@/components/feishu/FeishuWorkItemsPanel.vue'
 
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 const QR_AUTH_TTL_MS = 5 * 60 * 1000
@@ -454,7 +469,7 @@ const updatedRange = ref([])
 const materialTableRef = ref(null)
 const activeModule = ref('reviews')
 const sourceOverviewExpanded = ref(false)
-const governanceCounts = reactive({ reviews: 0, relations: 0, formal: 0 })
+const governanceCounts = reactive({ workItems: 0, reviews: 0, relations: 0, formal: 0 })
 const governanceReviewTarget = ref(null)
 let pollTimer = null
 let qrPollTimer = null
@@ -482,6 +497,23 @@ function openFormalKnowledgeUpdate(target) {
     sourceVersionId: target.sourceVersionId || ''
   }
   activeModule.value = 'reviews'
+}
+
+function openWorkItem(target = {}) {
+  if (target.module === 'review' || target.module === 'source-change') {
+    governanceReviewTarget.value = { packageId: target.packageId || '' }
+    activeModule.value = 'reviews'
+    return
+  }
+  if (target.module === 'relation') {
+    activeModule.value = 'relations'
+    return
+  }
+  if (target.module === 'knowledge') {
+    activeModule.value = 'formal'
+    return
+  }
+  activeModule.value = 'materials'
 }
 
 const filters = reactive({

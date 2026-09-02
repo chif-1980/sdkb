@@ -60,6 +60,26 @@ function packageDetail(packageId = 'package-first') {
     chunk_count: 2,
     token_count: 100,
     content_quality: target ? { checked: true, has_body: true } : {},
+    qualityGate: {
+      status: target ? 'BLOCKED' : 'REVIEW',
+      blockers: target ? [{ code: 'OPEN_CONFLICT', message: '存在未解决的跨文档冲突' }] : []
+    },
+    qualityScore: target ? 72 : 75,
+    qualityDimensions: {
+      traceability: { label: '证据与可追溯性', score: 30, maxScore: 30 },
+      completeness: { label: '内容完整性', score: target ? 25 : 20, maxScore: 25 },
+      consistency: { label: '一致性与重复冲突', score: target ? 0 : 10, maxScore: 20 },
+      timeliness: { label: '时效性与有效期', score: 15, maxScore: 15 },
+      governance: { label: '治理元数据', score: 2, maxScore: 10 }
+    },
+    impactSummary: {
+      affectedKnowledgeCount: target ? 1 : 0,
+      textChanged: target,
+      imageChanged: false,
+      layoutChanged: false,
+      openRelationCount: target ? 1 : 0
+    },
+    autoCloseEligible: false,
     previous_version: target
       ? {
           version_id: 'version-target-old',
@@ -460,6 +480,20 @@ describe('FeishuReviewWorkspace', () => {
     expect(apiAdminGet).toHaveBeenCalledWith(
       '/api/governance/review-packages?source_id=source-1&view=mine'
     )
+  })
+
+  it('展示质量门禁阻断、分项得分和来源影响摘要', async () => {
+    const wrapper = mountWorkspace({ targetReviewId: { packageId: 'package-target' } })
+    await flushPromises()
+
+    const gate = wrapper.get('.quality-gate-summary')
+    expect(gate.text()).toContain('质量门禁阻断')
+    expect(gate.text()).toContain('存在未解决的跨文档冲突')
+    expect(gate.text()).toContain('证据与可追溯性 30/30')
+    expect(gate.text()).toContain('受影响知识 1')
+    expect(gate.text()).toContain('正文有变化')
+    expect(gate.text()).toContain('图片无变化')
+    wrapper.unmount()
   })
 
   it('整篇资料可从顶部批量审核，当前知识单元仍从右侧处理', async () => {
@@ -2152,7 +2186,9 @@ describe('FeishuReviewWorkspace', () => {
     ])
 
     await wrapper.findAll('.comparison-layout-block.comparison-block-grid')[0].trigger('click')
-    expect(wrapper.get('.comparison-grid-cell-detail').text()).toContain('匹配单元格B2、D2B2知识问答')
+    expect(wrapper.get('.comparison-grid-cell-detail').text()).toContain(
+      '匹配单元格B2、D2B2知识问答'
+    )
 
     await wrapper.findAll('.comparison-layout-block.comparison-block-grid')[1].trigger('click')
     await flushPromises()

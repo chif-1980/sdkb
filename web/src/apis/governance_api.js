@@ -34,6 +34,17 @@ function errorMessage(error, fallback) {
 }
 
 export const governanceApi = {
+  listWorkItems: (params = {}) => apiAdminGet(withQuery(`${BASE_URL}/work-items`, params)),
+
+  getWorkItemSummary: (params = {}) =>
+    apiAdminGet(withQuery(`${BASE_URL}/work-items/summary`, params)),
+
+  listNotifications: (params = {}) =>
+    apiAdminGet(withQuery(`${BASE_URL}/notifications`, params)),
+
+  markNotificationRead: (notificationId) =>
+    apiAdminPost(`${BASE_URL}/notifications/${encoded(notificationId)}/read`, {}),
+
   listReviewers: () => apiAdminGet(`${BASE_URL}/reviewers`),
 
   listReviewPackages: (sourceId, params = {}) =>

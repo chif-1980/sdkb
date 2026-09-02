@@ -89,6 +89,7 @@ function mountView() {
         'a-tag': { template: '<span><slot /></span>' },
         'a-alert': { template: '<div><slot name="message" /><slot name="description" /></div>' },
         'a-select': { template: '<div />' },
+        'a-checkbox': { template: '<label><input type="checkbox" /><slot /></label>' },
         'a-input': { template: '<input />' },
         'a-range-picker': { template: '<div />' },
         'a-empty': { template: '<div />' },
@@ -106,6 +107,7 @@ function mountView() {
             '<section v-if="open" data-testid="oauth-qr-modal"><slot /><button data-testid="oauth-qr-close" @click="$emit(\'cancel\')">关闭</button></section>'
         },
         FeishuSyncRunsTable: true,
+        FeishuWorkItemsPanel: true,
         FeishuMaterialTable: true,
         FeishuMaterialDetailDrawer: true,
         FeishuReviewWorkspace: {
@@ -698,6 +700,7 @@ describe('FeishuKnowledgeView', () => {
 
     const labels = wrapper.findAll('.governance-tab').map((tab) => tab.text().trim())
     expect(labels[0]).toContain('待审核')
+    expect(labels[1]).toContain('运营待办')
     expect(labels.at(-1)).toBe('资料与扫描')
     expect(wrapper.findAll('.governance-tab')[0].classes()).toContain('active')
     expect(wrapper.find('[data-testid="review-workspace"]').exists()).toBe(true)

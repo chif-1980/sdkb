@@ -146,6 +146,12 @@ class PostgresManager(metaclass=SingletonMeta):
                 ALTER TABLE product_messages
                 ADD COLUMN IF NOT EXISTS feedback_rating VARCHAR(8);
 
+                ALTER TABLE product_messages
+                ADD COLUMN IF NOT EXISTS feedback_reason_type VARCHAR(32);
+
+                ALTER TABLE product_messages
+                ADD COLUMN IF NOT EXISTS feedback_reason_text TEXT;
+
                 IF NOT EXISTS (
                     SELECT 1
                     FROM pg_constraint
@@ -446,9 +452,14 @@ class PostgresManager(metaclass=SingletonMeta):
                 unsupported_count INTEGER DEFAULT 0,
                 failed_count INTEGER DEFAULT 0,
                 invalidated_count INTEGER DEFAULT 0,
-                error_summary TEXT
+                error_summary TEXT,
+                impact_summary JSONB NOT NULL DEFAULT '{}'::jsonb
             )
             """,
+            (
+                "ALTER TABLE IF EXISTS feishu_sync_runs "
+                "ADD COLUMN IF NOT EXISTS impact_summary JSONB NOT NULL DEFAULT '{}'::jsonb"
+            ),
             """
             CREATE TABLE IF NOT EXISTS feishu_source_items (
                 id SERIAL PRIMARY KEY,
@@ -516,6 +527,12 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS sync_run_id VARCHAR(64)",
+            "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS retry_claimed_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS feishu_material_versions ADD COLUMN IF NOT EXISTS retry_claim_token VARCHAR(64)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_material_versions_retry_claim "
+                "ON feishu_material_versions(retry_claimed_at, processing_status)"
+            ),
             "ALTER TABLE IF EXISTS feishu_sources ADD COLUMN IF NOT EXISTS "
             "scan_scope VARCHAR(16) NOT NULL DEFAULT 'root'",
             "ALTER TABLE IF EXISTS feishu_sources ALTER COLUMN scan_scope SET DEFAULT 'root'",
@@ -560,6 +577,55 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_note TEXT",
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_updated_by VARCHAR(64)",
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_updated_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS feishu_review_packages ADD COLUMN IF NOT EXISTS quality_gate_status VARCHAR(32)",
+            "ALTER TABLE IF EXISTS feishu_review_packages ADD COLUMN IF NOT EXISTS quality_score INTEGER",
+            (
+                "ALTER TABLE IF EXISTS feishu_review_packages "
+                "ADD COLUMN IF NOT EXISTS quality_dimensions JSONB NOT NULL DEFAULT '{}'::jsonb"
+            ),
+            (
+                "ALTER TABLE IF EXISTS feishu_review_packages "
+                "ADD COLUMN IF NOT EXISTS impact_summary JSONB NOT NULL DEFAULT '{}'::jsonb"
+            ),
+            (
+                "ALTER TABLE IF EXISTS feishu_review_packages "
+                "ADD COLUMN IF NOT EXISTS auto_close_eligible BOOLEAN NOT NULL DEFAULT FALSE"
+            ),
+            "ALTER TABLE IF EXISTS feishu_review_packages ADD COLUMN IF NOT EXISTS quality_computed_at TIMESTAMPTZ",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_review_packages_quality_gate "
+                "ON feishu_review_packages(quality_gate_status)"
+            ),
+            """
+            CREATE TABLE IF NOT EXISTS feishu_notification_deliveries (
+                id SERIAL PRIMARY KEY,
+                notification_id VARCHAR(64) NOT NULL UNIQUE,
+                recipient_id VARCHAR(64) NOT NULL,
+                channel VARCHAR(32) NOT NULL DEFAULT 'IN_APP',
+                object_type VARCHAR(64) NOT NULL,
+                object_id VARCHAR(128) NOT NULL,
+                idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+                title VARCHAR(512) NOT NULL,
+                body TEXT NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TIMESTAMPTZ,
+                error_message TEXT,
+                read_at TIMESTAMPTZ,
+                delivered_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "ALTER TABLE IF EXISTS feishu_notification_deliveries ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_notification_deliveries_recipient_status "
+                "ON feishu_notification_deliveries(recipient_id, status)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_feishu_notification_deliveries_object "
+                "ON feishu_notification_deliveries(object_type, object_id)"
+            ),
             (
                 "CREATE INDEX IF NOT EXISTS ix_feishu_knowledge_units_lifecycle_status "
                 "ON feishu_knowledge_units(lifecycle_status)"

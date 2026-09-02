@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Literal, Protocol
@@ -29,6 +29,8 @@ from yuxi.governance.comparator import CrossDocumentComparisonService
 from yuxi.governance.content_quality import assess_content
 from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
 from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
+from yuxi.governance.notification_service import NotificationService
+from yuxi.governance.quality_gate_service import QualityGateService
 from yuxi.governance.review_backfill import backfill_legacy_governance_reviews
 from yuxi.governance.source_segment_service import (
     SourceSegmentService,
@@ -46,6 +48,7 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
     FeishuMaterialVersion,
     FeishuProcessingEvent,
+    FeishuReviewPackage,
     FeishuSource,
     FeishuSourceItem,
     FeishuSourceSegment,
@@ -392,8 +395,7 @@ class FeishuReviewService:
                 raise ValueError("正文检查尚未完成，不能发布")
             if not quality.get("has_body"):
                 raise ValueError("资料只有标题、没有可审核正文，不能发布")
-            if await CrossDocumentComparisonService(self.session).has_open_conflict(version.version_id):
-                raise ValueError("Material has unresolved cross-document conflicts")
+            await QualityGateService(self.session).assert_version_publishable(version.version_id)
             await SourceSegmentService(self.session).transition_pending_publication_state(
                 version.version_id,
                 target_state="INCLUDED",
@@ -442,6 +444,7 @@ class FeishuReviewService:
                 raise ValueError("正文检查尚未完成，不能发布")
             if not quality.get("has_body"):
                 raise ValueError("资料只有标题、没有可审核正文，不能发布")
+            await QualityGateService(self.session).assert_version_publishable(version.version_id)
 
             params = dict(version.processing_params or {})
             revision = int(params.get("unit_publish_requested_revision") or 0) + 1
@@ -511,8 +514,13 @@ class FeishuReviewService:
             from_status = version.processing_status
             version.processing_status = "publish_queued" if from_status == "publish_failed" else "processing_queued"
             version.retry_count = (version.retry_count or 0) + 1
+            version.retry_claimed_at = None
+            version.retry_claim_token = None
             version.error_code = None
             version.error_message = None
+            params = dict(version.processing_params or {})
+            params.pop("governance_retry_next_at", None)
+            version.processing_params = params
             self._append_event(
                 source_id=item.source_id,
                 item_id=item.item_id,
@@ -524,6 +532,47 @@ class FeishuReviewService:
             )
             await self.session.flush()
             return version
+
+    @staticmethod
+    def _schedule_retry(version: FeishuMaterialVersion) -> None:
+        """Persist retry timing so a restarted API can resume failed work."""
+        params = dict(version.processing_params or {})
+        if version.processing_status not in FeishuReviewService.RETRYABLE_STATUSES:
+            params.pop("governance_retry_next_at", None)
+            version.processing_params = params
+            return
+        retry_index = int(version.retry_count or 0)
+        delays = (1, 5, 15)
+        if retry_index < len(delays):
+            params["governance_retry_next_at"] = (utc_now() + timedelta(minutes=delays[retry_index])).isoformat()
+        else:
+            params.pop("governance_retry_next_at", None)
+        version.processing_params = params
+
+    async def _notify_processing_failure(
+        self,
+        *,
+        version: FeishuMaterialVersion,
+        item: FeishuSourceItem,
+        message: str,
+        operation: str,
+    ) -> None:
+        assignee_id = await self.session.scalar(
+            select(FeishuReviewPackage.assignee_id)
+            .where(FeishuReviewPackage.source_version_id == version.version_id)
+            .order_by(FeishuReviewPackage.created_at.desc())
+            .limit(1)
+        )
+        retry_count = int(version.retry_count or 0)
+        await NotificationService(self.session).notify_admins(
+            object_type="PROCESSING_FAILURE",
+            object_id=version.version_id,
+            assignee_id=assignee_id,
+            event_key=f"processing-failed:{operation}:{version.version_id}:{retry_count}",
+            title=f"资料{operation}失败",
+            body=f"{item.title or '未命名资料'}：{message}",
+            feishu=retry_count >= 3,
+        )
 
     async def reindex(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
         async with self._transaction():
@@ -649,6 +698,7 @@ class FeishuReviewService:
                 raise ValueError("Material is not processing")
             version.processing_status = "parse_failed"
             version.error_message = message
+            self._schedule_retry(version)
             self._append_event(
                 source_id=item.source_id,
                 item_id=item.item_id,
@@ -657,6 +707,12 @@ class FeishuReviewService:
                 from_status="processing",
                 to_status="parse_failed",
                 message=message,
+            )
+            await self._notify_processing_failure(
+                version=version,
+                item=item,
+                message=message,
+                operation="解析",
             )
             await self.session.flush()
             return version
@@ -668,6 +724,7 @@ class FeishuReviewService:
                 raise ValueError("Material is not queued for processing")
             version.processing_status = "parse_failed"
             version.error_message = message
+            self._schedule_retry(version)
             self._append_event(
                 source_id=item.source_id,
                 item_id=item.item_id,
@@ -676,6 +733,12 @@ class FeishuReviewService:
                 from_status="processing_queued",
                 to_status="parse_failed",
                 message=message,
+            )
+            await self._notify_processing_failure(
+                version=version,
+                item=item,
+                message=message,
+                operation="解析入队",
             )
             await self.session.flush()
             return version
@@ -805,6 +868,12 @@ class FeishuReviewService:
                 to_status="published",
                 message=message,
             )
+            await self._notify_processing_failure(
+                version=version,
+                item=item,
+                message=message,
+                operation="发布",
+            )
             await self.session.flush()
             return version
 
@@ -894,6 +963,7 @@ class FeishuReviewService:
             processing_params.pop("source_rollback_previous_file_id", None)
             processing_params.pop("reindex_requested", None)
             version.processing_params = processing_params
+            self._schedule_retry(version)
             self._append_event(
                 source_id=item.source_id,
                 item_id=item.item_id,
@@ -902,6 +972,12 @@ class FeishuReviewService:
                 from_status=from_status,
                 to_status=version.processing_status,
                 message=message,
+            )
+            await self._notify_processing_failure(
+                version=version,
+                item=item,
+                message=message,
+                operation="发布",
             )
             await self.session.flush()
             return version
@@ -1388,6 +1464,7 @@ def _run_dict(run: FeishuSyncRun) -> dict:
         "unsupported_count": run.unsupported_count or 0,
         "failed_count": run.failed_count or 0,
         "invalidated_count": run.invalidated_count or 0,
+        "impact_summary": run.impact_summary or {},
         "error_summary": run.error_summary,
     }
 
@@ -2413,6 +2490,26 @@ async def _run_comparison_worker(
         async with pg_manager.get_async_session_context() as session:
             await _update_comparison_state(session, version_id, "completed", relation_count=relation_count)
             await KnowledgeUnitService(session).ensure_for_version(version_id)
+            version = await session.scalar(
+                select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == version_id).with_for_update()
+            )
+            if version is not None:
+                params = dict(version.processing_params or {})
+                scan_impact = dict(params.get("scan_impact") or {})
+                scan_impact["affectedRelationCount"] = relation_count
+                params["scan_impact"] = scan_impact
+                version.processing_params = params
+            for relation in relations:
+                if relation.relation_type != "CONFLICT" or relation.status not in {"open", "pending"}:
+                    continue
+                await NotificationService(session).notify_admins(
+                    object_type="CONFLICT",
+                    object_id=relation.relation_id,
+                    event_key=f"conflict-detected:{relation.relation_id}",
+                    title="检测到高风险跨文档冲突",
+                    body=relation.reasoning or "请核对冲突双方的来源证据并完成处理。",
+                    feishu=True,
+                )
         return {"version_id": version_id, "status": "completed", "relation_count": relation_count}
     except asyncio.CancelledError:
         async with pg_manager.get_async_session_context() as session:

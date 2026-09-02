@@ -162,6 +162,46 @@
             <span>发现 {{ sourceUpdateCount }} 份原文更新，已生成待审核任务</span>
             <button type="button" @click="showSourceUpdates">查看更新</button>
           </div>
+          <section
+            v-if="packageDetail.qualityGate"
+            class="quality-gate-summary"
+            aria-label="质量门禁"
+          >
+            <div
+              class="quality-gate-score"
+              :class="`is-${String(packageDetail.qualityGate.status).toLowerCase()}`"
+            >
+              <strong>{{ packageDetail.qualityScore ?? '-' }}</strong>
+              <span>质量分</span>
+            </div>
+            <div class="quality-gate-main">
+              <header>
+                <strong>{{ qualityGateLabel(packageDetail.qualityGate.status) }}</strong>
+                <span v-if="packageDetail.autoCloseEligible"
+                  >符合自动关闭条件（观察模式，不会自动执行）</span
+                >
+              </header>
+              <div class="quality-dimensions">
+                <span v-for="dimension in packageDetail.qualityDimensions" :key="dimension.label">
+                  {{ dimension.label }} {{ dimension.score }}/{{ dimension.maxScore }}
+                </span>
+              </div>
+              <div v-if="packageDetail.qualityGate.blockers?.length" class="quality-blockers">
+                <span v-for="blocker in packageDetail.qualityGate.blockers" :key="blocker.code">
+                  <CircleAlert :size="13" /> {{ blocker.message }}
+                </span>
+              </div>
+              <div v-if="packageDetail.impactSummary" class="impact-summary">
+                <span
+                  >受影响知识 {{ packageDetail.impactSummary.affectedKnowledgeCount || 0 }}</span
+                >
+                <span>正文{{ changeFlagLabel(packageDetail.impactSummary.textChanged) }}</span>
+                <span>图片{{ changeFlagLabel(packageDetail.impactSummary.imageChanged) }}</span>
+                <span>版式{{ changeFlagLabel(packageDetail.impactSummary.layoutChanged) }}</span>
+                <span>待处理关系 {{ packageDetail.impactSummary.openRelationCount || 0 }}</span>
+              </div>
+            </div>
+          </section>
           <div v-if="publishBlocked" class="content-quality-alert">
             <CircleAlert :size="16" />
             <div>
@@ -1170,7 +1210,9 @@
                                   <strong>{{ comparisonGridMatchCells('source') }}</strong>
                                 </div>
                                 <div class="comparison-grid-cell-current">
-                                  <strong>{{ activeComparisonSourceGridBlock.locator?.cell }}</strong>
+                                  <strong>{{
+                                    activeComparisonSourceGridBlock.locator?.cell
+                                  }}</strong>
                                   <span>{{ activeComparisonSourceGridBlock.content }}</span>
                                 </div>
                               </div>
@@ -1304,7 +1346,9 @@
                                   <strong>{{ comparisonGridMatchCells('target') }}</strong>
                                 </div>
                                 <div class="comparison-grid-cell-current">
-                                  <strong>{{ activeComparisonTargetGridBlock.locator?.cell }}</strong>
+                                  <strong>{{
+                                    activeComparisonTargetGridBlock.locator?.cell
+                                  }}</strong>
                                   <span>{{ activeComparisonTargetGridBlock.content }}</span>
                                 </div>
                               </div>
@@ -3775,8 +3819,7 @@ function comparisonBlockClass(side, block) {
     page?.page_number
   ).includes(block.block_id)
   const isSelected =
-    isActiveMatch &&
-    (!isGrid || comparisonGridFocusBlock(side)?.block_id === block.block_id)
+    isActiveMatch && (!isGrid || comparisonGridFocusBlock(side)?.block_id === block.block_id)
   return {
     'comparison-block-match': isActiveMatch,
     'comparison-block-selected': isSelected,
@@ -3797,7 +3840,8 @@ function comparisonMatchNumber(side, block) {
 }
 
 function comparisonBlockMarker(side, block) {
-  const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  const page =
+    side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
   if (page?.render_mode === 'grid') return block.locator?.cell || ''
   return comparisonMatchNumber(side, block)
 }
@@ -3836,7 +3880,8 @@ function comparisonMatchBlockIds(match, side, pageNumber) {
 
 function comparisonMatchForBlock(side, block) {
   const matches = relationLayoutComparison.value?.matches || []
-  const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  const page =
+    side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
   const pageNumber = page?.page_number
   const activeMatch = activeComparisonMatch.value
   if (comparisonMatchBlockIds(activeMatch, side, pageNumber).includes(block.block_id))
@@ -3847,7 +3892,8 @@ function comparisonMatchForBlock(side, block) {
 }
 
 function comparisonGridMatchBlocks(side) {
-  const page = side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
+  const page =
+    side === 'source' ? activeComparisonSourcePage.value : activeComparisonTargetPage.value
   if (page?.render_mode !== 'grid') return []
   const matchBlockIds = new Set(
     comparisonMatchBlockIds(activeComparisonMatch.value, side, page.page_number)
@@ -4066,6 +4112,23 @@ function statusColor(value) {
 }
 function riskLabel(value) {
   return { HIGH: '高风险', MEDIUM: '中风险', LOW: '低风险' }[value] || '待评估'
+}
+
+function qualityGateLabel(value) {
+  return (
+    {
+      BLOCKED: '质量门禁阻断',
+      RECOMMENDED: '建议通过，仍需人工确认',
+      REVIEW: '需要重点人工复核',
+      RETURN: '建议退回处理'
+    }[value] || '质量门禁待计算'
+  )
+}
+
+function changeFlagLabel(value) {
+  if (value === true) return '有变化'
+  if (value === false) return '无变化'
+  return '待核验'
 }
 function buildVersionChanges(previousContent, currentContent) {
   if (!previousContent || !currentContent) return []
@@ -5111,6 +5174,78 @@ loadReviewers()
   border-radius: 5px;
   background: var(--color-warning-10);
   color: var(--color-warning-700);
+}
+.quality-gate-summary {
+  display: flex;
+  gap: 12px;
+  margin: 10px 14px 0;
+  padding: 10px 12px;
+  border: 1px solid #dce4ee;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.quality-gate-score {
+  display: grid;
+  flex: 0 0 62px;
+  place-content: center;
+  border-right: 1px solid #dce4ee;
+  text-align: center;
+}
+.quality-gate-score strong {
+  color: #245dab;
+  font-size: 24px;
+  line-height: 1;
+}
+.quality-gate-score span {
+  margin-top: 4px;
+  color: #718096;
+  font-size: 11px;
+}
+.quality-gate-score.is-blocked strong,
+.quality-gate-score.is-return strong {
+  color: #b42318;
+}
+.quality-gate-score.is-review strong {
+  color: #a15c00;
+}
+.quality-gate-main {
+  min-width: 0;
+  flex: 1;
+}
+.quality-gate-main header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.quality-gate-main header strong {
+  color: #26364a;
+  font-size: 13px;
+}
+.quality-gate-main header span {
+  color: #247548;
+  font-size: 11px;
+}
+.quality-dimensions,
+.impact-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 11px;
+}
+.quality-blockers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  margin-top: 7px;
+}
+.quality-blockers span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #b42318;
+  font-size: 11px;
 }
 .content-quality-alert div {
   display: grid;

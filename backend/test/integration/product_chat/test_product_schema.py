@@ -225,6 +225,8 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         "model_version",
         "prompt_version",
         "feedback_rating",
+        "feedback_reason_type",
+        "feedback_reason_text",
         "created_at",
     }
     assert {index.name for index in BusinessBase.metadata.tables["message_citations"].indexes} == {

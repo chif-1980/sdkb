@@ -60,6 +60,7 @@ class FeishuScanResult:
     unsupported_count: int = 0
     failed_count: int = 0
     invalidated_count: int = 0
+    impact_summary: dict[str, object] | None = None
     error_summary: str | None = None
 
 
@@ -70,6 +71,8 @@ class _ScanCounts:
     changed: int = 0
     unchanged: int = 0
     unsupported: int = 0
+    image_changes: int = 0
+    layout_check_pending: int = 0
 
 
 class FeishuScanService:
@@ -163,6 +166,7 @@ class FeishuScanService:
                 changed_count=counts.changed,
                 unchanged_count=counts.unchanged,
                 unsupported_count=counts.unsupported,
+                impact_summary=self._impact_summary(counts, invalidated_count=0),
             )
         except Exception as exc:
             error_summary = f"{type(exc).__name__}: {exc}"
@@ -176,6 +180,7 @@ class FeishuScanService:
                 unsupported_count=counts.unsupported,
                 failed_count=1,
                 invalidated_count=0,
+                impact_summary=self._impact_summary(counts, invalidated_count=0),
                 error_summary=error_summary,
             )
             await self._finish_run(result, source_id=source_id)
@@ -190,6 +195,7 @@ class FeishuScanService:
             unchanged_count=counts.unchanged,
             unsupported_count=counts.unsupported,
             invalidated_count=invalidated_count,
+            impact_summary=self._impact_summary(counts, invalidated_count=invalidated_count),
         )
         return result
 
@@ -524,6 +530,27 @@ class FeishuScanService:
             }
             await self.repository.session.flush()
         if version_created:
+            suffix = Path(title).suffix.lower()
+            is_image = suffix in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+            is_layout_candidate = suffix in {".pdf", ".docx", ".pptx", ".xls", ".xlsx"}
+            version.processing_params = {
+                **(version.processing_params or {}),
+                "scan_impact": {
+                    "changeType": "NEW" if item_created else "MODIFIED",
+                    "imageChanged": is_image and not item_created,
+                    # A scan only proves that the file bytes changed.  The
+                    # parser must compare source segments before we can claim
+                    # a real layout change (metadata-only updates are common
+                    # for Office/PDF files).
+                    "layoutChanged": None,
+                    "layoutCheckPending": is_layout_candidate and not item_created,
+                },
+            }
+            if not item_created and is_image:
+                counts.image_changes += 1
+            if not item_created and is_layout_candidate:
+                counts.layout_check_pending += 1
+            await self.repository.session.flush()
             await SourceChangeService(self.repository.session).register_new_material_version(version.version_id)
         if not version_created:
             counts.unchanged += 1
@@ -543,6 +570,7 @@ class FeishuScanService:
             unsupported_count=result.unsupported_count,
             failed_count=result.failed_count,
             invalidated_count=result.invalidated_count,
+            impact_summary=result.impact_summary,
             error_summary=result.error_summary,
         )
         if not updated:
@@ -556,6 +584,30 @@ class FeishuScanService:
                 message=result.error_summary,
                 payload_json={"run_id": result.run_id},
             )
+
+    @staticmethod
+    def _impact_summary(counts: _ScanCounts, *, invalidated_count: int) -> dict[str, object]:
+        return {
+            "new": counts.new,
+            "modified": counts.changed,
+            "deleted": invalidated_count,
+            "imageChanged": counts.image_changes,
+            "layoutChanged": 0,
+            "layoutCheckPending": counts.layout_check_pending,
+            "affectedKnowledgeCount": counts.new + counts.changed + invalidated_count,
+            "affectedRelationCount": None,
+            "categories": [
+                category
+                for category, count in (
+                    ("新增", counts.new),
+                    ("修改", counts.changed),
+                    ("删除", invalidated_count),
+                    ("图片", counts.image_changes),
+                    ("待核对版式", counts.layout_check_pending),
+                )
+                if count
+            ],
+        }
 
     @staticmethod
     def _metadata_matches(

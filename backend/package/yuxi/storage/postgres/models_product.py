@@ -154,6 +154,8 @@ class ProductMessage(Base):
     model_version = Column(String(128), nullable=True)
     prompt_version = Column(String(128), nullable=True)
     feedback_rating = Column(String(8), nullable=True)
+    feedback_reason_type = Column(String(32), nullable=True)
+    feedback_reason_text = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
 
     __table_args__ = (

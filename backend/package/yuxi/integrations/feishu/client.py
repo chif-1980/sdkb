@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import time
@@ -60,7 +61,7 @@ class FeishuApiError(FeishuClientError):
 
 
 class FeishuClient:
-    """Minimal read-only client for the Feishu Open API."""
+    """Small Feishu Open API client used for wiki reads and governance notices."""
 
     def __init__(
         self,
@@ -349,6 +350,32 @@ class FeishuClient:
             file_name=self._download_filename(response.headers.get("content-disposition")),
         )
 
+    async def send_text_message(self, *, open_id: str, text: str) -> dict[str, Any]:
+        """Send a plain-text tenant message to one Feishu user."""
+        if not isinstance(open_id, str) or not open_id.strip():
+            raise ValueError("open_id must not be blank")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must not be blank")
+        response = await self._post_response(
+            "/open-apis/im/v1/messages",
+            params={"receive_id_type": "open_id"},
+            json_body={
+                "receive_id": open_id,
+                "msg_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+            },
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict) or payload.get("code", 0) != 0:
+            raise FeishuApiError(
+                "Feishu message API returned an invalid response",
+                error=self._error_from_response(response),
+            )
+        return payload
+
     async def _get(self, path: str, *, params: dict[str, str]) -> dict[str, Any]:
         response = await self._get_response(path, params=params)
         try:
@@ -398,12 +425,76 @@ class FeishuClient:
         self._log_response(response)
         return response
 
+    async def _post_response(
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None,
+        json_body: dict[str, Any],
+    ) -> httpx.Response:
+        token, generation = await self._get_request_token()
+        response = await self._post_with_retries(path, params=params, json_body=json_body, token=token)
+        if response.status_code == 401:
+            if self._token_provider is None:
+                self._invalidate_tenant_token(token, generation)
+            token, _ = await self._get_request_token(force_refresh=True)
+            response = await self._post_with_retries(path, params=params, json_body=json_body, token=token)
+            if response.status_code == 401:
+                raise FeishuAuthenticationError(
+                    "Feishu authentication failed", error=self._error_from_response(response)
+                )
+        if response.status_code == 403:
+            raise FeishuPermissionError("Feishu permission denied", error=self._error_from_response(response))
+        if response.status_code == 404:
+            raise FeishuNotFoundError("Feishu resource not found", error=self._error_from_response(response))
+        if response.is_error:
+            error = self._error_from_response(response)
+            if error.code in FEISHU_PERMISSION_ERROR_CODES:
+                raise FeishuPermissionError(error.message or "Feishu permission denied", error=error)
+            raise FeishuApiError("Feishu request failed", error=error)
+        self._log_response(response)
+        return response
+
     async def _get_with_retries(self, path: str, *, params: dict[str, str] | None, token: str) -> httpx.Response:
         headers = {"Authorization": f"Bearer {token}"}
         for attempt in range(self._max_retries + 1):
             request_failed = False
             try:
                 response = await self._client.get(f"{FEISHU_OPEN_API_BASE_URL}{path}", params=params, headers=headers)
+            except httpx.HTTPError:
+                if attempt >= self._max_retries:
+                    request_failed = True
+                else:
+                    await self._sleep(self._backoff_delay(attempt))
+                    continue
+            if request_failed:
+                raise FeishuApiError("Feishu request failed")
+
+            if (response.status_code == 429 or 500 <= response.status_code < 600) and attempt < self._max_retries:
+                self._log_response(response)
+                await self._sleep(self._retry_delay(response, attempt))
+                continue
+            return response
+        raise FeishuApiError("Feishu request exhausted retries")
+
+    async def _post_with_retries(
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None,
+        json_body: dict[str, Any],
+        token: str,
+    ) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {token}"}
+        for attempt in range(self._max_retries + 1):
+            request_failed = False
+            try:
+                response = await self._client.post(
+                    f"{FEISHU_OPEN_API_BASE_URL}{path}",
+                    params=params,
+                    headers=headers,
+                    json=json_body,
+                )
             except httpx.HTTPError:
                 if attempt >= self._max_retries:
                     request_failed = True
