@@ -547,6 +547,25 @@ async def test_review_package_list_backfills_pending_material_and_returns_real_c
     ]
 
 
+async def test_review_package_list_accepts_pinyin_name_query(governance_api_fixture):
+    client, _, _, _ = governance_api_fixture
+
+    matched = await client.get(
+        "/api/governance/review-packages",
+        params={"source_id": "source-1", "name_query": "bszn"},
+    )
+    unmatched = await client.get(
+        "/api/governance/review-packages",
+        params={"source_id": "source-1", "name_query": "cpjs"},
+    )
+
+    assert matched.status_code == 200
+    assert matched.json()["total"] == 1
+    assert matched.json()["items"][0]["title"] == "部署指南"
+    assert unmatched.status_code == 200
+    assert unmatched.json()["items"] == []
+
+
 async def test_review_package_counts_only_pending_source_update_tasks(governance_api_fixture):
     client, session, _, _ = governance_api_fixture
     source_item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))

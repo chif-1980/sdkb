@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 
+from pypinyin import Style, lazy_pinyin
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,6 +95,25 @@ FINAL_ITEM_STATUSES = {
 }
 
 
+def _normalize_name(value: str | None) -> str:
+    """Normalize a document name/query for forgiving name search."""
+    if not value:
+        return ""
+    return re.sub(r"[^\u3400-\u9fffA-Za-z0-9]", "", value.casefold())
+
+
+def _name_matches(title: str | None, query: str) -> bool:
+    normalized_title = _normalize_name(title)
+    normalized_query = _normalize_name(query)
+    if not normalized_query:
+        return True
+    if normalized_query in normalized_title:
+        return True
+    full_pinyin = _normalize_name("".join(lazy_pinyin(title or "", style=Style.NORMAL)))
+    initials = _normalize_name("".join(lazy_pinyin(title or "", style=Style.FIRST_LETTER)))
+    return normalized_query in full_pinyin or normalized_query in initials
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -112,6 +133,7 @@ class ReviewPackageService:
         problem_tag: str | None = None,
         risk_level: str | None = None,
         completion_result: str | None = None,
+        name_query: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
@@ -149,9 +171,13 @@ class ReviewPackageService:
                         else_=2,
                     ),
                     FeishuReviewPackage.created_at.asc(),
+                    FeishuReviewPackage.title_snapshot.asc(),
+                    FeishuReviewPackage.package_id.asc(),
                 )
             )
         )
+        if name_query and _normalize_name(name_query):
+            packages = [package for package in packages if _name_matches(package.title_snapshot, name_query)]
         items_by_package = await self._items_by_package([package.package_id for package in packages])
         for package in packages:
             items_by_package[package.package_id] = await self._reconcile_package_status(
