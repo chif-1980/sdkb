@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 860" role="img" aria-labelledby="title desc">
+  <title id="title">善达知枢系统架构</title>
+  <desc id="desc">展示管理端、知识助手、FastAPI、异步 Worker、资料解析、治理服务与各类数据基础设施之间的关系。</desc>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap');
+    text { font-family: 'JetBrains Mono', 'Noto Sans SC', 'PingFang SC', sans-serif; }
+    .title { fill: #f8fafc; font-size: 22px; font-weight: 700; }
+    .subtitle { fill: #94a3b8; font-size: 11px; }
+    .region { fill: none; stroke-width: 1.2; stroke-dasharray: 10 5; }
+    .region-label { font-size: 11px; font-weight: 600; }
+    .name { fill: #f8fafc; font-size: 13px; font-weight: 600; text-anchor: middle; }
+    .detail { fill: #cbd5e1; font-size: 10px; text-anchor: middle; }
+    .edge-label { fill: #cbd5e1; font-size: 9px; text-anchor: middle; }
+    .legend { fill: #cbd5e1; font-size: 9px; }
+  </style>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.6"/>
+    </pattern>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fb923c"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="860" fill="#0f172a"/>
+  <rect width="1440" height="860" fill="url(#grid)"/>
+
+  <text x="40" y="42" class="title">善达知枢 · 企业知识治理与可信问答架构</text>
+  <text x="40" y="64" class="subtitle">来源可追溯 · 知识单元可治理 · AI 辅助判断 · 发布可回滚</text>
+
+  <!-- Region boundaries -->
+  <rect x="30" y="90" width="285" height="300" rx="14" class="region" stroke="#22d3ee"/>
+  <text x="48" y="114" class="region-label" fill="#22d3ee">用户与来源</text>
+  <rect x="335" y="90" width="570" height="575" rx="14" class="region" stroke="#34d399"/>
+  <text x="353" y="114" class="region-label" fill="#34d399">应用与治理平面</text>
+  <rect x="925" y="90" width="485" height="575" rx="14" class="region" stroke="#a78bfa"/>
+  <text x="943" y="114" class="region-label" fill="#a78bfa">数据与检索平面</text>
+  <rect x="30" y="690" width="1380" height="125" rx="14" class="region" stroke="#fbbf24"/>
+  <text x="48" y="714" class="region-label" fill="#fbbf24">外部能力与运行边界</text>
+
+  <!-- Edges -->
+  <path d="M260 144 L360 144" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+  <path d="M260 244 L360 244" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+  <path d="M580 144 L650 190" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <path d="M580 244 L650 220" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <path d="M160 358 L160 430 L650 430 L650 365" fill="none" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrow-green)"/>
+  <text x="405" y="420" class="edge-label">飞书 OAuth / Wiki 只读同步</text>
+  <path d="M470 410 L470 500" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <path d="M580 350 L650 350" fill="none" stroke="#fb923c" stroke-width="2" marker-end="url(#arrow-orange)"/>
+  <path d="M890 205 L960 250" fill="none" stroke="#fb923c" stroke-width="2" marker-end="url(#arrow-orange)"/>
+  <path d="M890 350 L960 290" fill="none" stroke="#fb923c" stroke-width="2" marker-end="url(#arrow-orange)"/>
+  <path d="M890 545 L1010 470" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <path d="M890 230 L1190 150" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <path d="M890 270 L1190 270" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <path d="M890 305 L1190 390" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <path d="M890 575 L1190 510" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <path d="M160 534 L160 750 L380 750" fill="none" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arrow-orange)"/>
+  <path d="M470 590 L470 750" fill="none" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arrow-orange)"/>
+  <path d="M770 415 L770 750" fill="none" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arrow-orange)"/>
+
+  <!-- User/source boxes -->
+  <rect x="60" y="130" width="200" height="68" rx="8" fill="#0f172a"/>
+  <rect x="60" y="130" width="200" height="68" rx="8" fill="rgba(8,51,68,.55)" stroke="#22d3ee" stroke-width="1.6"/>
+  <text x="160" y="158" class="name">管理端浏览器</text><text x="160" y="178" class="detail">知识加工 / 审核发布</text>
+  <rect x="60" y="230" width="200" height="68" rx="8" fill="#0f172a"/>
+  <rect x="60" y="230" width="200" height="68" rx="8" fill="rgba(8,51,68,.55)" stroke="#22d3ee" stroke-width="1.6"/>
+  <text x="160" y="258" class="name">知识助手用户</text><text x="160" y="278" class="detail">提问 / 引用 / 反馈</text>
+  <rect x="60" y="430" width="200" height="68" rx="8" fill="#0f172a"/>
+  <rect x="60" y="430" width="200" height="68" rx="8" fill="rgba(30,41,59,.65)" stroke="#94a3b8" stroke-width="1.6"/>
+  <text x="160" y="458" class="name">飞书企业知识源</text><text x="160" y="478" class="detail">Wiki / 文档 / 附件</text>
+  <rect x="60" y="510" width="200" height="68" rx="8" fill="#0f172a"/>
+  <rect x="60" y="510" width="200" height="68" rx="8" fill="rgba(30,41,59,.65)" stroke="#94a3b8" stroke-width="1.6"/>
+  <text x="160" y="538" class="name">模型与嵌入服务</text><text x="160" y="558" class="detail">LLM / Embedding / Rerank</text>
+
+  <!-- Application/governance boxes -->
+  <rect x="360" y="130" width="220" height="68" rx="8" fill="#0f172a"/>
+  <rect x="360" y="130" width="220" height="68" rx="8" fill="rgba(8,51,68,.55)" stroke="#22d3ee" stroke-width="1.6"/>
+  <text x="470" y="158" class="name">Vue 管理端</text><text x="470" y="178" class="detail">5173 / 管理员权限</text>
+  <rect x="360" y="230" width="220" height="68" rx="8" fill="#0f172a"/>
+  <rect x="360" y="230" width="220" height="68" rx="8" fill="rgba(8,51,68,.55)" stroke="#22d3ee" stroke-width="1.6"/>
+  <text x="470" y="258" class="name">知识助手前端</text><text x="470" y="278" class="detail">5174 / 企业用户</text>
+  <rect x="650" y="160" width="240" height="100" rx="8" fill="#0f172a"/>
+  <rect x="650" y="160" width="240" height="100" rx="8" fill="rgba(6,78,59,.55)" stroke="#34d399" stroke-width="1.8"/>
+  <text x="770" y="198" class="name">FastAPI API</text><text x="770" y="220" class="detail">认证 / 业务路由 / SSE</text><text x="770" y="240" class="detail">/api/feishu-knowledge · /api/governance</text>
+  <rect x="650" y="310" width="240" height="84" rx="8" fill="#0f172a"/>
+  <rect x="650" y="310" width="240" height="84" rx="8" fill="rgba(6,78,59,.55)" stroke="#34d399" stroke-width="1.8"/>
+  <text x="770" y="342" class="name">ARQ Worker</text><text x="770" y="364" class="detail">扫描 / 解析 / 发布 / 重试</text><text x="770" y="382" class="detail">异步任务与进度事件</text>
+  <rect x="360" y="500" width="220" height="90" rx="8" fill="#0f172a"/>
+  <rect x="360" y="500" width="220" height="90" rx="8" fill="rgba(6,78,59,.55)" stroke="#34d399" stroke-width="1.8"/>
+  <text x="470" y="534" class="name">文档解析与版式</text><text x="470" y="556" class="detail">PDF / Word / PPT / Excel / 图片</text><text x="470" y="576" class="detail">OCR · 页面预览 · 内容块</text>
+  <rect x="650" y="500" width="240" height="90" rx="8" fill="#0f172a"/>
+  <rect x="650" y="500" width="240" height="90" rx="8" fill="rgba(6,78,59,.55)" stroke="#34d399" stroke-width="1.8"/>
+  <text x="770" y="534" class="name">治理服务</text><text x="770" y="556" class="detail">知识单元 / 质量门禁</text><text x="770" y="576" class="detail">跨文档关系 / 审计 / 通知</text>
+
+  <!-- Data boxes -->
+  <rect x="960" y="215" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="960" y="215" width="180" height="70" rx="8" fill="rgba(120,53,15,.35)" stroke="#fb923c" stroke-width="1.6"/>
+  <text x="1050" y="244" class="name">Redis</text><text x="1050" y="264" class="detail">队列 / 运行事件 / 取消</text>
+  <rect x="1190" y="120" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="1190" y="120" width="180" height="70" rx="8" fill="rgba(76,29,149,.55)" stroke="#a78bfa" stroke-width="1.6"/>
+  <text x="1280" y="149" class="name">PostgreSQL</text><text x="1280" y="169" class="detail">用户 / 来源 / 审核 / 审计</text>
+  <rect x="1190" y="240" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="1190" y="240" width="180" height="70" rx="8" fill="rgba(76,29,149,.55)" stroke="#a78bfa" stroke-width="1.6"/>
+  <text x="1280" y="269" class="name">MinIO</text><text x="1280" y="289" class="detail">原文件 / 解析产物 / 预览</text>
+  <rect x="1190" y="360" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="1190" y="360" width="180" height="70" rx="8" fill="rgba(76,29,149,.55)" stroke="#a78bfa" stroke-width="1.6"/>
+  <text x="1280" y="389" class="name">Milvus</text><text x="1280" y="409" class="detail">向量检索 / 正式知识</text>
+  <rect x="1190" y="480" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="1190" y="480" width="180" height="70" rx="8" fill="rgba(76,29,149,.55)" stroke="#a78bfa" stroke-width="1.6"/>
+  <text x="1280" y="509" class="name">Neo4j（可选）</text><text x="1280" y="529" class="detail">知识图谱关系</text>
+
+  <!-- Runtime boundary -->
+  <rect x="80" y="735" width="250" height="54" rx="7" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.4"/>
+  <text x="205" y="758" class="name">Docker Compose</text><text x="205" y="777" class="detail">开发 / 生产服务编排</text>
+  <rect x="385" y="735" width="250" height="54" rx="7" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.4"/>
+  <text x="510" y="758" class="name">MinerU / PaddleX</text><text x="510" y="777" class="detail">复杂文档解析与 OCR</text>
+  <rect x="690" y="735" width="250" height="54" rx="7" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.4"/>
+  <text x="815" y="758" class="name">Sandbox Provisioner</text><text x="815" y="777" class="detail">隔离工具执行环境</text>
+  <rect x="995" y="735" width="330" height="54" rx="7" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.4"/>
+  <text x="1160" y="758" class="name">HTTPS / OAuth / 权限边界</text><text x="1160" y="777" class="detail">前端同源代理 · 后端最终校验</text>
+
+  <!-- Legend -->
+  <circle cx="1060" cy="620" r="5" fill="#22d3ee"/><text x="1072" y="624" class="legend">前端与输入</text>
+  <circle cx="1140" cy="620" r="5" fill="#34d399"/><text x="1152" y="624" class="legend">业务与治理</text>
+  <circle cx="1220" cy="620" r="5" fill="#a78bfa"/><text x="1232" y="624" class="legend">持久化与检索</text>
+  <circle cx="1315" cy="620" r="5" fill="#fb923c"/><text x="1327" y="624" class="legend">队列与事件</text>
+</svg>

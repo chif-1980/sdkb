@@ -22,6 +22,7 @@ export default defineConfig({
     siteTitle: '善达知枢',
     nav: [
       { text: '使用指南', link: '/guide/overview' },
+      { text: '系统架构', link: '/guide/architecture' },
       { text: '知识加工', link: '/guide/knowledge-processing' },
       { text: '知识助手', link: '/guide/knowledge-assistant' },
       {
@@ -38,6 +39,8 @@ export default defineConfig({
         text: '开始使用',
         items: [
           { text: '产品概览', link: '/guide/overview' },
+          { text: '系统架构', link: '/guide/architecture' },
+          { text: '术语定义', link: '/guide/terminology' },
           { text: '快速开始', link: '/intro/quick-start' }
         ]
       },
@@ -46,6 +49,7 @@ export default defineConfig({
         items: [
           { text: '知识加工', link: '/guide/knowledge-processing' },
           { text: '审核与发布', link: '/guide/review-and-publish' },
+          { text: '运营操作', link: '/guide/operations' },
           { text: '知识助手', link: '/guide/knowledge-assistant' },
           { text: '知识库与知识图谱', link: '/intro/knowledge-base' }
         ]
