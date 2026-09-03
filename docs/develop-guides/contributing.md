@@ -1,6 +1,6 @@
 # 参与贡献
 
-感谢你对 Yuxi 的兴趣。我们欢迎 Issue、文档改进、Bug 修复、测试补充以及新功能贡献。
+感谢你对 ZhiShu 的兴趣。我们欢迎 Issue、文档改进、Bug 修复、测试补充以及新功能贡献。
 
 如果你只是想快速了解仓库入口信息，可以先看根目录的 [CONTRIBUTING.md](../../CONTRIBUTING.md)。
 
@@ -27,7 +27,7 @@
 
 ## 开发环境
 
-Yuxi 基于 Docker Compose 管理开发环境。开发、调试、测试都应尽量在运行中的容器中完成。
+ZhiShu 基于 Docker Compose 管理开发环境。开发、调试、测试都应尽量在运行中的容器中完成。
 
 ### 启动项目
 
@@ -173,7 +173,7 @@ chore: 构建过程或辅助工具的变动
 
 ## 反馈渠道
 
-- Bug 反馈：<https://github.com/xerrors/Yuxi/issues>
-- 功能讨论：<https://github.com/xerrors/Yuxi/discussions>
+- Bug 反馈：[上游项目 Issues](https://github.com/xerrors/Yuxi/issues)
+- 功能讨论：[上游项目 Discussions](https://github.com/xerrors/Yuxi/discussions)
 
 感谢每一位贡献者的投入。

@@ -84,7 +84,7 @@ export default defineConfig({
     ],
     socialLinks: [{ icon: 'github', link: 'https://github.com/chif-1980/sdkb' }],
     footer: {
-      message: '善达知枢基于 Yuxi 开源项目构建。',
+      message: '善达知枢基于 ZhiShu 开源项目构建。',
       copyright: 'Copyright © 2026 Quickdone'
     },
     lastUpdated: {

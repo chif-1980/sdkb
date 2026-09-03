@@ -1,6 +1,6 @@
 # Skills 管理系统
 
-Skills 是 Yuxi 系统中用于扩展 Agent 能力的重要机制。通过 Skills，开发者可以将特定的工具、提示词模板或领域知识打包成可复用的技能包，让 Agent 在对话过程中能够调用这些额外能力。
+Skills 是 ZhiShu 系统中用于扩展 Agent 能力的重要机制。通过 Skills，开发者可以将特定的工具、提示词模板或领域知识打包成可复用的技能包，让 Agent 在对话过程中能够调用这些额外能力。
 
 ## 为什么需要 Skills
 
@@ -171,7 +171,7 @@ ModelScope 合集地址可以作为远程来源填写，例如 `https://modelsco
 只有具备 `can_manage` 权限的用户才能编辑文件、依赖、共享范围和启用状态。
 
 ::: tip 远程安装不会把 ~/.agents/skills 作为系统主存储
-远程安装只把 `skills.sh` CLI 作为“下载器”使用。Yuxi 仍然以 `/app/saves/skills + skills 表` 作为正式来源，这样才能与现有的权限、线程可见性和沙盒挂载机制保持一致。
+远程安装只把 `skills.sh` CLI 作为“下载器”使用。ZhiShu 仍然以 `/app/saves/skills + skills 表` 作为正式来源，这样才能与现有的权限、线程可见性和沙盒挂载机制保持一致。
 :::
 
 ## 依赖系统
