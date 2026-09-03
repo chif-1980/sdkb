@@ -10,6 +10,7 @@ from yuxi.storage.postgres.models_business import Base
 from yuxi.storage.postgres.models_knowledge import (
     FeishuKnowledgeUnit,
     FeishuMaterialVersion,
+    FeishuProcessingEvent,
     FeishuSource,
     FeishuSourceChangeRequest,
     FeishuSourceItem,
@@ -148,6 +149,58 @@ async def test_unit_can_be_offlined_and_restored_only_after_candidate_index_swit
     assert unit.publication_state == "INCLUDED"
     assert unit.lifecycle_note == "已复核恢复"
     assert restore_result.replaced_file_id == "file-offline"
+
+
+async def test_unit_metadata_update_is_recorded_with_before_and_after_values(lifecycle_session):
+    lifecycle = KnowledgeLifecycleService(lifecycle_session)
+    valid_from = datetime(2026, 9, 1, tzinfo=UTC)
+    valid_until = datetime(2026, 12, 31, tzinfo=UTC)
+    review_due_at = datetime(2026, 10, 1, tzinfo=UTC)
+
+    await lifecycle.update_unit_metadata(
+        "unit-1",
+        owner_id="owner-1",
+        owner_name="知识负责人",
+        valid_from=valid_from,
+        valid_until=valid_until,
+        review_due_at=review_due_at,
+        operator_id="admin-1",
+    )
+    await lifecycle_session.commit()
+
+    event = await lifecycle_session.scalar(
+        select(FeishuProcessingEvent)
+        .where(FeishuProcessingEvent.event_type == "knowledge_unit_metadata_updated")
+        .order_by(FeishuProcessingEvent.id.desc())
+    )
+    assert event is not None
+    assert event.source_id == "source-1"
+    assert event.item_id == "item-1"
+    assert event.version_id == "version-current"
+    assert event.operator_id == "admin-1"
+    assert event.message == "已更新知识单元治理信息"
+    assert event.payload_json["unit_id"] == "unit-1"
+    assert event.payload_json["changed_fields"] == [
+        "owner_id",
+        "owner_name",
+        "valid_from",
+        "valid_until",
+        "review_due_at",
+    ]
+    assert event.payload_json["before"] == {
+        "owner_id": None,
+        "owner_name": None,
+        "valid_from": None,
+        "valid_until": None,
+        "review_due_at": None,
+    }
+    assert event.payload_json["after"] == {
+        "owner_id": "owner-1",
+        "owner_name": "知识负责人",
+        "valid_from": "2026-09-01T00:00:00",
+        "valid_until": "2026-12-31T00:00:00",
+        "review_due_at": "2026-10-01T00:00:00",
+    }
 
 
 async def test_failed_unit_rebuild_keeps_old_index_and_original_lifecycle_state(lifecycle_session):

@@ -636,7 +636,16 @@ class FeishuReviewService:
             version, item, source = await self._get_material(version_id, lock=True)
             if version.processing_status != "processing_queued":
                 raise ValueError("Material is not queued for processing")
+            from_status = version.processing_status
             version.processing_status = "processing"
+            self._append_event(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="processing_started",
+                from_status=from_status,
+                to_status=version.processing_status,
+            )
             await self.session.flush()
             return version, item, source
 

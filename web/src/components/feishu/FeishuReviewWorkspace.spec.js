@@ -1756,6 +1756,73 @@ describe('FeishuReviewWorkspace', () => {
     expect(message.success).toHaveBeenCalledWith('资料修改任务已取消')
   })
 
+  it('处理记录展示完整业务审计事件并标识关联资料', async () => {
+    const detail = {
+      ...packageDetail('package-target'),
+      change_requests: [],
+      audit_record_count: 2,
+      audit_records: [
+        {
+          id: 2,
+          record_type: 'EVENT',
+          category: 'CROSS_DOCUMENT',
+          event_type: 'cross_document_relation_resolved',
+          scope: 'related',
+          material: { title: '关联部署指南', path: '产品资料 / 部署指南', revision: '2' },
+          from_status: 'pending',
+          to_status: 'resolved',
+          operator_id: 'admin-a',
+          message: '跨文档关系已处理：分别保留',
+          created_at: '2026-08-24T08:40:00Z'
+        },
+        {
+          id: 1,
+          record_type: 'EVENT',
+          category: 'KNOWLEDGE',
+          event_type: 'review_item_decided',
+          scope: 'current',
+          operator_id: 'admin-a',
+          message: '已记录审核结果',
+          created_at: '2026-08-24T08:30:00Z'
+        }
+      ]
+    }
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              package_id: detail.package_id,
+              source_version_id: detail.source_version_id,
+              title: detail.title
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === `/api/governance/review-packages/${detail.package_id}`) return Promise.resolve(detail)
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    const historyTab = wrapper
+      .findAll('.evidence-tabs button')
+      .find((button) => button.text().includes('处理记录'))
+    expect(historyTab.text()).toContain('2')
+    await historyTab.trigger('click')
+
+    expect(wrapper.get('.audit-record-list').text()).toContain('跨文档关系已处理')
+    expect(wrapper.get('.audit-record-list').text()).toContain('关联资料')
+    expect(wrapper.get('.audit-record-list').text()).toContain('关联部署指南')
+    expect(wrapper.get('.audit-record-list').text()).toContain('产品资料 / 部署指南')
+    expect(wrapper.get('.audit-record-list').text()).toContain('待处理 → 已解决')
+    expect(wrapper.get('.audit-record-list').text()).toContain('已记录审核结果')
+  })
+
   it('在跨文档证据中加载并展示两边的重复片段', async () => {
     const detail = duplicatePackageDetail()
     apiAdminGet.mockImplementation((url) => {
@@ -2650,7 +2717,10 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.queue-unit-summary').text()).toContain('0/3 已处理')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('待处理 3')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 0')
-    expect(wrapper.find('.unit-overview').exists()).toBe(false)
+    expect(wrapper.get('.unit-overview').text()).toContain('3个知识单元')
+    expect(wrapper.get('.unit-view-switch').text()).toContain('待处理 3')
+    expect(wrapper.get('.unit-view-switch').text()).toContain('已处理 0')
+    expect(wrapper.get('.unit-view-switch').text()).toContain('全部 3')
     expect(wrapper.find('.item-navigation').exists()).toBe(false)
     expect(wrapper.find('.knowledge-lineage').exists()).toBe(false)
     expect(wrapper.find('.evidence-context').exists()).toBe(false)
@@ -2828,6 +2898,52 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.decision-readonly').text()).not.toContain('已失效')
   })
 
+  it('已发布知识单元显示发布状态并禁用重复审核入口', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    detail.knowledge_unit_count = 1
+    detail.decided_unit_count = 1
+    detail.remaining_unit_count = 0
+    detail.included_unit_count = 1
+    detail.items = [
+      {
+        ...detail.items[0],
+        item_status: 'DECIDED',
+        outcome: 'PUBLISH',
+        decision_comment: '已确认纳入正式知识'
+      }
+    ]
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [{ ...packages[0], knowledge_unit_count: 1, decided_unit_count: 1, remaining_unit_count: 0 }],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-first/content')) {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.decision-readonly').text()).toContain('已提交发布')
+    expect(wrapper.get('.decision-readonly').text()).toContain('已确认纳入正式知识')
+    const actionButton = wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('已提交发布'))
+    expect(actionButton).toBeTruthy()
+    expect(actionButton.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.decision-footer').exists()).toBe(false)
+  })
+
   it('已处理知识单元数量仍在审核任务列表显示', async () => {
     const detail = knowledgeUnitPackageDetail()
     detail.decided_unit_count = 1
@@ -2876,6 +2992,58 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 1')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('不纳入 0')
     expect(wrapper.find('.item-navigation').exists()).toBe(false)
+  })
+
+  it('可切换查看已处理单元并明确禁止重复提交', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    detail.decided_unit_count = 1
+    detail.remaining_unit_count = 2
+    detail.included_unit_count = 1
+    detail.items[0] = {
+      ...detail.items[0],
+      item_status: 'DECIDED',
+      outcome: 'PUBLISH',
+      decision_comment: '已确认纳入正式知识'
+    }
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              knowledge_unit_count: 3,
+              decided_unit_count: 1,
+              remaining_unit_count: 2,
+              included_unit_count: 1
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-first/content')) {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    const decidedFilter = wrapper
+      .findAll('.unit-view-switch button')
+      .find((button) => button.text().includes('已处理 1'))
+    await decidedFilter.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.decision-readonly').text()).toContain('已提交发布')
+    const actionButton = wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('已提交发布'))
+    expect(actionButton).toBeTruthy()
+    expect(actionButton.attributes('disabled')).toBeDefined()
   })
 
   it('已完成任务可按最终结果筛选并在卡片显示处理构成', async () => {

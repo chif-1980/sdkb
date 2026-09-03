@@ -17,6 +17,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuMaterialVersion,
     FeishuKnowledgeUnit,
+    FeishuProcessingEvent,
     FeishuReviewItem,
     FeishuReviewPackage,
     FeishuSource,
@@ -279,6 +280,198 @@ async def test_resolved_relation_remains_visible_without_affecting_review_advice
 
 
 @pytest.mark.asyncio
+async def test_package_audit_records_include_business_events(unit_review_session):
+    session, package, _ = unit_review_session
+    session.add(
+        FeishuProcessingEvent(
+            source_id=package.source_id,
+            item_id=package.source_item_id,
+            version_id=package.source_version_id,
+            event_type="cross_document_relation_resolved",
+            operator_id="admin-a",
+            message="跨文档关系已处理：分别保留",
+            payload_json={"package_id": package.package_id, "relation_id": "relation-audit"},
+        )
+    )
+    await session.flush()
+
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+
+    assert detail["audit_record_count"] == 1
+    assert detail["audit_records"][0]["category"] == "CROSS_DOCUMENT"
+    assert detail["audit_records"][0]["event_type"] == "cross_document_relation_resolved"
+    assert detail["audit_records"][0]["scope"] == "current"
+    assert detail["audit_records"][0]["material"]["title"] == "部署指南"
+
+
+@pytest.mark.asyncio
+async def test_package_audit_records_include_events_from_related_material(unit_review_session):
+    session, package, _ = unit_review_session
+    material_item = await session.scalar(
+        select(FeishuReviewItem).where(FeishuReviewItem.review_item_id == "review-material-1")
+    )
+    material_item.relation_ids = ["relation-related-audit"]
+    related_item = FeishuSourceItem(
+        item_id="item-related-audit",
+        source_id=package.source_id,
+        item_key="page:item-related-audit",
+        item_type="docx",
+        title="关联部署指南",
+        source_validity="valid",
+    )
+    related_version = FeishuMaterialVersion(
+        version_id="version-related-audit",
+        item_id=related_item.item_id,
+        revision="2",
+        content_hash="hash-related-audit",
+        processing_status="published",
+        processing_params={},
+        review_status="published",
+        yuxi_file_id="file-related-audit",
+    )
+    related_package = FeishuReviewPackage(
+        package_id="package-related-audit",
+        package_key="package-related-audit",
+        source_id=package.source_id,
+        source_item_id=related_item.item_id,
+        source_version_id=related_version.version_id,
+        trigger_type="SOURCE_VERSION",
+        title_snapshot=related_item.title,
+        workflow_status="COMPLETED",
+        risk_level="LOW",
+        lock_version=1,
+    )
+    session.add_all(
+        [
+            related_item,
+            related_version,
+            related_package,
+            FeishuCrossDocumentRelation(
+                relation_id="relation-related-audit",
+                comparison_key="version-1:version-related-audit",
+                source_version_id=package.source_version_id,
+                target_version_id=related_version.version_id,
+                relation_type="OVERLAP",
+                similarity=0.85,
+                confidence=0.9,
+                status="resolved",
+            ),
+            FeishuProcessingEvent(
+                source_id=package.source_id,
+                item_id=related_item.item_id,
+                version_id=related_version.version_id,
+                event_type="cross_document_relation_resolved",
+                operator_id="admin-b",
+                message="关联资料已完成跨文档裁决",
+                payload_json={
+                    "package_id": related_package.package_id,
+                    "relation_id": "relation-related-audit",
+                },
+            ),
+            FeishuProcessingEvent(
+                source_id=package.source_id,
+                item_id=package.source_item_id,
+                version_id=package.source_version_id,
+                event_type="review_item_decided",
+                operator_id="admin-current",
+                message="当前资料已完成审核",
+                payload_json={"package_id": package.package_id},
+            ),
+        ]
+    )
+    await session.flush()
+
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+
+    related_records = [record for record in detail["audit_records"] if record["scope"] == "related"]
+    assert len(related_records) == 1
+    assert related_records[0]["material"]["title"] == "关联部署指南"
+    assert related_records[0]["material"]["version_id"] == "version-related-audit"
+    current_records = [record for record in detail["audit_records"] if record["operator_id"] == "admin-current"]
+    assert len(current_records) == 1
+    assert current_records[0]["scope"] == "current"
+    assert current_records[0]["material"]["title"] == "部署指南"
+
+
+@pytest.mark.asyncio
+async def test_package_audit_records_do_not_duplicate_source_change_creation(unit_review_session):
+    session, package, _ = unit_review_session
+    created_at = datetime(2026, 9, 3, 8, 0, tzinfo=UTC)
+    session.add_all(
+        [
+            FeishuSourceChangeRequest(
+                change_request_id="change-audit",
+                review_item_id="review-material-1",
+                source_item_id=package.source_item_id,
+                requested_version_id=package.source_version_id,
+                status="OPEN",
+                request_text="请补充适用版本",
+                round_number=1,
+                created_by="admin-a",
+                created_at=created_at,
+                updated_at=created_at,
+            ),
+            FeishuProcessingEvent(
+                source_id=package.source_id,
+                item_id=package.source_item_id,
+                version_id=package.source_version_id,
+                event_type="source_change_requested",
+                operator_id="admin-a",
+                message="请补充适用版本",
+                payload_json={
+                    "package_id": package.package_id,
+                    "review_item_id": "review-material-1",
+                    "change_request_id": "change-audit",
+                    "round_number": 1,
+                },
+                created_at=created_at,
+            ),
+        ]
+    )
+    await session.flush()
+
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+
+    assert detail["audit_record_count"] == 1
+    assert detail["audit_records"][0]["record_type"] == "CHANGE_REQUEST"
+    assert detail["audit_records"][0]["created_at"] == created_at.replace(tzinfo=None).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_package_audit_records_keep_historical_version_identity(unit_review_session):
+    session, package, _ = unit_review_session
+    session.add_all(
+        [
+            FeishuMaterialVersion(
+                version_id="version-history-audit",
+                item_id=package.source_item_id,
+                revision="0",
+                content_hash="hash-history-audit",
+                processing_status="replaced",
+                review_status="published",
+                yuxi_file_id="file-history-audit",
+            ),
+            FeishuProcessingEvent(
+                source_id=package.source_id,
+                item_id=package.source_item_id,
+                version_id="version-history-audit",
+                event_type="published",
+                operator_id="system",
+                message="历史版本曾发布",
+            ),
+        ]
+    )
+    await session.flush()
+
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+
+    record = next(record for record in detail["audit_records"] if record["event_type"] == "published")
+    assert record["scope"] == "current"
+    assert record["material"]["version_id"] == "version-history-audit"
+    assert record["material"]["revision"] == "0"
+
+
+@pytest.mark.asyncio
 async def test_mixed_unit_decisions_publish_only_included_segments(unit_review_session):
     session, package, segments = unit_review_session
     await KnowledgeUnitService(session).ensure_for_package(package)
@@ -428,6 +621,149 @@ async def test_single_unit_publish_keeps_package_open_and_reports_progress(unit_
     assert result["included_unit_count"] == 1
     assert result["affected_unit_titles"] == [unit_items[0].title]
     assert sorted(segment.publication_state for segment in segments) == ["INCLUDED", "PENDING"]
+
+
+@pytest.mark.asyncio
+async def test_mine_list_keeps_partial_unit_package_visible_with_progress(unit_review_session):
+    session, package, _ = unit_review_session
+    service = ReviewPackageService(session)
+    await KnowledgeUnitService(session).ensure_for_package(package)
+    unit_items = list(
+        await session.scalars(
+            select(FeishuReviewItem)
+            .where(
+                FeishuReviewItem.package_id == package.package_id,
+                FeishuReviewItem.subject_type == "KNOWLEDGE_UNIT",
+            )
+            .order_by(FeishuReviewItem.created_at.asc())
+        )
+    )
+
+    result = await service.resolve(
+        package.package_id,
+        ReviewPackageResolveRequest(
+            request_id="partial-unit-list",
+            lock_version=package.lock_version,
+            decisions=[
+                ReviewItemDecisionRequest(
+                    review_item_id=unit_items[0].review_item_id,
+                    outcome="PUBLISH",
+                )
+            ],
+        ),
+        operator_id="admin-a",
+    )
+
+    listed = await service.list_packages("source-1", operator_id="admin-a", view="mine")
+
+    assert result["workflow_status"] == "OPEN"
+    listed_package = next(item for item in listed["items"] if item["package_id"] == package.package_id)
+    assert listed_package["workflow_status"] == "OPEN"
+    assert listed_package["decided_unit_count"] == 1
+    assert listed_package["remaining_unit_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_completed_package_with_pending_units_is_reopened(unit_review_session):
+    session, package, _ = unit_review_session
+    service = ReviewPackageService(session)
+    await KnowledgeUnitService(session).ensure_for_package(package)
+    unit_items = list(
+        await session.scalars(
+            select(FeishuReviewItem)
+            .where(
+                FeishuReviewItem.package_id == package.package_id,
+                FeishuReviewItem.subject_type == "KNOWLEDGE_UNIT",
+            )
+            .order_by(FeishuReviewItem.created_at.asc())
+        )
+    )
+    first_result = await service.resolve(
+        package.package_id,
+        ReviewPackageResolveRequest(
+            request_id="stale-completed-first",
+            lock_version=package.lock_version,
+            decisions=[
+                ReviewItemDecisionRequest(
+                    review_item_id=unit_items[0].review_item_id,
+                    outcome="PUBLISH",
+                )
+            ],
+        ),
+        operator_id="admin-a",
+    )
+
+    # Simulate the terminal status written by the old implementation.
+    package.workflow_status = "COMPLETED"
+    package.completed_at = datetime.now(UTC)
+    await session.flush()
+
+    second_result = await service.resolve(
+        package.package_id,
+        ReviewPackageResolveRequest(
+            request_id="stale-completed-second",
+            lock_version=package.lock_version,
+            decisions=[
+                ReviewItemDecisionRequest(
+                    review_item_id=unit_items[1].review_item_id,
+                    outcome="PUBLISH",
+                )
+            ],
+        ),
+        operator_id="admin-a",
+    )
+
+    assert first_result["workflow_status"] == "OPEN"
+    assert second_result["workflow_status"] == "COMPLETED"
+    assert second_result["remaining_unit_count"] == 0
+async def test_decided_unit_cannot_be_submitted_again_while_other_units_remain_pending(unit_review_session):
+    session, package, _ = unit_review_session
+    service = ReviewPackageService(session)
+    await KnowledgeUnitService(session).ensure_for_package(package)
+    unit_items = list(
+        await session.scalars(
+            select(FeishuReviewItem)
+            .where(
+                FeishuReviewItem.package_id == package.package_id,
+                FeishuReviewItem.subject_type == "KNOWLEDGE_UNIT",
+            )
+            .order_by(FeishuReviewItem.title.asc())
+        )
+    )
+
+    first_result = await service.resolve(
+        package.package_id,
+        ReviewPackageResolveRequest(
+            request_id="first-unit-decision",
+            lock_version=package.lock_version,
+            decisions=[
+                ReviewItemDecisionRequest(
+                    review_item_id=unit_items[0].review_item_id,
+                    outcome="PUBLISH",
+                )
+            ],
+        ),
+        operator_id="admin-a",
+    )
+
+    with pytest.raises(ValueError, match="Review item is not actionable"):
+        await service.resolve(
+            package.package_id,
+            ReviewPackageResolveRequest(
+                request_id="duplicate-unit-decision",
+                lock_version=first_result["lock_version"],
+                decisions=[
+                    ReviewItemDecisionRequest(
+                        review_item_id=unit_items[0].review_item_id,
+                        outcome="PUBLISH",
+                    )
+                ],
+            ),
+            operator_id="admin-a",
+        )
+
+    assert package.workflow_status == "OPEN"
+    assert first_result["remaining_unit_count"] == len(unit_items) - 1
 
 
 @pytest.mark.asyncio

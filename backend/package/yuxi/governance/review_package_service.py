@@ -121,14 +121,6 @@ class ReviewPackageService:
         statement = select(FeishuReviewPackage).where(FeishuReviewPackage.source_id == source_id)
         if risk_level:
             statement = statement.where(FeishuReviewPackage.risk_level == risk_level)
-        if workflow_statuses:
-            statement = statement.where(FeishuReviewPackage.workflow_status.in_(workflow_statuses))
-        elif view == "mine":
-            statement = statement.where(
-                FeishuReviewPackage.workflow_status.not_in(
-                    {ReviewPackageStatus.COMPLETED, ReviewPackageStatus.INVALIDATED}
-                )
-            )
 
         if view == "mine":
             statement = statement.where(
@@ -161,14 +153,32 @@ class ReviewPackageService:
             )
         )
         items_by_package = await self._items_by_package([package.package_id for package in packages])
+        for package in packages:
+            items_by_package[package.package_id] = await self._reconcile_package_status(
+                package,
+                items=items_by_package[package.package_id],
+            )
         if completion_result:
             unit_service = KnowledgeUnitService(self.session)
             for package in packages:
                 await unit_service.ensure_for_package(package)
             items_by_package = await self._items_by_package([package.package_id for package in packages])
+            for package in packages:
+                items_by_package[package.package_id] = await self._reconcile_package_status(
+                    package,
+                    items=items_by_package[package.package_id],
+                )
         filtered_packages = []
         for package in packages:
             items = items_by_package[package.package_id]
+            if workflow_statuses and package.workflow_status not in workflow_statuses:
+                continue
+            if (
+                not workflow_statuses
+                and view == "mine"
+                and package.workflow_status in {ReviewPackageStatus.COMPLETED, ReviewPackageStatus.INVALIDATED}
+            ):
+                continue
             if review_types and not any(item.review_type in review_types for item in items):
                 continue
             if problem_tag and not any(problem_tag in (item.problem_tags or []) for item in items):
@@ -201,6 +211,8 @@ class ReviewPackageService:
 
     async def get_package(self, package_id: str) -> dict:
         package = await self._load_package(package_id)
+        items = await self._load_items(package.package_id)
+        await self._reconcile_package_status(package, items=items)
         await KnowledgeUnitService(self.session).ensure_for_package(package)
         quality_result = await QualityGateService(self.session).evaluate_package(package.package_id)
         items = await self._load_items(package.package_id)
@@ -263,24 +275,60 @@ class ReviewPackageService:
                     )
                 ).all()
             }
+        # A package's audit trail includes events generated for the package
+        # itself and events generated while resolving one of its linked
+        # cross-document relations.  Relation events may belong to the other
+        # material version, so querying only the current version silently
+        # drops an important part of the business decision history.
+        relation_item_ids = {
+            source_item.item_id
+            for version, source_item in relation_sources.values()
+            if source_item is not None
+        }
+        event_source_ids = {
+            package.source_id,
+            *(
+                source_item.source_id
+                for _version, source_item in relation_sources.values()
+                if source_item is not None and source_item.source_id
+            ),
+        }
         event_scope = []
-        if package.source_version_id:
-            event_scope.append(FeishuProcessingEvent.version_id == package.source_version_id)
-        if package.source_item_id:
-            event_scope.append(FeishuProcessingEvent.item_id == package.source_item_id)
+        event_version_ids = {package.source_version_id, *relation_source_ids} - {None}
+        event_item_ids = {package.source_item_id, *relation_item_ids} - {None}
+        if event_version_ids:
+            event_scope.append(FeishuProcessingEvent.version_id.in_(event_version_ids))
+        if event_item_ids:
+            event_scope.append(FeishuProcessingEvent.item_id.in_(event_item_ids))
         events = []
         if event_scope:
             events = list(
                 await self.session.scalars(
                     select(FeishuProcessingEvent)
                     .where(
-                        FeishuProcessingEvent.source_id == package.source_id,
+                        FeishuProcessingEvent.source_id.in_(event_source_ids),
                         or_(*event_scope),
                     )
-                    .order_by(FeishuProcessingEvent.created_at.desc())
+                    .order_by(FeishuProcessingEvent.created_at.desc(), FeishuProcessingEvent.id.desc())
                 )
             )
         source_version, source_item, source = source_row or (None, None, None)
+        event_version_ids_from_rows = {event.version_id for event in events if event.version_id}
+        missing_event_version_ids = event_version_ids_from_rows - set(relation_sources)
+        if source_version:
+            missing_event_version_ids.discard(source_version.version_id)
+        if missing_event_version_ids:
+            event_material_rows = await self.session.execute(
+                select(FeishuMaterialVersion, FeishuSourceItem)
+                .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+                .where(FeishuMaterialVersion.version_id.in_(missing_event_version_ids))
+            )
+            relation_sources.update(
+                {
+                    version.version_id: (version, source_item)
+                    for version, source_item in event_material_rows.all()
+                }
+            )
         previous_version = None
         has_update_item = any(item.review_type == ReviewType.UPDATE for item in display_items)
         if (
@@ -307,6 +355,78 @@ class ReviewPackageService:
                 )
                 .limit(1)
             )
+        material_by_version = {}
+        material_by_item = {}
+        if source_version and source_item:
+            current_material = self._material_dict(source_version, source_item, scope="current")
+            material_by_version[source_version.version_id] = current_material
+            material_by_item[source_item.item_id] = current_material
+        for version, related_item in relation_sources.values():
+            # A relation query can include the package's own version/item.  Do
+            # not let that related-side row overwrite the current material
+            # mapping, otherwise events for the package itself are labelled as
+            # coming from an associated document.  Historical versions of the
+            # same item still get their own version mapping for accurate audit
+            # display, but remain part of the current material's timeline.
+            if source_version and version.version_id == source_version.version_id:
+                continue
+            material_scope = (
+                "current" if source_item and related_item.item_id == source_item.item_id else "related"
+            )
+            material = self._material_dict(version, related_item, scope=material_scope)
+            material_by_version[version.version_id] = material
+            if material_scope == "related":
+                material_by_item[related_item.item_id] = material
+        event_dicts = [
+            self._event_dict(
+                event,
+                scope=(
+                    "current"
+                    if event.version_id == package.source_version_id
+                    or event.item_id == package.source_item_id
+                    else "related"
+                ),
+                material=material_by_version.get(event.version_id) or material_by_item.get(event.item_id),
+            )
+            for event in events
+        ]
+        # A source-change request has both a durable request row (needed for
+        # its current status and cancel action) and a creation event.  Keep
+        # the row in the timeline and suppress only the duplicate creation
+        # event when it points to that same request.
+        change_request_ids = {request.change_request_id for request in change_requests}
+        event_dicts = [
+            event
+            for event in event_dicts
+            if not (
+                event["event_type"] == "source_change_requested"
+                and (event.get("payload") or {}).get("change_request_id") in change_request_ids
+            )
+        ]
+        audit_records = [
+            {
+                "record_type": "CHANGE_REQUEST",
+                "category": "SOURCE_CHANGE",
+                "event_type": "source_change_requested",
+                "scope": "current",
+                "created_at": _iso(request.created_at),
+                "operator_id": request.created_by,
+                "message": request.request_text,
+                "payload": {"change_request": self._change_request_dict(request)},
+                "material": material_by_version.get(package.source_version_id)
+                or material_by_item.get(package.source_item_id),
+            }
+            for request in change_requests
+        ]
+        audit_records.extend(
+            {
+                "record_type": "EVENT",
+                "category": self._event_category(event["event_type"]),
+                **event,
+            }
+            for event in event_dicts
+        )
+        audit_records.sort(key=lambda record: record.get("created_at") or "", reverse=True)
         return {
             **self._package_summary(package, display_items),
             **quality_result,
@@ -342,7 +462,9 @@ class ReviewPackageService:
             ],
             "relations": [self._relation_dict(relation, relation_sources) for relation in relations],
             "change_requests": [self._change_request_dict(request) for request in change_requests],
-            "events": [self._event_dict(event) for event in events],
+            "events": event_dicts,
+            "audit_records": audit_records,
+            "audit_record_count": len(audit_records),
         }
 
     async def save_draft(
@@ -467,10 +589,16 @@ class ReviewPackageService:
         automated: bool = False,
     ) -> dict:
         package = await self._load_package(package_id, lock=True)
+        items = await self._load_items(package.package_id, lock=True)
+        if package.workflow_status == ReviewPackageStatus.COMPLETED:
+            # Validate the caller's view before a stale terminal status is
+            # repaired (the repair itself may advance the lock version).
+            self._check_lock_version(package, payload.lock_version)
+        repaired_terminal_status = package.workflow_status == ReviewPackageStatus.COMPLETED
+        await self._reconcile_package_status(package, items=items, bump_lock_version=False)
         self._assert_not_terminal(package)
         if not automated:
             self._claim_or_assert_assignee(package, operator_id)
-        items = await self._load_items(package.package_id, lock=True)
         items_by_id = {item.review_item_id: item for item in items}
 
         replay_items = [items_by_id.get(decision.review_item_id) for decision in payload.decisions]
@@ -478,6 +606,8 @@ class ReviewPackageService:
             item is not None and (item.decision_payload or {}).get("request_id") == payload.request_id
             for item in replay_items
         ):
+            if repaired_terminal_status and package.workflow_status != ReviewPackageStatus.COMPLETED:
+                package.lock_version += 1
             return {
                 "package_id": package.package_id,
                 "workflow_status": package.workflow_status,
@@ -558,6 +688,19 @@ class ReviewPackageService:
                     )
                 else:
                     await self._resolve_item_relations(item, operator_id=operator_id, now=now)
+                if item.relation_ids and item.review_type != ReviewType.CONFLICT:
+                    self._append_event(
+                        package,
+                        "cross_document_relation_resolved",
+                        operator_id=operator_id,
+                        message="已完成跨文档关系裁决",
+                        payload={
+                            "review_item_id": item.review_item_id,
+                            "relation_ids": list(item.relation_ids),
+                            "outcome": decision.outcome,
+                            "internal_action": action,
+                        },
+                    )
 
             await KnowledgeUnitService(self.session).apply_decision(
                 item,
@@ -764,6 +907,19 @@ class ReviewPackageService:
             item.updated_at = now
             await KnowledgeUnitService(self.session).apply_decision(item, ReviewOutcome.EXCLUDE)
             await self._resolve_item_relations(item, operator_id=operator_id, now=now)
+            if item.relation_ids:
+                self._append_event(
+                    package,
+                    "cross_document_relation_resolved",
+                    operator_id=operator_id,
+                    message="批量处理时已完成跨文档关系裁决",
+                    payload={
+                        "review_item_id": item.review_item_id,
+                        "relation_ids": list(item.relation_ids),
+                        "outcome": ReviewOutcome.EXCLUDE,
+                        "internal_action": item.internal_action,
+                    },
+                )
             affected_unit_titles.append(item.title or "未命名知识单元")
             self._append_event(
                 package,
@@ -1116,6 +1272,18 @@ class ReviewPackageService:
             relation.human_comment = item.decision_comment
             relation.resolved_by = operator_id
             relation.resolved_at = now
+            self._append_event(
+                package,
+                "cross_document_relation_resolved",
+                operator_id=operator_id,
+                message="已完成跨文档冲突裁决",
+                payload={
+                    "review_item_id": item.review_item_id,
+                    "relation_id": relation.relation_id,
+                    "outcome": outcome,
+                    "counterpart_unit_id": counterpart.unit_id if counterpart is not None else None,
+                },
+            )
         await self._invalidate_quality_cache_for_versions(version_ids)
         return actions
 
@@ -1378,6 +1546,59 @@ class ReviewPackageService:
         if statuses and statuses <= FINAL_ITEM_STATUSES:
             return ReviewPackageStatus.COMPLETED
         return ReviewPackageStatus.OPEN
+
+    async def _reconcile_package_status(
+        self,
+        package: FeishuReviewPackage,
+        *,
+        items: list[FeishuReviewItem] | None = None,
+        bump_lock_version: bool = True,
+    ) -> list[FeishuReviewItem]:
+        """Repair a terminal package whose persisted item progress is not terminal.
+
+        Older builds could mark a package completed after a single knowledge-unit
+        decision.  Such packages must remain visible and actionable until every
+        unit is decided.  Only COMPLETED is repaired; INVALIDATED is an explicit
+        administrative state and must not be reopened implicitly.
+        """
+        if items is None:
+            items = await self._load_items(package.package_id)
+        if package.workflow_status != ReviewPackageStatus.COMPLETED or not items:
+            return items
+        # Only knowledge-unit packages can suffer from the historical partial
+        # completion bug.  A legacy material-level package may legitimately
+        # contain a pending non-unit item while its package remains terminal.
+        if not any(
+            item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT
+            and item.item_status not in FINAL_ITEM_STATUSES
+            for item in items
+        ):
+            return items
+        expected_status = self._aggregate_status(items)
+        if expected_status == ReviewPackageStatus.COMPLETED:
+            return items
+        previous_status = package.workflow_status
+        package.workflow_status = expected_status
+        package.completed_at = None
+        if bump_lock_version:
+            package.lock_version += 1
+        self._append_event(
+            package,
+            "review_package_reopened",
+            operator_id="system",
+            message="检测到审核包状态与知识单元进度不一致，已恢复为待处理",
+            payload={
+                "previous_workflow_status": previous_status,
+                "workflow_status": expected_status,
+                "pending_item_count": sum(item.item_status == ReviewItemStatus.PENDING for item in items),
+                "remaining_unit_count": sum(
+                    item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT
+                    and item.item_status not in FINAL_ITEM_STATUSES
+                    for item in items
+                ),
+            },
+        )
+        return items
 
     async def _load_package(self, package_id: str, *, lock: bool = False) -> FeishuReviewPackage:
         statement = select(FeishuReviewPackage).where(FeishuReviewPackage.package_id == package_id)
@@ -1686,9 +1907,81 @@ class ReviewPackageService:
         }
 
     @staticmethod
-    def _event_dict(event: FeishuProcessingEvent) -> dict:
+    def _event_category(event_type: str) -> str:
+        if event_type.startswith("source_change_") or event_type == "review_item_reopened":
+            return "SOURCE_CHANGE"
+        if "conflict" in event_type or "duplicate" in event_type or "relation" in event_type:
+            return "CROSS_DOCUMENT"
+        if "transfer" in event_type:
+            return "ASSIGNMENT"
+        if event_type in {
+            "material_discovered",
+            "parsed",
+            "parse_failed",
+            "processing_queued",
+            "processing_enqueue_failed",
+            "retry_queued",
+            "scan_failed",
+            "startup_reconciled",
+        } or "scan" in event_type or "processing" in event_type or "startup" in event_type:
+            return "PROCESSING"
+        if (
+            "publish" in event_type
+            or "lifecycle" in event_type
+            or event_type in {
+                "approved",
+                "rejected",
+                "review_package_completed",
+                "review_item_decided",
+                "knowledge_unit_metadata_updated",
+                "reindex_queued",
+                "source_offline_started",
+                "source_offline_failed",
+                "source_offline_completed",
+                "source_restore_queued",
+                "source_rollback_queued",
+                "removal_started",
+                "removal_confirmed",
+                "removal_failed",
+                "replacement_cleanup_failed",
+            }
+        ):
+            return "KNOWLEDGE"
+        return "REVIEW"
+
+    @staticmethod
+    def _material_dict(
+        version: FeishuMaterialVersion,
+        source_item: FeishuSourceItem,
+        *,
+        scope: str,
+    ) -> dict:
         return {
+            "scope": scope,
+            "source_id": source_item.source_id,
+            "item_id": source_item.item_id,
+            "version_id": version.version_id,
+            "title": source_item.title or "未命名资料",
+            "path": source_item.path_text,
+            "source_url": source_item.source_url,
+            "revision": version.revision,
+        }
+
+    @staticmethod
+    def _event_dict(
+        event: FeishuProcessingEvent,
+        *,
+        scope: str = "current",
+        material: dict | None = None,
+    ) -> dict:
+        return {
+            "id": event.id,
             "event_type": event.event_type,
+            "category": ReviewPackageService._event_category(event.event_type),
+            "scope": scope,
+            "material": material,
+            "from_status": event.from_status,
+            "to_status": event.to_status,
             "operator_id": event.operator_id,
             "message": event.message,
             "payload": event.payload_json or {},
