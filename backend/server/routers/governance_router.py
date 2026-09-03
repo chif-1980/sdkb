@@ -400,6 +400,7 @@ async def list_review_packages(
     problem_tag: Annotated[str | None, Query()] = None,
     risk_level: Annotated[str | None, Query()] = None,
     completion_result: Annotated[str | None, Query()] = None,
+    name_query: Annotated[str | None, Query()] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     db: AsyncSession = Depends(get_db),
@@ -415,6 +416,7 @@ async def list_review_packages(
             problem_tag=problem_tag,
             risk_level=risk_level,
             completion_result=completion_result,
+            name_query=name_query,
             page=page,
             page_size=page_size,
         )

@@ -4,7 +4,7 @@
   <p><strong>企业知识治理与可信知识助手平台</strong></p>
   <p>让企业资料从接入、加工、审核到发布形成可追溯闭环，并以可核对的引用支撑每一次回答。</p>
 
-  [![Version](https://img.shields.io/badge/version-v0.2.0--rc.2-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.2.0-rc.2)
+  [![Version](https://img.shields.io/badge/version-v0.2.1-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.2.1)
   [![License](https://img.shields.io/badge/license-MIT-475569)](LICENSE)
   [![Docs](https://img.shields.io/badge/docs-在线文档-2563eb)](https://chif-1980.github.io/sdkb/)
 
@@ -72,7 +72,7 @@
 
 ## 当前版本
 
-`v0.2.0-rc.2` 是善达知枢治理自动化第二个候选版本，在 `rc.1` 基础上补充 Markdown 加工与版式对比、跨菜单扫描进度、扫描期间操作边界，以及重复来源审核自动收口。正式 `v0.2.0` 将在真实多格式端到端验收完成后发布。
+`v0.2.1` 是善达知枢治理自动化正式版本，包含审核操作拆分、自动保存、已处理知识单元锁定、待处理定位与文档页同步高亮、审核队列拼音搜索、扫描与初始化进度保持，以及大屏布局优化。此前 `v0.2.0` 候选版本中的运营待办、质量门禁、来源变化摘要、加工重试、反馈回流、Markdown 加工和跨文档重复治理能力一并纳入本次正式发布。
 
 ## 开源说明
 
