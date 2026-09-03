@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.governance.domain import ReviewOutcome
 from yuxi.governance.knowledge_unit_service import KnowledgeUnitService, build_knowledge_unit_drafts
-from yuxi.governance.review_package_service import ReviewPackageService
+from yuxi.governance.review_package_service import ReviewPackageService, _name_matches
 from yuxi.governance.schemas import (
     ReviewItemDecisionRequest,
     ReviewPackageBulkExcludeRequest,
@@ -581,6 +581,77 @@ async def test_completed_packages_can_be_filtered_by_unit_result(
     assert [item["package_id"] for item in matched["items"]] == [package.package_id]
     assert matched["items"][0]["completion_result"] == completion_result
     assert unmatched["items"] == []
+
+
+@pytest.mark.parametrize("query", ["部署指南", "bushu zhinan", "bszn"])
+def test_review_package_name_matching_supports_chinese_full_pinyin_and_initials(query):
+    assert _name_matches("部署指南", query)
+
+
+def test_review_package_name_matching_ignores_separators_and_case():
+    assert _name_matches("臻善智标_V2.4", "zhen-shan-zhi-biao v2.4")
+
+
+@pytest.mark.asyncio
+async def test_review_package_name_search_filters_server_side(unit_review_session):
+    session, package, _ = unit_review_session
+    package.title_snapshot = "臻善智标产品介绍"
+    await session.commit()
+
+    service = ReviewPackageService(session)
+    for query in ("臻善智标", "zhenshanzhibiao", "zsZb"):
+        result = await service.list_packages(
+            "source-1",
+            operator_id="admin-a",
+            view="mine",
+            name_query=query,
+        )
+        assert [item["package_id"] for item in result["items"]] == [package.package_id]
+
+    unmatched = await service.list_packages(
+        "source-1",
+        operator_id="admin-a",
+        view="mine",
+        name_query="不存在的资料",
+    )
+    assert unmatched["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_review_package_sort_is_stable_for_equal_risk_and_created_at(unit_review_session):
+    session, package, _ = unit_review_session
+    package.title_snapshot = "B 文档"
+    package.risk_level = "MEDIUM"
+    second = FeishuReviewPackage(
+        package_id="package-0",
+        package_key="package-0",
+        source_id="source-1",
+        title_snapshot="A 文档",
+        workflow_status="OPEN",
+        risk_level="MEDIUM",
+        lock_version=1,
+        created_at=package.created_at,
+        updated_at=package.updated_at,
+    )
+    third = FeishuReviewPackage(
+        package_id="package-2",
+        package_key="package-2",
+        source_id="source-1",
+        title_snapshot="A 文档",
+        workflow_status="OPEN",
+        risk_level="MEDIUM",
+        lock_version=1,
+        created_at=package.created_at,
+        updated_at=package.updated_at,
+    )
+    session.add_all([second, third])
+    await session.commit()
+
+    result = await ReviewPackageService(session).list_packages(
+        "source-1", operator_id="admin-a", view="mine"
+    )
+    package_ids = [item["package_id"] for item in result["items"]]
+    assert package_ids.index("package-0") < package_ids.index("package-2") < package_ids.index(package.package_id)
 
 
 @pytest.mark.asyncio

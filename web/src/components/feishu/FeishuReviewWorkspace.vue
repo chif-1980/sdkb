@@ -66,6 +66,16 @@
           </button>
         </div>
         <div class="queue-filters">
+          <div class="queue-name-search">
+            <Search :size="13" aria-hidden="true" />
+            <a-input
+              v-model:value="packageNameQuery"
+              size="small"
+              allow-clear
+              aria-label="文档名称搜索"
+              placeholder="搜索文档名称或拼音"
+            />
+          </div>
           <a-select
             v-model:value="reviewTypeFilter"
             size="small"
@@ -124,7 +134,7 @@
               class="status-dot"
               :class="`status-${String(item.workflow_status).toLowerCase()}`"
             />
-            <span>{{ workflowStatusLabel(item.workflow_status) }}</span>
+            <span>{{ workflowStatusLabel(item.workflow_status, item) }}</span>
             <span
               v-if="item.workflow_status === 'COMPLETED' && item.completion_result"
               class="completion-result-badge"
@@ -311,7 +321,7 @@
                 "
                 type="primary"
                 size="small"
-                :disabled="writeDisabled || !itemActionable"
+                :disabled="writeDisabled || resolving || !itemActionable"
                 :title="itemActionable ? '' : itemStatusLabel(currentItem?.item_status, currentItem)"
                 @click="decisionPanelOpen = true"
               >
@@ -382,6 +392,16 @@
               </div>
             </div>
           </section>
+          <div
+            v-if="knowledgeUnitMode && remainingUnitItems.length"
+            class="unit-pending-hint"
+            aria-live="polite"
+          >
+            <span>待处理定位</span>
+            <button type="button" @click="focusFirstPendingUnit">
+              {{ pendingUnitHint }}
+            </button>
+          </div>
           <div v-if="knowledgeUnitMode && !visibleItems.length" class="unit-filter-empty">
             当前筛选没有知识单元；已处理单元仍保留在“已处理”或“全部”中查看。
           </div>
@@ -526,8 +546,16 @@
                       v-for="slide in presentationSlides"
                       :key="slide.slide_number"
                       type="button"
-                      :class="{ active: slide.slide_number === activeSlideNumber }"
-                      :aria-label="`查看第 ${slide.slide_number} 页`"
+                      :class="{
+                        active: slide.slide_number === activeSlideNumber,
+                        'pending-target': slide.slide_number === pendingUnitSlideNumber
+                      }"
+                      :aria-current="slide.slide_number === activeSlideNumber ? 'page' : undefined"
+                      :aria-label="
+                        `查看第 ${slide.slide_number} 页${
+                          slide.slide_number === pendingUnitSlideNumber ? '，含待处理知识单元' : ''
+                        }`
+                      "
                       @click="selectPresentationSlide(slide.slide_number)"
                     >
                       {{ slide.slide_number }}
@@ -579,7 +607,7 @@
                           >
                             {{
                               itemStatusLabel(currentItem?.item_status, currentItem) ||
-                              workflowStatusLabel(packageDetail.workflow_status)
+                              workflowStatusLabel(packageDetail.workflow_status, packageDetail)
                             }}
                           </a-tag>
                         </header>
@@ -636,7 +664,7 @@
                           v-else-if="knowledgeUnitMode"
                           type="button"
                           class="layout-sidebar-primary"
-                          :disabled="!itemActionable"
+                          :disabled="writeDisabled || resolving || !itemActionable"
                           :title="itemActionable ? '' : itemStatusLabel(currentItem?.item_status, currentItem)"
                           @click.stop="decisionPanelOpen = true"
                         >
@@ -760,7 +788,18 @@
                       v-for="page in documentPages"
                       :key="page.page_number"
                       type="button"
-                      :class="{ active: page.page_number === activeDocumentPageNumber }"
+                      :class="{
+                        active: page.page_number === activeDocumentPageNumber,
+                        'pending-target': page.page_number === pendingUnitDocumentPageNumber
+                      }"
+                      :aria-current="page.page_number === activeDocumentPageNumber ? 'page' : undefined"
+                      :aria-label="
+                        `${page.label || `第 ${page.page_number} 页`}${
+                          page.page_number === pendingUnitDocumentPageNumber
+                            ? '，含待处理知识单元'
+                            : ''
+                        }`
+                      "
                       @click="selectDocumentPage(page.page_number)"
                     >
                       {{ page.label || page.page_number }}
@@ -837,7 +876,7 @@
                           >
                             {{
                               itemStatusLabel(currentItem?.item_status, currentItem) ||
-                              workflowStatusLabel(packageDetail.workflow_status)
+                              workflowStatusLabel(packageDetail.workflow_status, packageDetail)
                             }}
                           </a-tag>
                         </header>
@@ -894,7 +933,7 @@
                           v-else-if="knowledgeUnitMode"
                           type="button"
                           class="layout-sidebar-primary"
-                          :disabled="!itemActionable"
+                          :disabled="writeDisabled || resolving || !itemActionable"
                           :title="itemActionable ? '' : itemStatusLabel(currentItem?.item_status, currentItem)"
                           @click.stop="decisionPanelOpen = true"
                         >
@@ -1897,7 +1936,7 @@
                 <a-button
                   v-if="itemActionable"
                   size="small"
-                  :disabled="writeDisabled || !itemActionable"
+                  :disabled="writeDisabled || resolving || !itemActionable"
                   @click="transferOpen = !transferOpen"
                   ><UserRoundCog :size="14" />转交</a-button
                 >
@@ -1919,12 +1958,12 @@
                 class="field-control"
                 placeholder="选择知识管理员"
                 :options="reviewerOptions"
-                :disabled="writeDisabled"
+                :disabled="writeDisabled || resolving"
               /><a-textarea
                 v-model:value="transferForm.comment"
                 :rows="2"
                 placeholder="说明转交原因"
-                :disabled="writeDisabled"
+                :disabled="writeDisabled || resolving"
               />
               <div>
                 <a-button size="small" @click="transferOpen = false">取消</a-button
@@ -1932,7 +1971,7 @@
                   size="small"
                   type="primary"
                   :loading="transferring"
-                  :disabled="writeDisabled"
+                  :disabled="writeDisabled || resolving"
                   @click="transferPackage"
                   >确认转交</a-button
                 >
@@ -1945,21 +1984,6 @@
               <p>{{ currentItem.decision_comment || '当前审核项无需继续处理。' }}</p>
             </div>
             <template v-else>
-              <div class="outcome-list">
-                <button
-                  v-for="outcome in outcomeOptions"
-                  :key="outcome.value"
-                  type="button"
-                  :class="{ active: form.outcome === outcome.value }"
-                  :disabled="
-                    writeDisabled || (publishOutcome(outcome.value) && publishUnavailable)
-                  "
-                  @click="form.outcome = outcome.value"
-                >
-                  <span>{{ outcome.label }}</span
-                  ><small>{{ outcome.description }}</small>
-                </button>
-              </div>
               <div class="field">
                 <div class="field-label-row">
                   <label>{{ problemTagLabel }}</label>
@@ -1976,7 +2000,7 @@
                     type="button"
                     class="problem-tag"
                     :class="{ active: form.problem_tags.includes(tag.value) }"
-                    :disabled="writeDisabled"
+                    :disabled="writeDisabled || resolving"
                     @click="toggleProblemTag(tag.value)"
                   >
                     {{ tag.label }}
@@ -1988,7 +2012,7 @@
                 ><a-input
                   v-model:value="form.responsible_user_name"
                   placeholder="填写飞书原文修改负责人"
-                  :disabled="writeDisabled"
+                  :disabled="writeDisabled || resolving"
                 />
                 <p>后台不会修改飞书正文；责任人完成修改后，由下一次扫描自动重新打开审核。</p>
               </div>
@@ -2002,7 +2026,7 @@
                     v-model:value="form.applicability_scope[field.key]"
                     :placeholder="field.placeholder"
                     :aria-label="field.label"
-                    :disabled="writeDisabled"
+                    :disabled="writeDisabled || resolving"
                   />
                 </div>
               </div>
@@ -2012,28 +2036,39 @@
                   v-model:value="form.decision_comment"
                   :rows="4"
                   :placeholder="decisionCommentPlaceholder"
-                  :disabled="writeDisabled"
+                  :disabled="writeDisabled || resolving"
                 />
               </div>
+              <div v-if="preparedOutcome" class="decision-preparation-hint">
+                <strong>正在准备：{{ outcomeLabel(preparedOutcome) }}</strong>
+                <span>{{ preparationHint(preparedOutcome) }}</span>
+              </div>
               <div class="decision-footer">
-                <a-button
-                  size="small"
-                  :loading="savingDraft"
-                  :disabled="writeDisabled"
-                  @click="saveDraft"
-                  >保存草稿</a-button
-                ><a-button
-                  type="primary"
-                  size="small"
-                  :loading="resolving"
-                  :disabled="
-                    writeDisabled ||
-                    !form.outcome ||
-                    (publishOutcome(form.outcome) && publishUnavailable)
-                  "
-                  @click="resolveItem"
-                  >提交审核结果</a-button
+                <div
+                  class="draft-save-status"
+                  :class="`status-${draftSaveStatus}`"
+                  aria-live="polite"
                 >
+                  <span class="draft-save-dot" />{{ draftSaveStatusText }}
+                </div>
+                <div class="decision-actions" aria-label="审核操作">
+                  <button
+                    v-for="outcome in outcomeOptions"
+                    :key="outcome.value"
+                    type="button"
+                    class="decision-action"
+                    :class="[
+                      `tone-${outcomeTone(outcome.value)}`,
+                      { prepared: preparedOutcome === outcome.value }
+                    ]"
+                    :disabled="outcomeActionDisabled(outcome.value)"
+                    :aria-pressed="preparedOutcome === outcome.value"
+                    @click="submitOutcome(outcome.value)"
+                  >
+                    <span>{{ outcomeActionLabel(outcome.value) }}</span>
+                    <small>{{ outcomeActionDescription(outcome) }}</small>
+                  </button>
+                </div>
               </div>
             </template>
           </template>
@@ -2068,6 +2103,7 @@ import {
   PanelLeftOpen,
   RefreshCw,
   RotateCcw,
+  Search,
   UserRoundCog,
   X,
   ZoomIn,
@@ -2096,6 +2132,9 @@ const queueView = ref('mine')
 const completionResultFilter = ref('all')
 const reviewTypeFilter = ref('')
 const problemFilter = ref('')
+const packageNameQuery = ref('')
+let packageNameSearchTimer = null
+let packageListRequestSeq = 0
 const activeEvidenceView = ref('content')
 const queueCollapsed = ref(false)
 const decisionPanelOpen = ref(false)
@@ -2107,6 +2146,9 @@ const loadingDetail = ref(false)
 const resolving = ref(false)
 const batchResolving = ref(false)
 const savingDraft = ref(false)
+const draftSaveStatus = ref('idle')
+const preparedOutcome = ref('')
+const actionSubmitting = ref('')
 const transferring = ref(false)
 const reopening = ref(false)
 const transferOpen = ref(false)
@@ -2181,6 +2223,9 @@ const comparisonPagePreviewRequestSeq = { source: 0, target: 0 }
 let detailRequestSeq = 0
 let contentRequestSeq = 0
 let previousContentRequestSeq = 0
+let autoSaveTimer = null
+let draftSaveQueue = Promise.resolve()
+let lastSavedDraftSignature = ''
 const form = reactive({
   outcome: '',
   problem_tags: [],
@@ -2229,8 +2274,8 @@ const allProblemTags = [
 const problemOptions = [{ label: '全部问题', value: '' }, ...allProblemTags]
 const outcomeCopy = {
   PUBLISH: ['发布', '创建为正式知识'],
-  REQUEST_SOURCE_CHANGE: ['退回飞书修改', '原文修改后自动重新审核'],
-  EXCLUDE: ['不纳入知识库', '保留来源记录但不发布'],
+  REQUEST_SOURCE_CHANGE: ['退回修改', '原文修改后自动重新审核'],
+  EXCLUDE: ['不纳入', '保留来源记录但不发布'],
   ADOPT_NEW_VERSION: ['采用新版', '发布后替换当前版本'],
   KEEP_CURRENT: ['保留当前版本', '本次候选不发布'],
   SPLIT_SCOPE: ['按适用范围拆分', '保留两侧知识并按适用范围区分'],
@@ -2301,6 +2346,62 @@ const decidedUnitCount = computed(() =>
   ).length
 )
 const remainingUnitCount = computed(() => Math.max(knowledgeUnitItems.value.length - decidedUnitCount.value, 0))
+const remainingUnitItems = computed(() =>
+  knowledgeUnitItems.value.filter((item) =>
+    ['PENDING', 'WAITING_SOURCE_CHANGE', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
+  )
+)
+const pendingUnitPosition = computed(() => {
+  const item = remainingUnitItems.value[0]
+  if (!item) return 0
+  const index = knowledgeUnitItems.value.findIndex(
+    (candidate) => candidate.review_item_id === item.review_item_id
+  )
+  return index >= 0 ? index + 1 : 0
+})
+const pendingUnitHint = computed(() => {
+  const item = remainingUnitItems.value[0]
+  if (!item) return ''
+  const location = unitLocatorLabel(item)
+  return [
+    `第 ${pendingUnitPosition.value} 个知识单元`,
+    location,
+    item.title || '未命名知识单元'
+  ]
+    .filter(Boolean)
+    .join(' · ')
+})
+const pendingUnitDocumentPageNumber = computed(() => {
+  const item = remainingUnitItems.value[0]
+  if (!item || !documentPages.value.length) return 0
+  const targetSheetPage = item.subject_locator?.sheet
+    ? documentPages.value.find((page) => page.label === item.subject_locator.sheet)?.page_number
+    : 0
+  const page = Number(
+    findDocumentTarget(item)?.page?.page_number ||
+      item.subject_locator?.page ||
+      item.subject_locator?.page_number ||
+      item.subject_locator?.sheet_page ||
+      targetSheetPage ||
+      0
+  )
+  return Number.isFinite(page) && page > 0
+    ? Math.max(1, Math.min(documentPages.value.length, page))
+    : 0
+})
+const pendingUnitSlideNumber = computed(() => {
+  const item = remainingUnitItems.value[0]
+  if (!item || !presentationSlides.value.length) return 0
+  const slide = Number(
+    findPresentationTarget(item)?.slide?.slide_number ||
+      item.subject_locator?.slide ||
+      item.subject_locator?.slide_number ||
+      0
+  )
+  return Number.isFinite(slide) && slide > 0
+    ? Math.max(1, Math.min(presentationSlides.value.length, slide))
+    : 0
+})
 const includedUnitCount = computed(() =>
   knowledgeUnitItems.value.filter((item) =>
     ['PUBLISH', 'ADOPT_NEW_VERSION', 'SPLIT_SCOPE', 'CONFIRM_VALID'].includes(item.outcome)
@@ -2380,6 +2481,13 @@ const outcomeOptions = computed(() =>
       description: outcomeCopy[value]?.[1] || '记录本次处理结果'
     }))
 )
+const draftSaveStatusText = computed(() => {
+  if (draftSaveStatus.value === 'pending') return '等待自动保存'
+  if (draftSaveStatus.value === 'saving') return '正在自动保存'
+  if (draftSaveStatus.value === 'saved') return '已自动保存'
+  if (draftSaveStatus.value === 'error') return '自动保存失败，最终操作仍可继续'
+  return '审核意见与问题标签将自动保存'
+})
 const selectedRelations = computed(() => {
   const relationIds = new Set(currentItem.value?.relation_ids || [])
   return (packageDetail.value?.relations || []).filter((relation) =>
@@ -2655,9 +2763,11 @@ const decisionCommentLabel = computed(() =>
 const decisionCommentPlaceholder = computed(() =>
   sourceChangeOutcome.value ? '具体说明飞书原文需要修改或补充什么' : '记录判断依据，便于后续追溯'
 )
-const queueEmptyText = computed(() =>
-  queueView.value === 'mine' ? '当前没有待你处理的审核包' : '当前筛选下没有审核包'
-)
+const queueEmptyText = computed(() => {
+  const query = packageNameQuery.value.trim()
+  if (query) return `未找到匹配“${query}”的审核包`
+  return queueView.value === 'mine' ? '当前没有待你处理的审核包' : '当前筛选下没有审核包'
+})
 const hasMorePackages = computed(
   () => packages.value.length < Number(packageResponse.value.total || 0)
 )
@@ -2673,6 +2783,13 @@ watch(
   loadPackages,
   { immediate: true }
 )
+watch(packageNameQuery, () => {
+  if (packageNameSearchTimer) clearTimeout(packageNameSearchTimer)
+  packageNameSearchTimer = setTimeout(() => {
+    packageNameSearchTimer = null
+    void loadPackages()
+  }, 300)
+})
 watch(
   () => props.targetReviewId,
   (value) => value && loadPackages()
@@ -2689,13 +2806,29 @@ watch(
 watch(activeEvidenceView, (view) => {
   if (view !== 'comparisons' && comparisonFullscreen.value) toggleComparisonFullscreen(false)
 })
+watch(
+  () => ({
+    outcome: form.outcome,
+    problem_tags: [...form.problem_tags],
+    decision_comment: form.decision_comment,
+    responsible_user_name: form.responsible_user_name,
+    applicability_scope: { ...form.applicability_scope }
+  }),
+  () => scheduleDraftAutoSave(),
+  { deep: true }
+)
+watch(decisionPanelOpen, (open) => {
+  if (!open) flushDraftAutoSave()
+})
 
 async function loadPackages(options = {}) {
   if (!props.sourceId) return
+  const requestId = ++packageListRequestSeq
   loadingPackages.value = true
   packagePage.value = 1
   try {
     const response = await governanceApi.listReviewPackages(props.sourceId, packageQuery())
+    if (requestId !== packageListRequestSeq) return
     packages.value = response.items || []
     packageResponse.value = response
     emit('count-change', response.counts?.mine || 0)
@@ -2713,6 +2846,7 @@ async function loadPackages(options = {}) {
         ...packageQuery(),
         page_size: 100
       })
+      if (requestId !== packageListRequestSeq) return
       requested = findTargetPackage(expandedResponse.items || [], target)
       if (requested) {
         packages.value = [
@@ -2736,12 +2870,13 @@ async function loadPackages(options = {}) {
   } catch (error) {
     message.error(governanceApi.getErrorMessage(error, '加载审核任务失败'))
   } finally {
-    loadingPackages.value = false
+    if (requestId === packageListRequestSeq) loadingPackages.value = false
   }
 }
 
 async function loadMorePackages() {
   if (loadingPackages.value || loadingMorePackages.value || !hasMorePackages.value) return
+  const requestId = packageListRequestSeq
   loadingMorePackages.value = true
   const nextPage = packagePage.value + 1
   try {
@@ -2750,6 +2885,7 @@ async function loadMorePackages() {
       page: nextPage,
       page_size: 20
     })
+    if (requestId !== packageListRequestSeq) return
     const existingIds = new Set(packages.value.map((item) => item.package_id))
     packages.value = [
       ...packages.value,
@@ -2764,7 +2900,7 @@ async function loadMorePackages() {
   } catch (error) {
     message.error(governanceApi.getErrorMessage(error, '加载更多审核任务失败'))
   } finally {
-    loadingMorePackages.value = false
+    if (requestId === packageListRequestSeq) loadingMorePackages.value = false
   }
 }
 
@@ -2800,7 +2936,8 @@ function normalizedReviewTarget() {
 function packageQuery() {
   const params = {
     review_type: reviewTypeFilter.value || undefined,
-    problem_tag: problemFilter.value || undefined
+    problem_tag: problemFilter.value || undefined,
+    name_query: packageNameQuery.value.trim() || undefined
   }
   if (queueView.value === 'waiting_source')
     return { ...params, view: 'all', workflow_status: 'WAITING_SOURCE_CHANGE' }
@@ -2821,6 +2958,7 @@ function showSourceUpdates() {
   problemFilter.value = ''
 }
 async function selectPackage(packageId, relationId = '', preferredItemId = '') {
+  flushDraftAutoSave()
   selectedPackageId.value = packageId
   packageDetail.value = null
   selectedItemId.value = ''
@@ -2892,6 +3030,8 @@ async function selectPackage(packageId, relationId = '', preferredItemId = '') {
   }
 }
 function selectItem(itemId) {
+  flushDraftAutoSave()
+  cancelDraftAutoSave({ resetStatus: true })
   selectedItemId.value = itemId
   transferOpen.value = false
   decisionPanelOpen.value = false
@@ -2915,6 +3055,8 @@ function selectItem(itemId) {
     ...(item.applicability_scope || {}),
     ...(draft.applicability_scope || {})
   }
+  preparedOutcome.value = outcomeNeedsPreparation(draft.outcome) ? draft.outcome : ''
+  lastSavedDraftSignature = draftSignature(decisionPayload())
   transferForm.assignee_id = undefined
   transferForm.comment = ''
   focusKnowledgeUnit(item)
@@ -2929,6 +3071,31 @@ function setUnitView(view) {
   if (!selectedVisible && visibleItems.value[0]) {
     selectItem(visibleItems.value[0].review_item_id)
   }
+}
+function focusFirstPendingUnit() {
+  const item = remainingUnitItems.value[0]
+  if (!item) return
+  unitView.value = 'pending'
+  unitListExpanded.value = false
+  selectItem(item.review_item_id)
+}
+function unitLocatorLabel(item) {
+  const locator = item?.subject_locator || {}
+  const documentTarget = findDocumentTarget(item)
+  const presentationTarget = findPresentationTarget(item)
+  const page =
+    locator.page ||
+    locator.page_number ||
+    locator.sheet_page ||
+    documentTarget?.page?.page_number
+  const slide =
+    locator.slide || locator.slide_number || presentationTarget?.slide?.slide_number
+  if (locator.sheet && page) return `${locator.sheet} · 第 ${page} 页`
+  if (locator.sheet) return `工作表 ${locator.sheet}`
+  if (slide) return `第 ${slide} 页`
+  if (page) return `第 ${page} 页`
+  const sourceCount = item?.source_segment_ids?.length || 0
+  return sourceCount ? `${sourceCount} 个来源片段` : ''
 }
 async function loadReviewContent() {
   const detail = packageDetail.value
@@ -3370,6 +3537,8 @@ function presentationFragmentLabel(fragment) {
 onMounted(() => window.addEventListener('keydown', handleComparisonKeydown))
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleComparisonKeydown)
+  if (packageNameSearchTimer) clearTimeout(packageNameSearchTimer)
+  cancelDraftAutoSave({ resetStatus: true })
   document.body.classList.remove('comparison-workspace-fullscreen')
   clearSlidePreviewCache()
   clearDocumentPagePreviewCache()
@@ -3458,10 +3627,10 @@ function selectRelativeItem(offset) {
   const nextItem = itemNavigationItems.value[currentVisibleIndex.value + offset]
   if (nextItem) selectItem(nextItem.review_item_id)
 }
-function decisionPayload() {
+function decisionPayload(outcome = form.outcome) {
   return {
     review_item_id: currentItem.value.review_item_id,
-    outcome: form.outcome,
+    outcome,
     problem_tags: form.problem_tags,
     decision_comment: form.decision_comment.trim() || undefined,
     applicability_scope: cleanApplicabilityScope(form.applicability_scope),
@@ -3474,31 +3643,164 @@ function cleanApplicabilityScope(scope) {
     Object.entries(scope || {}).filter(([, value]) => String(value || '').trim())
   )
 }
-async function saveDraft() {
-  if (props.writeDisabled || !packageDetail.value || !currentItem.value || !itemActionable.value) return
-  savingDraft.value = true
+function draftSignature(payload) {
+  return JSON.stringify(payload)
+}
+function outcomeNeedsPreparation(outcome) {
+  return commentRequiredOutcomes.has(outcome) || outcome === 'SPLIT_SCOPE'
+}
+function preparationHint(outcome) {
+  if (outcome === 'SPLIT_SCOPE') return '请填写至少一项适用范围，再次点击下方按钮确认。'
+  if (['REQUEST_SOURCE_CHANGE', 'REQUEST_SUPPORTING_SOURCE'].includes(outcome)) {
+    return '请填写具体修改要求，再次点击下方按钮确认退回。'
+  }
+  return '请填写待确认问题，再次点击下方按钮确认。'
+}
+function outcomeTone(outcome) {
+  if (publishOutcome(outcome)) return 'primary'
+  if (commentRequiredOutcomes.has(outcome)) return 'warning'
+  return 'secondary'
+}
+function outcomeActionLabel(outcome) {
+  if (actionSubmitting.value === outcome || (resolving.value && form.outcome === outcome)) {
+    return '处理中…'
+  }
+  const label = outcomeLabel(outcome)
+  return outcomeNeedsPreparation(outcome) && preparedOutcome.value === outcome
+    ? `确认${label}`
+    : label
+}
+function outcomeActionDescription(outcome) {
+  if (outcomeNeedsPreparation(outcome.value) && preparedOutcome.value === outcome.value) {
+    return '填写完成后再次点击确认'
+  }
+  return outcome.description
+}
+function outcomeActionDisabled(outcome) {
+  return (
+    props.writeDisabled ||
+    resolving.value ||
+    Boolean(actionSubmitting.value) ||
+    !itemActionable.value ||
+    (publishOutcome(outcome) && publishUnavailable.value)
+  )
+}
+function hasDraftContent() {
+  return Boolean(
+    preparedOutcome.value ||
+      form.problem_tags.length ||
+      form.decision_comment.trim() ||
+      form.responsible_user_name.trim() ||
+      Object.keys(cleanApplicabilityScope(form.applicability_scope)).length
+  )
+}
+function cancelDraftAutoSave({ resetStatus = false } = {}) {
+  if (autoSaveTimer) clearTimeout(autoSaveTimer)
+  autoSaveTimer = null
+  if (resetStatus) draftSaveStatus.value = 'idle'
+}
+function flushDraftAutoSave() {
+  if (!autoSaveTimer) return
+  cancelDraftAutoSave()
+  void saveDraft({ silent: true })
+}
+function scheduleDraftAutoSave() {
+  cancelDraftAutoSave()
+  if (
+    props.writeDisabled ||
+    resolving.value ||
+    actionSubmitting.value ||
+    !packageDetail.value ||
+    !currentItem.value ||
+    !itemActionable.value ||
+    !hasDraftContent()
+  )
+    return
+  const signature = draftSignature(decisionPayload())
+  if (signature === lastSavedDraftSignature) {
+    draftSaveStatus.value = 'saved'
+    return
+  }
+  draftSaveStatus.value = 'pending'
+  autoSaveTimer = setTimeout(() => {
+    autoSaveTimer = null
+    void saveDraft({ silent: true })
+  }, 800)
+}
+async function saveDraft({ silent = false } = {}) {
+  if (
+    props.writeDisabled ||
+    resolving.value ||
+    !packageDetail.value ||
+    !currentItem.value ||
+    !itemActionable.value
+  )
+    return
+  const packageId = packageDetail.value.package_id
+  const lockVersion = packageDetail.value.lock_version
+  const reviewItemId = currentItem.value.review_item_id
+  const payload = decisionPayload()
+  const signature = draftSignature(payload)
+  const task = async () => {
+    const activePackage =
+      packageDetail.value?.package_id === packageId ? packageDetail.value : null
+    const activeLockVersion = activePackage?.lock_version ?? lockVersion
+    if (signature === lastSavedDraftSignature && currentItem.value?.review_item_id === reviewItemId) {
+      draftSaveStatus.value = 'saved'
+      return
+    }
+    savingDraft.value = true
+    draftSaveStatus.value = 'saving'
+    try {
+      const response = await governanceApi.saveReviewPackageDraft(packageId, {
+        lock_version: activeLockVersion,
+        draft: payload
+      })
+      if (packageDetail.value?.package_id === packageId) {
+        packageDetail.value.draft = response.draft
+        packageDetail.value.lock_version = response.lock_version
+        if (currentItem.value?.review_item_id === reviewItemId) {
+          lastSavedDraftSignature = signature
+          draftSaveStatus.value = 'saved'
+        }
+      }
+      if (!silent) message.success('草稿已保存')
+    } catch (error) {
+      if (packageDetail.value?.package_id === packageId) draftSaveStatus.value = 'error'
+      if (!silent) message.error(governanceApi.getErrorMessage(error, '保存草稿失败'))
+    } finally {
+      savingDraft.value = false
+    }
+  }
+  draftSaveQueue = draftSaveQueue.then(task, task)
+  return draftSaveQueue
+}
+async function submitOutcome(outcome) {
+  if (outcomeActionDisabled(outcome)) return
+  if (outcomeNeedsPreparation(outcome) && preparedOutcome.value !== outcome) {
+    preparedOutcome.value = outcome
+    form.outcome = outcome
+    return
+  }
+  actionSubmitting.value = outcome
+  form.outcome = outcome
+  cancelDraftAutoSave()
   try {
-    const response = await governanceApi.saveReviewPackageDraft(packageDetail.value.package_id, {
-      lock_version: packageDetail.value.lock_version,
-      draft: decisionPayload()
-    })
-    packageDetail.value.draft = response.draft
-    packageDetail.value.lock_version = response.lock_version
-    message.success('草稿已保存')
-  } catch (error) {
-    message.error(governanceApi.getErrorMessage(error, '保存草稿失败'))
+    await draftSaveQueue
+    await resolveItem(outcome)
   } finally {
-    savingDraft.value = false
+    actionSubmitting.value = ''
   }
 }
-async function resolveItem() {
-  if (props.writeDisabled || !packageDetail.value || !currentItem.value) return
+async function resolveItem(outcome = form.outcome) {
+  if (props.writeDisabled || resolving.value || !packageDetail.value || !currentItem.value) return
   if (!itemActionable.value) {
     message.warning('该知识单元已处理，不能重复提交')
     decisionPanelOpen.value = false
     return
   }
-  if (publishOutcome(form.outcome) && publishUnavailable.value) {
+  form.outcome = outcome
+  if (publishOutcome(outcome) && publishUnavailable.value) {
     message.warning(
       reviewContent.value.loading
         ? '正文仍在加载，请稍候'
@@ -3506,18 +3808,18 @@ async function resolveItem() {
     )
     return
   }
-  if (commentRequiredOutcomes.has(form.outcome) && !form.decision_comment.trim()) {
+  if (commentRequiredOutcomes.has(outcome) && !form.decision_comment.trim()) {
     message.warning(`请填写${decisionCommentLabel.value}`)
     return
   }
-  if (form.outcome === 'SPLIT_SCOPE' && !Object.keys(cleanApplicabilityScope(form.applicability_scope)).length) {
+  if (outcome === 'SPLIT_SCOPE' && !Object.keys(cleanApplicabilityScope(form.applicability_scope)).length) {
     message.warning('请至少填写一项适用范围')
     return
   }
   resolving.value = true
   try {
-    const itemTitle = currentItem.value.title || '该知识单元'
-    const outcome = form.outcome
+    const resolvedItem = currentItem.value
+    const itemTitle = resolvedItem.title || '该知识单元'
     const currentReviewItemId = currentItem.value.review_item_id
     const nextActionableItem = itemNavigationItems.value.find(
       (item) =>
@@ -3527,8 +3829,13 @@ async function resolveItem() {
     const response = await governanceApi.resolveReviewPackage(packageDetail.value.package_id, {
       request_id: newRequestId(),
       lock_version: packageDetail.value.lock_version,
-      decisions: [decisionPayload()]
+      decisions: [decisionPayload(outcome)]
     })
+    applyResolvedItemState(resolvedItem, outcome, response)
+    cancelDraftAutoSave({ resetStatus: true })
+    preparedOutcome.value = ''
+    decisionPanelOpen.value = false
+    transferOpen.value = false
     let successText = ''
     if (response.unit_publish_version_ids?.length) {
       successText =
@@ -3550,6 +3857,50 @@ async function resolveItem() {
   } finally {
     resolving.value = false
   }
+}
+function applyResolvedItemState(item, outcome, response = {}) {
+  if (!item) return
+  const nextStatus = itemStatusForOutcome(outcome)
+  item.item_status = nextStatus
+  item.outcome = outcome
+  item.decision_comment = form.decision_comment.trim() || undefined
+  item.decision_payload = {
+    ...(item.decision_payload || {}),
+    outcome,
+    decision_comment: item.decision_comment
+  }
+  if (packageDetail.value) {
+    packageDetail.value.workflow_status = response.workflow_status || packageDetail.value.workflow_status
+    if (response.lock_version != null) packageDetail.value.lock_version = response.lock_version
+    for (const key of [
+      'decided_unit_count',
+      'remaining_unit_count',
+      'included_unit_count',
+      'excluded_unit_count',
+      'duplicate_unit_count'
+    ]) {
+      if (response[key] != null) packageDetail.value[key] = response[key]
+    }
+  }
+  const summary = packages.value.find((candidate) => candidate.package_id === selectedPackageId.value)
+  if (!summary) return
+  if (response.workflow_status) summary.workflow_status = response.workflow_status
+  for (const key of [
+    'decided_unit_count',
+    'remaining_unit_count',
+    'included_unit_count',
+    'excluded_unit_count',
+    'duplicate_unit_count'
+  ]) {
+    if (response[key] != null) summary[key] = response[key]
+  }
+}
+function itemStatusForOutcome(outcome) {
+  if (['REQUEST_SOURCE_CHANGE', 'REQUEST_SUPPORTING_SOURCE'].includes(outcome)) {
+    return 'WAITING_SOURCE_CHANGE'
+  }
+  if (outcome === 'WAIT_BUSINESS_CONFIRMATION') return 'WAITING_BUSINESS_CONFIRMATION'
+  return 'DECIDED'
 }
 function confirmReopenExcludedItem() {
   if (props.writeDisabled || !currentItem.value?.can_reopen_exclusion || reopening.value) return
@@ -4432,7 +4783,15 @@ function itemStatusLabel(value, item = null) {
     }[value] || value
   )
 }
-function workflowStatusLabel(value) {
+function workflowStatusLabel(value, item = null) {
+  if (
+    value === 'OPEN' &&
+    Number(item?.knowledge_unit_count || 0) > 0 &&
+    Number(item?.decided_unit_count || 0) > 0 &&
+    Number(item?.remaining_unit_count || 0) > 0
+  ) {
+    return `待审核 · 剩余 ${item.remaining_unit_count} 个知识单元`
+  }
   return (
     {
       OPEN: '待审核',
@@ -4806,7 +5165,9 @@ loadReviewers()
 .review-workspace {
   display: grid;
   position: relative;
-  height: clamp(700px, calc(100vh - 274px), 900px);
+  /* 预留页面顶部工具栏和标签栏空间，避免大屏底部出现固定留白。 */
+  height: max(700px, calc(100vh - 192px));
+  height: max(700px, calc(100dvh - 192px));
   min-height: 680px;
   margin: 10px var(--page-padding) 24px;
   overflow: hidden;
@@ -4940,6 +5301,26 @@ loadReviewers()
   grid-template-columns: 1fr 1fr;
   gap: 6px;
   margin-top: 8px;
+}
+.queue-name-search {
+  display: flex;
+  grid-column: 1 / -1;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--gray-150);
+  border-radius: 5px;
+  background: var(--gray-0);
+  color: var(--color-text-tertiary);
+}
+.queue-name-search input {
+  min-width: 0;
+  flex: 1;
+  padding-inline: 0;
+  border: 0;
+  box-shadow: none;
+  font-size: 11px;
 }
 .source-update-notice {
   display: flex;
@@ -5435,6 +5816,38 @@ loadReviewers()
   background: var(--main-10);
   color: var(--color-text-secondary);
   font-size: 10px;
+}
+.unit-pending-hint {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 18px;
+  border-bottom: 1px solid var(--gray-100);
+  background: var(--color-warning-50);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+}
+.unit-pending-hint > span {
+  flex: 0 0 auto;
+  color: var(--color-warning-700);
+  font-weight: 600;
+}
+.unit-pending-hint button {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--main-700);
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.unit-pending-hint button:hover {
+  text-decoration: underline;
 }
 .item-navigation {
   display: flex;
@@ -6008,6 +6421,7 @@ loadReviewers()
 }
 .presentation-page-strip button,
 .document-layout-page-strip button {
+  position: relative;
   min-width: 42px;
   max-width: 150px;
   padding: 5px 8px;
@@ -6032,6 +6446,31 @@ loadReviewers()
 .presentation-page-strip button.active,
 .document-layout-page-strip button.active {
   font-weight: 650;
+}
+.presentation-page-strip button.pending-target,
+.document-layout-page-strip button.pending-target {
+  border-color: var(--color-warning-500);
+  background: var(--color-warning-50);
+  color: var(--color-warning-700);
+  box-shadow: inset 0 -2px 0 var(--color-warning-500);
+}
+.presentation-page-strip button.pending-target::after,
+.document-layout-page-strip button.pending-target::after {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-warning-500);
+  content: '';
+}
+.presentation-page-strip button.pending-target.active,
+.document-layout-page-strip button.pending-target.active {
+  border-color: var(--main-200);
+  background: var(--main-30);
+  color: var(--main-700);
+  box-shadow: inset 0 -2px 0 var(--color-warning-500);
 }
 .presentation-canvas-shell {
   min-width: 0;
@@ -8109,45 +8548,6 @@ loadReviewers()
   font-size: 11px;
   line-height: 1.5;
 }
-.outcome-list {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  margin-top: 12px;
-}
-.outcome-list button {
-  display: grid;
-  gap: 2px;
-  min-height: 46px;
-  padding: 7px 9px;
-  border: 1px solid var(--gray-150);
-  border-radius: 6px;
-  background: var(--gray-0);
-  color: var(--color-text-secondary);
-  text-align: left;
-  cursor: pointer;
-}
-.outcome-list button:hover {
-  border-color: var(--main-200);
-}
-.outcome-list button.active {
-  border-color: var(--main-300);
-  background: var(--main-30);
-  color: var(--main-700);
-}
-.outcome-list button:disabled {
-  background: var(--gray-50);
-  color: var(--color-text-tertiary);
-  cursor: not-allowed;
-}
-.outcome-list span {
-  font-size: 11px;
-  font-weight: 600;
-}
-.outcome-list small {
-  color: var(--color-text-tertiary);
-  font-size: 9px;
-}
 .field {
   margin-top: 12px;
 }
@@ -8232,16 +8632,111 @@ loadReviewers()
 .field-control {
   width: 100%;
 }
+.decision-preparation-hint {
+  display: grid;
+  gap: 2px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-warning-100);
+  border-radius: 6px;
+  background: var(--color-warning-50);
+  color: var(--color-warning-800);
+  font-size: 10px;
+}
+.decision-preparation-hint span {
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
 .decision-footer {
-  display: flex;
+  display: grid;
   position: sticky;
   bottom: -18px;
-  justify-content: flex-end;
-  gap: 7px;
+  gap: 8px;
   margin: 14px -18px -18px;
   padding: 12px 18px;
   border-top: 1px solid var(--gray-150);
   background: var(--gray-10);
+}
+.draft-save-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 16px;
+  color: var(--color-text-tertiary);
+  font-size: 9px;
+}
+.draft-save-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gray-250);
+}
+.draft-save-status.status-pending .draft-save-dot,
+.draft-save-status.status-saving .draft-save-dot {
+  background: var(--color-warning-500);
+}
+.draft-save-status.status-saved .draft-save-dot {
+  background: var(--color-success-500);
+}
+.draft-save-status.status-error {
+  color: var(--color-error-700);
+}
+.draft-save-status.status-error .draft-save-dot {
+  background: var(--color-error-500);
+}
+.decision-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.decision-action {
+  display: grid;
+  min-width: 0;
+  min-height: 48px;
+  align-content: center;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid var(--gray-200);
+  border-radius: 6px;
+  background: var(--gray-0);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+.decision-action span {
+  font-size: 11px;
+  font-weight: 650;
+}
+.decision-action small {
+  color: currentColor;
+  font-size: 8px;
+  line-height: 1.35;
+  opacity: 0.75;
+}
+.decision-action.tone-primary {
+  border-color: var(--main-500);
+  background: var(--main-600);
+  color: var(--gray-0);
+}
+.decision-action.tone-warning {
+  border-color: var(--color-warning-300);
+  background: var(--color-warning-50);
+  color: var(--color-warning-800);
+}
+.decision-action.tone-secondary {
+  background: var(--gray-0);
+}
+.decision-action:hover:not(:disabled),
+.decision-action.prepared {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--main-300) 24%, transparent);
+  transform: translateY(-1px);
+}
+.decision-action:disabled {
+  border-color: var(--gray-150);
+  background: var(--gray-50);
+  color: var(--color-text-tertiary);
+  cursor: not-allowed;
+  transform: none;
 }
 .detail-empty {
   display: grid;
@@ -8401,7 +8896,7 @@ loadReviewers()
     border-top: 1px solid var(--gray-100);
     border-left: 0;
   }
-  .outcome-list {
+  .decision-actions {
     grid-template-columns: 1fr;
   }
   .content-review {

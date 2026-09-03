@@ -467,14 +467,16 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.find('.evidence-context').exists()).toBe(false)
     expect(wrapper.get('.markdown-stub').text()).toContain('第一份资料正文')
     expect(wrapper.text()).toContain('发布')
-    expect(wrapper.text()).toContain('退回飞书修改')
+    expect(wrapper.text()).toContain('退回修改')
+    expect(wrapper.text()).toContain('不纳入')
     expect(wrapper.text()).toContain('新增知识 · 1项')
     expect(wrapper.text()).toContain('确认现有知识')
     expect(wrapper.text()).toContain('待审核')
     expect(wrapper.text()).toContain('更新于')
     expect(wrapper.text()).toContain('审核意见（选填）')
-    const submitButton = wrapper.findAll('.decision-footer button')[1]
-    expect(submitButton.text()).toBe('提交审核结果')
+    expect(wrapper.findAll('.decision-action')).toHaveLength(3)
+    expect(wrapper.text()).not.toContain('提交审核结果')
+    expect(wrapper.text()).not.toContain('保存草稿')
     expect(wrapper.text()).not.toContain('处理方式')
     expect(wrapper.find('.content-quality-alert').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('适用范围')
@@ -482,6 +484,31 @@ describe('FeishuReviewWorkspace', () => {
     expect(apiAdminGet).toHaveBeenCalledWith(
       '/api/governance/review-packages?source_id=source-1&view=mine'
     )
+  })
+
+  it('按文档名称或拼音搜索审核包并支持清空', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountWorkspace()
+      await flushPromises()
+
+      const search = wrapper.get('input[aria-label="文档名称搜索"]')
+      await search.setValue('zsbb')
+      vi.advanceTimersByTime(300)
+      await flushPromises()
+
+      expect(apiAdminGet).toHaveBeenCalledWith(
+        '/api/governance/review-packages?source_id=source-1&name_query=zsbb&view=mine'
+      )
+      await search.setValue('')
+      vi.advanceTimersByTime(300)
+      await flushPromises()
+      expect(apiAdminGet).toHaveBeenCalledWith(
+        '/api/governance/review-packages?source_id=source-1&view=mine'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('展示质量门禁阻断、分项得分和来源影响摘要', async () => {
@@ -503,14 +530,15 @@ describe('FeishuReviewWorkspace', () => {
     await flushPromises()
 
     const splitButton = wrapper
-      .findAll('.outcome-list button')
+      .findAll('.decision-action')
       .find((button) => button.text().includes('按适用范围拆分'))
     expect(splitButton).toBeTruthy()
     await splitButton.trigger('click')
     expect(wrapper.get('.applicability-scope-field').text()).toContain('适用范围')
+    expect(splitButton.text()).toContain('确认按适用范围拆分')
     await wrapper.get('input[placeholder="适用产品"]').setValue('Q900')
     await wrapper.get('input[placeholder="产品版本"]').setValue('V2')
-    await wrapper.get('.decision-footer button:last-child').trigger('click')
+    await splitButton.trigger('click')
     await flushPromises()
 
     expect(apiAdminPost).toHaveBeenCalledWith(
@@ -537,11 +565,10 @@ describe('FeishuReviewWorkspace', () => {
     })
 
     const adoptButton = wrapper
-      .findAll('.outcome-list button')
+      .findAll('.decision-action')
       .find((button) => button.text().includes('采用新版'))
     expect(adoptButton).toBeTruthy()
     await adoptButton.trigger('click')
-    await wrapper.get('.decision-footer button:last-child').trigger('click')
     await flushPromises()
 
     expect(message.success).toHaveBeenCalledWith(
@@ -584,12 +611,12 @@ describe('FeishuReviewWorkspace', () => {
       .find((button) => button.text().includes('审核处理'))
       .trigger('click')
     expect(wrapper.get('.decision-panel').classes()).toContain('open')
-    expect(wrapper.get('.outcome-list').exists()).toBe(true)
+    expect(wrapper.get('.decision-actions').exists()).toBe(true)
     expect(wrapper.get('.field-label-row label').text()).toBe('问题记录（可选）')
     expect(wrapper.get('.problem-help').attributes('aria-label')).toContain('不等同于审核结果')
     await wrapper
-      .findAll('.outcome-list button')
-      .find((button) => button.text().includes('退回飞书修改'))
+      .findAll('.decision-action')
+      .find((button) => button.text().includes('退回修改'))
       .trigger('click')
     expect(wrapper.get('.field-label-row label').text()).toBe('退回原因（可多选）')
     expect(wrapper.get('.problem-help').attributes('aria-label')).toContain('作为修改依据')
@@ -874,6 +901,9 @@ describe('FeishuReviewWorkspace', () => {
     await flushPromises()
 
     expect(wrapper.get('.presentation-toolbar').text()).toContain('第 2 / 2 页')
+    expect(wrapper.get('.unit-pending-hint').text()).toContain('第 2 页')
+    expect(wrapper.get('.presentation-page-strip button.pending-target').text()).toBe('2')
+    expect(wrapper.get('.presentation-page-strip button.pending-target').classes()).toContain('active')
     expect(wrapper.get('.presentation-fragment-hotspot').classes()).toContain('active')
     expect(wrapper.get('.presentation-stage-row').classes()).toContain('has-side-panel')
     expect(wrapper.get('.layout-context-sidebar').text()).toContain('审核信息')
@@ -1122,12 +1152,16 @@ describe('FeishuReviewWorkspace', () => {
     await flushPromises()
 
     expect(wrapper.get('.document-layout-page-strip button.active').text()).toContain('第 1 页')
+    expect(wrapper.get('.document-layout-page-strip button.pending-target').text()).toContain('第 1 页')
+    expect(wrapper.get('.document-layout-page-strip button.pending-target').classes()).toContain('active')
     expect(wrapper.get('.document-layout-block.active').attributes('title')).toBe('第一页条款内容')
     await wrapper.get('.layout-sidebar-list-toggle').trigger('click')
     await wrapper.findAll('.layout-sidebar-unit-list button')[1].trigger('click')
     await flushPromises()
 
     expect(wrapper.get('.document-layout-page-strip button.active').text()).toContain('第 2 页')
+    expect(wrapper.get('.document-layout-page-strip button.pending-target').text()).toContain('第 1 页')
+    expect(wrapper.get('.document-layout-page-strip button.pending-target').classes()).not.toContain('active')
     expect(wrapper.get('.document-layout-block.active').attributes('title')).toBe('第二页条款内容')
     expect(wrapper.get('.layout-sidebar-facts').text()).toContain('2 / 2')
     expect(apiAdminGet).toHaveBeenCalledWith(
@@ -1266,10 +1300,11 @@ describe('FeishuReviewWorkspace', () => {
     const wrapper = mountWorkspace()
     await flushPromises()
 
-    await wrapper.findAll('.outcome-list button')[2].trigger('click')
-    const submitButton = wrapper.findAll('.decision-footer button')[1]
-    expect(submitButton.element.disabled).toBe(false)
-    await submitButton.trigger('click')
+    const excludeButton = wrapper
+      .findAll('.decision-action')
+      .find((button) => button.text().includes('不纳入'))
+    expect(excludeButton.element.disabled).toBe(false)
+    await excludeButton.trigger('click')
     await flushPromises()
 
     expect(message.warning).not.toHaveBeenCalled()
@@ -1464,6 +1499,13 @@ describe('FeishuReviewWorkspace', () => {
 
     await wrapper.get('button[aria-label="关闭审核处理"]').trigger('click')
     expect(wrapper.get('.decision-panel').classes()).not.toContain('open')
+  })
+
+  it('大屏审核工作区使用剩余视口高度，避免底部固定留白', () => {
+    expect(FeishuReviewWorkspaceSource).not.toContain('calc(100vh - 274px)')
+    expect(FeishuReviewWorkspaceSource).toMatch(
+      /height:\s*max\(700px,\s*calc\(100dvh - 192px\)\)/
+    )
   })
 
   it('集中提醒原文更新并一键筛选对应任务', async () => {
@@ -1696,46 +1738,121 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.emitted('target-consumed')).toHaveLength(1)
   })
 
-  it('保存草稿和退回修改均携带审核项及乐观锁', async () => {
-    const wrapper = mountWorkspace()
-    await flushPromises()
+  it('自动保存辅助信息后以最新乐观锁确认退回修改', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountWorkspace()
+      await flushPromises()
 
-    await wrapper.findAll('.outcome-list button')[1].trigger('click')
-    await wrapper.get('input[placeholder="填写飞书原文修改负责人"]').setValue('资料负责人')
-    await wrapper
-      .get('textarea[placeholder="具体说明飞书原文需要修改或补充什么"]')
-      .setValue('请补充适用产品版本')
-    const footerButtons = wrapper.findAll('.decision-footer button')
-    await footerButtons[0].trigger('click')
-    await flushPromises()
+      const returnButton = wrapper
+        .findAll('.decision-action')
+        .find((button) => button.text().includes('退回修改'))
+      await returnButton.trigger('click')
+      expect(returnButton.text()).toContain('确认退回修改')
+      await wrapper.get('input[placeholder="填写飞书原文修改负责人"]').setValue('资料负责人')
+      await wrapper
+        .get('textarea[placeholder="具体说明飞书原文需要修改或补充什么"]')
+        .setValue('请补充适用产品版本')
 
-    expect(apiAdminPatch).toHaveBeenCalledWith(
-      '/api/governance/review-packages/package-first/draft',
-      expect.objectContaining({
-        lock_version: 3,
-        draft: expect.objectContaining({
-          review_item_id: 'item-review-first',
-          outcome: 'REQUEST_SOURCE_CHANGE',
-          decision_comment: '请补充适用产品版本'
-        })
-      })
-    )
+      vi.advanceTimersByTime(800)
+      await flushPromises()
 
-    await footerButtons[1].trigger('click')
-    await flushPromises()
-    expect(apiAdminPost).toHaveBeenCalledWith(
-      '/api/governance/review-packages/package-first/resolve',
-      expect.objectContaining({
-        lock_version: 4,
-        decisions: [
-          expect.objectContaining({
+      expect(apiAdminPatch).toHaveBeenCalledWith(
+        '/api/governance/review-packages/package-first/draft',
+        expect.objectContaining({
+          lock_version: 3,
+          draft: expect.objectContaining({
             review_item_id: 'item-review-first',
             outcome: 'REQUEST_SOURCE_CHANGE',
-            responsible_user_name: '资料负责人'
+            decision_comment: '请补充适用产品版本'
           })
-        ]
+        })
+      )
+      expect(wrapper.get('.draft-save-status').text()).toContain('已自动保存')
+      expect(message.success).not.toHaveBeenCalledWith('草稿已保存')
+
+      await returnButton.trigger('click')
+      await flushPromises()
+      expect(apiAdminPost).toHaveBeenCalledWith(
+        '/api/governance/review-packages/package-first/resolve',
+        expect.objectContaining({
+          lock_version: 4,
+          decisions: [
+            expect.objectContaining({
+              review_item_id: 'item-review-first',
+              outcome: 'REQUEST_SOURCE_CHANGE',
+              responsible_user_name: '资料负责人'
+            })
+          ]
+        })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('切换知识单元前会冲刷尚未触发的自动保存', async () => {
+    vi.useFakeTimers()
+    try {
+      const detail = knowledgeUnitPackageDetail()
+      detail.items.forEach((item) => {
+        item.manual_review_required = false
       })
-    )
+      apiAdminGet.mockImplementation((url) => {
+        if (url.startsWith('/api/governance/review-packages?')) {
+          return Promise.resolve({
+            items: [{ ...packages[0], item_count: detail.items.length }],
+            total: 1,
+            counts: { mine: 1 }
+          })
+        }
+        if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+        if (url === '/api/governance/review-packages/package-first/segments') {
+          return Promise.resolve({ items: [] })
+        }
+        if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+        return Promise.resolve({})
+      })
+      apiAdminPatch.mockResolvedValue({
+        lock_version: 4,
+        draft: {
+          review_item_id: 'unit-safe',
+          outcome: 'REQUEST_SOURCE_CHANGE',
+          decision_comment: '请补充适用产品版本'
+        }
+      })
+
+      const wrapper = mountWorkspace()
+      await flushPromises()
+
+      const returnButton = wrapper
+        .findAll('.decision-action')
+        .find((button) => button.text().includes('退回修改'))
+      await returnButton.trigger('click')
+      await wrapper
+        .get('textarea[placeholder="具体说明飞书原文需要修改或补充什么"]')
+        .setValue('请补充适用产品版本')
+
+      wrapper.vm.selectItem('unit-updated')
+      await wrapper.vm.$nextTick()
+      await flushPromises()
+
+      expect(apiAdminPatch).toHaveBeenCalledTimes(1)
+      expect(apiAdminPatch).toHaveBeenCalledWith(
+        '/api/governance/review-packages/package-first/draft',
+        expect.objectContaining({
+          lock_version: 3,
+          draft: expect.objectContaining({
+            review_item_id: 'unit-safe',
+            outcome: 'REQUEST_SOURCE_CHANGE',
+            decision_comment: '请补充适用产品版本'
+          })
+        })
+      )
+      expect(wrapper.vm.selectedItemId).toBe('unit-updated')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('处理记录中可以取消仍在进行的资料修改任务', async () => {
@@ -2991,7 +3108,107 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.queue-unit-summary').text()).toContain('待处理 2')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('已纳入 1')
     expect(wrapper.get('.queue-unit-summary').text()).toContain('不纳入 0')
+    expect(wrapper.get('.queue-meta').text()).toContain('待审核 · 剩余 2 个知识单元')
     expect(wrapper.find('.item-navigation').exists()).toBe(false)
+  })
+
+  it('显示待处理知识单元的页码和标题并支持一键定位', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    detail.items = detail.items.map((item, index) =>
+      index === 0
+        ? { ...item, item_status: 'DECIDED', outcome: 'PUBLISH' }
+        : item
+    )
+    detail.decided_unit_count = 1
+    detail.remaining_unit_count = 2
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [
+            {
+              ...packages[0],
+              knowledge_unit_count: 3,
+              decided_unit_count: 1,
+              remaining_unit_count: 2
+            }
+          ],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-first/content')) {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.get('.unit-pending-hint').text()).toContain('第 2 个知识单元')
+    expect(wrapper.get('.unit-pending-hint').text()).toContain('第 2 页')
+    expect(wrapper.get('.unit-pending-hint').text()).toContain('部署要求')
+
+    await wrapper.get('.unit-pending-hint button').trigger('click')
+    expect(wrapper.get('.decision-heading p').text()).toContain('知识单元 2 / 3')
+  })
+
+  it('提交审核结果期间锁定重复操作', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    detail.items = [detail.items[0]]
+    detail.item_count = 1
+    detail.knowledge_unit_count = 1
+    detail.remaining_unit_count = 1
+    let resolveRequest
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?')) {
+        return Promise.resolve({
+          items: [{ ...packages[0], knowledge_unit_count: 1, remaining_unit_count: 1 }],
+          total: 1,
+          counts: { mine: 1 }
+        })
+      }
+      if (url === '/api/governance/review-packages/package-first') return Promise.resolve(detail)
+      if (url === '/api/governance/review-packages/package-first/segments') {
+        return Promise.resolve({ items: [] })
+      }
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      if (url.includes('/documents/file-first/content')) {
+        return Promise.resolve({ content: '# 第一份资料正文', lines: [] })
+      }
+      return Promise.resolve({})
+    })
+    apiAdminPost.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRequest = resolve
+        })
+    )
+
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    await wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('处理当前知识单元'))
+      .trigger('click')
+    const publishButton = wrapper
+      .findAll('.decision-action')
+      .find((button) => button.text().includes('发布'))
+    await publishButton.trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(publishButton.attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('.decision-action').every((button) => button.attributes('disabled') !== undefined)).toBe(true)
+    await publishButton.trigger('click')
+    expect(apiAdminPost).toHaveBeenCalledTimes(1)
+
+    resolveRequest({ remaining_unit_count: 0, workflow_status: 'COMPLETED', lock_version: 4 })
+    await flushPromises()
   })
 
   it('可切换查看已处理单元并明确禁止重复提交', async () => {
@@ -3146,7 +3363,10 @@ describe('FeishuReviewWorkspace', () => {
 
     const wrapper = mountWorkspace()
     await flushPromises()
-    await wrapper.findAll('.decision-footer button')[1].trigger('click')
+    await wrapper
+      .findAll('.decision-action')
+      .find((button) => button.text().includes('发布'))
+      .trigger('click')
     await flushPromises()
 
     expect(message.success).toHaveBeenCalledWith(
