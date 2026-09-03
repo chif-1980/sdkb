@@ -1919,6 +1919,20 @@
                 />
                 <p>后台不会修改飞书正文；责任人完成修改后，由下一次扫描自动重新打开审核。</p>
               </div>
+              <div v-if="form.outcome === 'SPLIT_SCOPE'" class="field applicability-scope-field">
+                <label>适用范围</label>
+                <p class="field-help">填写当前版本适用的范围；另一侧知识会保留，检索时按范围区分。</p>
+                <div class="scope-grid">
+                  <a-input
+                    v-for="field in scopeFields"
+                    :key="field.key"
+                    v-model:value="form.applicability_scope[field.key]"
+                    :placeholder="field.placeholder"
+                    :aria-label="field.label"
+                    :disabled="writeDisabled"
+                  />
+                </div>
+              </div>
               <div class="field">
                 <label>{{ decisionCommentLabel }}</label
                 ><a-textarea
@@ -2098,9 +2112,19 @@ const form = reactive({
   outcome: '',
   problem_tags: [],
   decision_comment: '',
-  responsible_user_name: ''
+  responsible_user_name: '',
+  applicability_scope: {}
 })
 const transferForm = reactive({ assignee_id: undefined, comment: '' })
+
+const scopeFields = [
+  { key: 'industry', label: '行业', placeholder: '适用行业' },
+  { key: 'product', label: '产品', placeholder: '适用产品' },
+  { key: 'product_version', label: '产品版本', placeholder: '产品版本' },
+  { key: 'deployment_mode', label: '部署方式', placeholder: '部署方式' },
+  { key: 'customer_type', label: '客户类型', placeholder: '客户类型' },
+  { key: 'region_language', label: '地区/语言', placeholder: '地区或语言' }
+]
 
 const queueViews = [
   { value: 'mine', label: '待我处理', countKey: 'mine' },
@@ -2136,6 +2160,7 @@ const outcomeCopy = {
   EXCLUDE: ['不纳入知识库', '保留来源记录但不发布'],
   ADOPT_NEW_VERSION: ['采用新版', '发布后替换当前版本'],
   KEEP_CURRENT: ['保留当前版本', '本次候选不发布'],
+  SPLIT_SCOPE: ['按适用范围拆分', '保留两侧知识并按适用范围区分'],
   WAIT_BUSINESS_CONFIRMATION: ['等待业务确认', '暂缓裁决并保留任务'],
   CONFIRM_VALID: ['确认仍有效', '继续保留当前正式知识'],
   REQUEST_SUPPORTING_SOURCE: ['补充来源', '补充可靠资料后重新判断'],
@@ -2243,7 +2268,6 @@ const itemActionable = computed(() =>
 )
 const outcomeOptions = computed(() =>
   (currentItem.value?.allowed_outcomes || [])
-    .filter((value) => value !== 'SPLIT_SCOPE')
     .map((value) => ({
       value,
       label: outcomeCopy[value]?.[0] || value,
@@ -2740,7 +2764,7 @@ function selectItem(itemId) {
   activeEvidenceView.value = item.review_type === 'UPDATE' ? 'changes' : 'content'
   const draft =
     packageDetail.value?.draft?.review_item_id === itemId ? packageDetail.value.draft : {}
-  const visibleOutcomes = (item.allowed_outcomes || []).filter((value) => value !== 'SPLIT_SCOPE')
+  const visibleOutcomes = item.allowed_outcomes || []
   const recommendedOutcome = visibleOutcomes.includes(item.recommended_outcome)
     ? item.recommended_outcome
     : ''
@@ -2751,6 +2775,10 @@ function selectItem(itemId) {
   form.problem_tags = [...(draft.problem_tags || item.problem_tags || [])]
   form.decision_comment = draft.decision_comment || item.decision_comment || ''
   form.responsible_user_name = draft.responsible_user_name || ''
+  form.applicability_scope = {
+    ...(item.applicability_scope || {}),
+    ...(draft.applicability_scope || {})
+  }
   transferForm.assignee_id = undefined
   transferForm.comment = ''
   focusKnowledgeUnit(item)
@@ -3289,10 +3317,15 @@ function decisionPayload() {
     outcome: form.outcome,
     problem_tags: form.problem_tags,
     decision_comment: form.decision_comment.trim() || undefined,
-    applicability_scope: {},
+    applicability_scope: cleanApplicabilityScope(form.applicability_scope),
     responsible_user_name: form.responsible_user_name.trim() || undefined,
     layout_edits: packageDetail.value?.draft?.layout_edits || {}
   }
+}
+function cleanApplicabilityScope(scope) {
+  return Object.fromEntries(
+    Object.entries(scope || {}).filter(([, value]) => String(value || '').trim())
+  )
 }
 async function saveDraft() {
   if (props.writeDisabled || !packageDetail.value || !currentItem.value) return
@@ -3325,6 +3358,10 @@ async function resolveItem() {
     message.warning(`请填写${decisionCommentLabel.value}`)
     return
   }
+  if (form.outcome === 'SPLIT_SCOPE' && !Object.keys(cleanApplicabilityScope(form.applicability_scope)).length) {
+    message.warning('请至少填写一项适用范围')
+    return
+  }
   resolving.value = true
   try {
     const itemTitle = currentItem.value.title || '该知识单元'
@@ -3334,18 +3371,21 @@ async function resolveItem() {
       lock_version: packageDetail.value.lock_version,
       decisions: [decisionPayload()]
     })
+    let successText = ''
     if (response.unit_publish_version_ids?.length) {
-      message.success(
+      successText =
         `“${itemTitle}”已确认纳入，正在加入正式知识；本材料还有 ${response.remaining_unit_count || 0} 个知识单元待处理`
-      )
       emit('knowledge-change')
     } else if (currentItem.value.knowledge_unit) {
-      message.success(
-        `已记录“${outcomeLabel(outcome)}”；剩余 ${response.remaining_unit_count || 0} 个知识单元待处理`
-      )
+      successText = `已记录“${outcomeLabel(outcome)}”；剩余 ${response.remaining_unit_count || 0} 个知识单元待处理`
     } else {
-      message.success(`已记录“${outcomeLabel(outcome)}”`)
+      successText = `已记录“${outcomeLabel(outcome)}”`
     }
+    const counterpartNotice = (response.counterpart_actions || [])
+      .map((action) => action.message || action.title)
+      .filter(Boolean)
+      .join('；')
+    message.success(counterpartNotice ? `${successText}；${counterpartNotice}` : successText)
     await loadPackages()
   } catch (error) {
     message.error(governanceApi.getErrorMessage(error, '提交审核结果失败'))
@@ -7802,6 +7842,17 @@ loadReviewers()
   color: var(--color-text-tertiary);
   font-size: 9px;
   line-height: 1.5;
+}
+.applicability-scope-field .field-help {
+  margin: -1px 0 7px;
+  color: var(--color-text-tertiary);
+  font-size: 9px;
+  line-height: 1.5;
+}
+.scope-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
 }
 .field-control {
   width: 100%;

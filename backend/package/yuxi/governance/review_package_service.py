@@ -487,6 +487,7 @@ class ReviewPackageService:
                 "reject_candidates": [],
                 **self._unit_progress(items),
                 "affected_unit_titles": [],
+                "counterpart_actions": [],
                 "idempotent_replay": True,
             }
 
@@ -503,6 +504,7 @@ class ReviewPackageService:
 
         now = utc_now_naive()
         affected_unit_titles: list[str] = []
+        counterpart_actions: list[dict] = []
         unit_publish_requested = False
         layout_edits = dict((package.draft_json or {}).get("layout_edits") or {})
         for decision in payload.decisions:
@@ -543,9 +545,25 @@ class ReviewPackageService:
                 item.item_status = ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION
             else:
                 item.item_status = ReviewItemStatus.DECIDED
-                await self._resolve_item_relations(item, operator_id=operator_id, now=now)
+                if item.review_type == ReviewType.CONFLICT:
+                    counterpart_actions.extend(
+                        await self._resolve_conflict_relations(
+                            package,
+                            item,
+                            decision.outcome,
+                            applicability_scope=scope,
+                            operator_id=operator_id,
+                            now=now,
+                        )
+                    )
+                else:
+                    await self._resolve_item_relations(item, operator_id=operator_id, now=now)
 
-            await KnowledgeUnitService(self.session).apply_decision(item, decision.outcome)
+            await KnowledgeUnitService(self.session).apply_decision(
+                item,
+                decision.outcome,
+                applicability_scope=scope if decision.outcome == ReviewOutcome.SPLIT_SCOPE else None,
+            )
             if item.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT:
                 affected_unit_titles.append(item.title or "未命名知识单元")
                 unit_publish_requested = unit_publish_requested or decision.outcome in UNIT_PUBLISH_OUTCOMES
@@ -619,6 +637,7 @@ class ReviewPackageService:
             ],
             **self._unit_progress(items),
             "affected_unit_titles": affected_unit_titles,
+            "counterpart_actions": counterpart_actions,
             "idempotent_replay": False,
         }
 
@@ -1000,12 +1019,264 @@ class ReviewPackageService:
                 )
             )
         )
+        version_ids: set[str] = set()
         for relation in relations:
             relation.status = "resolved"
             relation.human_decision = item.internal_action or item.outcome
             relation.human_comment = item.decision_comment
             relation.resolved_by = operator_id
             relation.resolved_at = now
+            version_ids.update(
+                version_id for version_id in (relation.source_version_id, relation.target_version_id) if version_id
+            )
+        await self._invalidate_quality_cache_for_versions(version_ids)
+
+    async def _resolve_conflict_relations(
+        self,
+        package: FeishuReviewPackage,
+        item: FeishuReviewItem,
+        outcome: str,
+        *,
+        applicability_scope: dict | None = None,
+        operator_id: str,
+        now: datetime,
+    ) -> list[dict]:
+        """Apply a conflict decision to both sides before closing the relation.
+
+        A relation is not sufficient as a decision record by itself: adopting a
+        candidate must take the conflicting published unit out of retrieval,
+        while keeping the current version must leave that published unit intact.
+        Scope splits retain both units and persist the candidate's scope on the
+        knowledge-unit row.
+        """
+        relation_ids = list(item.relation_ids or [])
+        if not relation_ids:
+            return []
+        relations = list(
+            await self.session.scalars(
+                select(FeishuCrossDocumentRelation)
+                .where(
+                    FeishuCrossDocumentRelation.relation_id.in_(relation_ids),
+                    FeishuCrossDocumentRelation.status.in_({"open", "pending"}),
+                )
+                .with_for_update()
+            )
+        )
+        actions: list[dict] = []
+        version_ids: set[str] = set()
+        for relation in relations:
+            version_ids.update(
+                version_id for version_id in (relation.source_version_id, relation.target_version_id) if version_id
+            )
+            counterpart_version_id = (
+                relation.target_version_id
+                if relation.source_version_id == package.source_version_id
+                else relation.source_version_id
+            )
+            counterpart = await self._find_counterpart_unit(
+                counterpart_version_id,
+                relation,
+                exclude_unit_id=item.subject_id,
+            )
+            if outcome == ReviewOutcome.KEEP_CURRENT and counterpart is not None:
+                # If both sides are only candidates there is no defensible
+                # "current" version to keep; require an explicit adoption.
+                if counterpart.publication_state != "INCLUDED":
+                    raise ValueError("无法保留当前版本：冲突另一侧尚未发布，请采用新版或等待业务确认")
+            elif outcome == ReviewOutcome.SPLIT_SCOPE and counterpart is not None:
+                counterpart_scope = await self._counterpart_scope(counterpart)
+                if self._scopes_overlap(applicability_scope or {}, counterpart_scope):
+                    raise ValueError("适用范围与冲突另一侧重叠，请填写互斥的行业、产品或版本范围")
+            elif outcome == ReviewOutcome.ADOPT_NEW_VERSION and counterpart is not None:
+                await self._supersede_counterpart_unit(counterpart, operator_id=operator_id, now=now)
+                await self._close_counterpart_reviews(counterpart, operator_id=operator_id, now=now)
+                actions.append(
+                    {
+                        "relation_id": relation.relation_id,
+                        "unit_id": counterpart.unit_id,
+                        "title": counterpart.title,
+                        "action": "EXCLUDED",
+                        "message": "已将冲突的另一侧知识移出正式检索",
+                    }
+                )
+                self._append_event(
+                    package,
+                    "conflict_counterpart_superseded",
+                    operator_id=operator_id,
+                    message="采用新版并移出冲突的另一侧知识",
+                    payload={
+                        "review_item_id": item.review_item_id,
+                        "relation_id": relation.relation_id,
+                        "counterpart_unit_id": counterpart.unit_id,
+                        "counterpart_version_id": counterpart.version_id,
+                    },
+                )
+            relation.status = "resolved"
+            relation.human_decision = outcome
+            relation.human_comment = item.decision_comment
+            relation.resolved_by = operator_id
+            relation.resolved_at = now
+        await self._invalidate_quality_cache_for_versions(version_ids)
+        return actions
+
+    async def _invalidate_quality_cache_for_versions(self, version_ids: set[str]) -> None:
+        """Force quality to be recomputed after a cross-document decision.
+
+        Relation status and counterpart publication state are part of the gate
+        calculation.  Clearing the cached result for both sides prevents stale
+        BLOCKED/RECOMMENDED badges in list views until the next detail request.
+        """
+        version_ids = {version_id for version_id in version_ids if version_id}
+        if not version_ids:
+            return
+        packages = list(
+            await self.session.scalars(
+                select(FeishuReviewPackage)
+                .where(FeishuReviewPackage.source_version_id.in_(version_ids))
+                .with_for_update()
+            )
+        )
+        for package in packages:
+            package.quality_gate_status = None
+            package.quality_score = None
+            package.quality_dimensions = {}
+            package.impact_summary = {}
+            package.auto_close_eligible = False
+            package.quality_computed_at = None
+
+    async def _counterpart_scope(self, unit: FeishuKnowledgeUnit) -> dict:
+        scope = dict(unit.applicability_scope or {})
+        if scope:
+            return scope
+        version = await self.session.scalar(
+            select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == unit.version_id)
+        )
+        return dict((version.processing_params or {}).get("applicability_scope") or {}) if version else {}
+
+    @staticmethod
+    def _scopes_overlap(left: dict, right: dict) -> bool:
+        """Return true unless at least one shared dimension proves disjointness."""
+        left = {key: str(value).strip() for key, value in left.items() if str(value or "").strip()}
+        right = {key: str(value).strip() for key, value in right.items() if str(value or "").strip()}
+        shared = set(left) & set(right)
+        return not any(left[key] != right[key] for key in shared)
+
+    async def _find_counterpart_unit(
+        self,
+        version_id: str | None,
+        relation: FeishuCrossDocumentRelation,
+        *,
+        exclude_unit_id: str | None = None,
+    ) -> FeishuKnowledgeUnit | None:
+        if not version_id:
+            return None
+        units = list(
+            await self.session.scalars(
+                select(FeishuKnowledgeUnit)
+                .where(
+                    FeishuKnowledgeUnit.version_id == version_id,
+                    FeishuKnowledgeUnit.status == "ACTIVE",
+                )
+                .with_for_update()
+            )
+        )
+        candidates = [unit for unit in units if unit.unit_id != exclude_unit_id]
+        if not candidates:
+            return None
+        evidence = KnowledgeUnitService._relation_evidence(relation)
+        if not evidence:
+            return candidates[0]
+        state_priority = {"INCLUDED": 2, "PENDING": 1}
+        return max(
+            candidates,
+            key=lambda unit: (
+                state_priority.get(unit.publication_state, 0),
+                KnowledgeUnitService._evidence_score(unit.content, evidence),
+            ),
+        )
+
+    async def _supersede_counterpart_unit(
+        self,
+        unit: FeishuKnowledgeUnit,
+        *,
+        operator_id: str,
+        now: datetime,
+    ) -> None:
+        unit.publication_state = "EXCLUDED"
+        unit.lifecycle_status = "OFFLINE"
+        unit.lifecycle_note = "被跨文档冲突裁决替代，已移出正式检索。"
+        unit.lifecycle_updated_by = operator_id
+        unit.lifecycle_updated_at = now
+        segments = list(
+            await self.session.scalars(
+                select(FeishuSourceSegment)
+                .where(FeishuSourceSegment.segment_id.in_(list(unit.source_segment_ids or [])))
+                .with_for_update()
+            )
+        )
+        for segment in segments:
+            if segment.publication_state in {"INCLUDED", "PENDING", "ALIAS"}:
+                segment.publication_state = "EXCLUDED"
+
+    async def _close_counterpart_reviews(
+        self,
+        unit: FeishuKnowledgeUnit,
+        *,
+        operator_id: str,
+        now: datetime,
+    ) -> None:
+        """Prevent a superseded candidate review from being published later."""
+        items = list(
+            await self.session.scalars(
+                select(FeishuReviewItem)
+                .where(
+                    FeishuReviewItem.subject_id == unit.unit_id,
+                    FeishuReviewItem.item_status.in_(
+                        {
+                            ReviewItemStatus.PENDING,
+                            ReviewItemStatus.WAITING_SOURCE_CHANGE,
+                            ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION,
+                        }
+                    ),
+                )
+                .with_for_update()
+            )
+        )
+        if not items:
+            return
+        package_ids = {item.package_id for item in items}
+        for item in items:
+            item.item_status = ReviewItemStatus.DECIDED
+            item.outcome = ReviewOutcome.KEEP_CURRENT
+            item.internal_action = ReviewAction.KEEP_CURRENT
+            item.decision_comment = "该知识已被另一版本的冲突裁决替代，不再纳入知识库。"
+            item.decision_payload = {
+                **dict(item.decision_payload or {}),
+                "superseded_by_conflict": True,
+                "superseded_unit_id": unit.unit_id,
+            }
+            item.decided_by = operator_id
+            item.decided_at = now
+        for package_id in package_ids:
+            counterpart_package = await self._load_package(package_id, lock=True)
+            counterpart_items = await self._load_items(package_id, lock=True)
+            previous_status = counterpart_package.workflow_status
+            counterpart_package.workflow_status = self._aggregate_status(counterpart_items)
+            counterpart_package.completed_at = (
+                now if counterpart_package.workflow_status == ReviewPackageStatus.COMPLETED else None
+            )
+            counterpart_package.lock_version += 1
+            self._append_event(
+                counterpart_package,
+                "conflict_review_superseded",
+                operator_id=operator_id,
+                message="该审核项已被另一版本的冲突裁决替代",
+                payload={
+                    "unit_id": unit.unit_id,
+                    "previous_workflow_status": previous_status,
+                    "workflow_status": counterpart_package.workflow_status,
+                },
+            )
 
     async def _update_legacy_review(
         self,

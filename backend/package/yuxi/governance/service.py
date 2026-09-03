@@ -368,7 +368,8 @@ class GovernanceService:
                             "source_segment_ids": list(unit.source_segment_ids or []),
                             "source_segment_count": len(unit.source_segment_ids or []),
                             "source_locator": dict(unit.locator_json or {}),
-                            "applicability_scope": (version.processing_params or {}).get("applicability_scope", {}),
+                            "applicability_scope": dict(unit.applicability_scope or {})
+                            or (version.processing_params or {}).get("applicability_scope", {}),
                             "index_status": "INDEXED" if indexed else "OFFLINE",
                             "lifecycle_status": lifecycle_status,
                             "stored_lifecycle_status": unit.lifecycle_status,

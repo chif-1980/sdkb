@@ -592,3 +592,349 @@ async def test_pending_comparison_keeps_new_units_out_of_safe_batch(unit_review_
     assert detail["safe_recommendation_count"] == 0
     assert all(item["manual_review_required"] for item in detail["items"])
     assert all(item["comparison_status"] == "running" for item in detail["items"])
+
+
+@pytest.mark.asyncio
+async def test_adopt_new_version_supersedes_published_conflicting_unit(unit_review_session):
+    session, package, segments = unit_review_session
+    await KnowledgeUnitService(session).ensure_for_package(package)
+    candidate_unit = await session.scalar(
+        select(FeishuKnowledgeUnit)
+        .where(FeishuKnowledgeUnit.version_id == "version-1")
+        .order_by(FeishuKnowledgeUnit.unit_index.asc())
+    )
+    counterpart_item = FeishuSourceItem(
+        item_id="item-published",
+        source_id="source-1",
+        item_key="page:item-published",
+        item_type="docx",
+        title="已发布部署说明",
+        source_validity="valid",
+    )
+    counterpart_version = FeishuMaterialVersion(
+        version_id="version-published",
+        item_id="item-published",
+        revision="1",
+        content_hash="hash-published",
+        processing_status="published",
+        processing_params={},
+        review_status="published",
+        yuxi_file_id="file-published",
+    )
+    counterpart_package = FeishuReviewPackage(
+        package_id="package-published",
+        package_key="package-published",
+        source_id="source-1",
+        source_item_id="item-published",
+        source_version_id="version-published",
+        trigger_type="SOURCE_VERSION",
+        title_snapshot="已发布部署说明",
+        workflow_status="OPEN",
+        risk_level="HIGH",
+        lock_version=1,
+        quality_gate_status="BLOCKED",
+        quality_score=40,
+        quality_dimensions={"consistency": {"score": 0}},
+        impact_summary={"blockReasons": [{"code": "OPEN_CONFLICT"}]},
+        auto_close_eligible=True,
+        quality_computed_at=datetime.now(UTC),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    counterpart_review_item = FeishuReviewItem(
+        review_item_id="review-published",
+        package_id="package-published",
+        candidate_key="unit:unit-published",
+        review_type="CONFLICT",
+        subject_type="KNOWLEDGE_UNIT",
+        subject_id="unit-published",
+        title="安装步骤",
+        item_status="PENDING",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    counterpart_segment = FeishuSourceSegment(
+        segment_id="segment-published",
+        segment_key="published",
+        version_id="version-published",
+        item_id="item-published",
+        yuxi_file_id="file-published",
+        segment_index=0,
+        segment_type="text",
+        title_path=["安装步骤"],
+        locator_json={"page": 1},
+        content="安装前需要准备管理员账号和服务地址，然后按步骤完成部署。",
+        content_hash="published-segment-hash",
+        token_count=30,
+        publication_state="INCLUDED",
+        status="ACTIVE",
+    )
+    counterpart_unit = FeishuKnowledgeUnit(
+        unit_id="unit-published",
+        unit_key="published-unit",
+        lineage_key="published-lineage",
+        version_id="version-published",
+        item_id="item-published",
+        unit_index=0,
+        unit_type="SECTION",
+        title="安装步骤",
+        content=counterpart_segment.content,
+        content_hash="published-unit-hash",
+        source_segment_ids=[counterpart_segment.segment_id],
+        locator_json={"page": 1},
+        change_type="NEW",
+        recommended_outcome="PUBLISH",
+        recommendation_reason="已发布",
+        publication_state="INCLUDED",
+        applicability_scope={"product": "Q900", "product_version": "V1"},
+    )
+    relation = FeishuCrossDocumentRelation(
+        relation_id="relation-adopt",
+        comparison_key="version-1:version-published:adopt",
+        source_version_id="version-1",
+        target_version_id="version-published",
+        relation_type="CONFLICT",
+        same_content=["安装前需要准备管理员账号和服务地址"],
+        different_content=[{"field": "部署方式", "current": "按步骤完成部署", "candidate": "直接完成部署"}],
+        status="open",
+    )
+    session.add_all(
+        [
+            counterpart_item,
+            counterpart_version,
+            counterpart_package,
+            counterpart_review_item,
+            counterpart_segment,
+            counterpart_unit,
+            relation,
+        ]
+    )
+    await session.flush()
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+    conflict_item = next(item for item in detail["items"] if item["subject_id"] == candidate_unit.unit_id)
+    conflict_item_record = await session.scalar(
+        select(FeishuReviewItem).where(FeishuReviewItem.review_item_id == conflict_item["review_item_id"])
+    )
+    result = await ReviewPackageService(session).resolve(
+        package.package_id,
+        ReviewPackageResolveRequest(
+            request_id="adopt-conflict",
+            lock_version=package.lock_version,
+            decisions=[
+                ReviewItemDecisionRequest(
+                    review_item_id=conflict_item_record.review_item_id,
+                    outcome="ADOPT_NEW_VERSION",
+                    problem_tags=["CONFLICT"],
+                    decision_comment="采用新版并替代旧结论",
+                )
+            ],
+        ),
+        operator_id="admin-a",
+    )
+
+    assert result["counterpart_actions"][0]["unit_id"] == "unit-published"
+    assert relation.status == "resolved"
+    assert counterpart_unit.publication_state == "EXCLUDED"
+    assert counterpart_unit.lifecycle_status == "OFFLINE"
+    assert counterpart_segment.publication_state == "EXCLUDED"
+    assert counterpart_review_item.item_status == "DECIDED"
+    assert counterpart_review_item.outcome == "KEEP_CURRENT"
+    assert counterpart_package.workflow_status == "COMPLETED"
+    assert counterpart_package.quality_gate_status is None
+    assert counterpart_package.quality_score is None
+    assert counterpart_package.quality_dimensions == {}
+    assert counterpart_package.impact_summary == {}
+    assert counterpart_package.auto_close_eligible is False
+    assert counterpart_package.quality_computed_at is None
+    assert all(segment.publication_state != "EXCLUDED" for segment in segments)
+
+
+@pytest.mark.asyncio
+async def test_split_scope_persists_candidate_scope_and_keeps_counterpart(unit_review_session):
+    session, package, _ = unit_review_session
+    await KnowledgeUnitService(session).ensure_for_package(package)
+    candidate_unit = await session.scalar(
+        select(FeishuKnowledgeUnit)
+        .where(FeishuKnowledgeUnit.version_id == "version-1")
+        .order_by(FeishuKnowledgeUnit.unit_index.asc())
+    )
+    counterpart = FeishuKnowledgeUnit(
+        unit_id="unit-scope-counterpart",
+        unit_key="scope-counterpart",
+        lineage_key="scope-counterpart-lineage",
+        version_id="version-scope-counterpart",
+        item_id="item-scope-counterpart",
+        unit_index=0,
+        unit_type="SECTION",
+        title=candidate_unit.title,
+        content=candidate_unit.content,
+        content_hash="scope-counterpart-hash",
+        source_segment_ids=[],
+        locator_json={"page": 1},
+        change_type="NEW",
+        recommended_outcome="PUBLISH",
+        recommendation_reason="已发布",
+        publication_state="INCLUDED",
+        applicability_scope={"product": "Q900", "product_version": "V1"},
+    )
+    relation = FeishuCrossDocumentRelation(
+        relation_id="relation-scope",
+        comparison_key="version-1:version-scope-counterpart",
+        source_version_id="version-1",
+        target_version_id="version-scope-counterpart",
+        relation_type="CONFLICT",
+        same_content=[candidate_unit.content[:20]],
+        different_content=[{"field": "产品版本", "current": "V1", "candidate": "V2"}],
+        status="open",
+    )
+    session.add_all([counterpart, relation])
+    await session.flush()
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+    item = next(item for item in detail["items"] if item["subject_id"] == candidate_unit.unit_id)
+    result = await ReviewPackageService(session).resolve(
+        package.package_id,
+        ReviewPackageResolveRequest(
+            request_id="split-conflict",
+            lock_version=package.lock_version,
+            decisions=[
+                ReviewItemDecisionRequest(
+                    review_item_id=item["review_item_id"],
+                    outcome="SPLIT_SCOPE",
+                    problem_tags=["CONFLICT"],
+                    applicability_scope={"product": "Q900", "product_version": "V2"},
+                )
+            ],
+        ),
+        operator_id="admin-a",
+    )
+
+    assert result["counterpart_actions"] == []
+    assert relation.status == "resolved"
+    assert candidate_unit.applicability_scope == {"product": "Q900", "product_version": "V2"}
+    assert counterpart.publication_state == "INCLUDED"
+
+
+@pytest.mark.asyncio
+async def test_split_scope_rejects_overlapping_counterpart_scope(unit_review_session):
+    session, package, _ = unit_review_session
+    await KnowledgeUnitService(session).ensure_for_package(package)
+    candidate_unit = await session.scalar(
+        select(FeishuKnowledgeUnit)
+        .where(FeishuKnowledgeUnit.version_id == "version-1")
+        .order_by(FeishuKnowledgeUnit.unit_index.asc())
+    )
+    counterpart = FeishuKnowledgeUnit(
+        unit_id="unit-overlap-counterpart",
+        unit_key="overlap-counterpart",
+        lineage_key="overlap-counterpart-lineage",
+        version_id="version-overlap-counterpart",
+        item_id="item-overlap-counterpart",
+        unit_index=0,
+        unit_type="SECTION",
+        title=candidate_unit.title,
+        content=candidate_unit.content,
+        content_hash="overlap-counterpart-hash",
+        source_segment_ids=[],
+        locator_json={"page": 1},
+        change_type="NEW",
+        recommended_outcome="PUBLISH",
+        recommendation_reason="已发布",
+        publication_state="INCLUDED",
+        applicability_scope={"product": "Q900", "product_version": "V1"},
+    )
+    relation = FeishuCrossDocumentRelation(
+        relation_id="relation-overlap",
+        comparison_key="version-1:version-overlap-counterpart",
+        source_version_id="version-1",
+        target_version_id="version-overlap-counterpart",
+        relation_type="CONFLICT",
+        same_content=[candidate_unit.content[:20]],
+        different_content=[{"field": "价格", "current": "45万", "candidate": "30万"}],
+        status="open",
+    )
+    session.add_all([counterpart, relation])
+    await session.flush()
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+    item = next(item for item in detail["items"] if item["subject_id"] == candidate_unit.unit_id)
+
+    with pytest.raises(ValueError, match="适用范围.*重叠"):
+        await ReviewPackageService(session).resolve(
+            package.package_id,
+            ReviewPackageResolveRequest(
+                request_id="split-overlap-conflict",
+                lock_version=package.lock_version,
+                decisions=[
+                    ReviewItemDecisionRequest(
+                        review_item_id=item["review_item_id"],
+                        outcome="SPLIT_SCOPE",
+                        problem_tags=["CONFLICT"],
+                        applicability_scope={"product": "Q900", "product_version": "V1"},
+                    )
+                ],
+            ),
+            operator_id="admin-a",
+        )
+
+    assert relation.status == "open"
+    assert candidate_unit.publication_state == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_keep_current_rejects_when_counterpart_is_only_a_candidate(unit_review_session):
+    session, package, _ = unit_review_session
+    await KnowledgeUnitService(session).ensure_for_package(package)
+    candidate_unit = await session.scalar(
+        select(FeishuKnowledgeUnit)
+        .where(FeishuKnowledgeUnit.version_id == "version-1")
+        .order_by(FeishuKnowledgeUnit.unit_index.asc())
+    )
+    counterpart = FeishuKnowledgeUnit(
+        unit_id="unit-pending-counterpart",
+        unit_key="pending-counterpart",
+        lineage_key="pending-counterpart-lineage",
+        version_id="version-pending-counterpart",
+        item_id="item-pending-counterpart",
+        unit_index=0,
+        unit_type="SECTION",
+        title=candidate_unit.title,
+        content=candidate_unit.content,
+        content_hash="pending-counterpart-hash",
+        source_segment_ids=[],
+        locator_json={"page": 1},
+        change_type="NEW",
+        recommended_outcome="PUBLISH",
+        recommendation_reason="待审核",
+        publication_state="PENDING",
+    )
+    relation = FeishuCrossDocumentRelation(
+        relation_id="relation-pending",
+        comparison_key="version-1:version-pending-counterpart",
+        source_version_id="version-1",
+        target_version_id="version-pending-counterpart",
+        relation_type="CONFLICT",
+        same_content=[candidate_unit.content[:20]],
+        different_content=[{"field": "价格", "current": "45万", "candidate": "30万"}],
+        status="open",
+    )
+    session.add_all([counterpart, relation])
+    await session.flush()
+    detail = await ReviewPackageService(session).get_package(package.package_id)
+    item = next(item for item in detail["items"] if item["subject_id"] == candidate_unit.unit_id)
+
+    with pytest.raises(ValueError, match="另一侧尚未发布"):
+        await ReviewPackageService(session).resolve(
+            package.package_id,
+            ReviewPackageResolveRequest(
+                request_id="keep-pending-conflict",
+                lock_version=package.lock_version,
+                decisions=[
+                    ReviewItemDecisionRequest(
+                        review_item_id=item["review_item_id"],
+                        outcome="KEEP_CURRENT",
+                        problem_tags=["CONFLICT"],
+                        decision_comment="等待正式版本确认",
+                    )
+                ],
+            ),
+            operator_id="admin-a",
+        )

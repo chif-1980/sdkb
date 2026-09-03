@@ -511,6 +511,8 @@ class FeishuKnowledgeUnit(Base):
     recommendation_confidence = Column(Float, nullable=False, default=0.0)
     manual_review_required = Column(Boolean, nullable=False, default=False, index=True)
     publication_state = Column(String(32), nullable=False, default="PENDING", index=True)
+    # 范围拆分后的正式知识适用范围。与审核项范围分开保存，便于检索和后续治理。
+    applicability_scope = Column(JSON_VALUE, nullable=False, default=dict)
     lifecycle_status = Column(String(32), nullable=False, default="ACTIVE", index=True)
     owner_id = Column(String(64))
     owner_name = Column(String(255))

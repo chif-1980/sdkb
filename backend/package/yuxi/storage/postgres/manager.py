@@ -574,6 +574,10 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ",
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ",
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS review_due_at TIMESTAMPTZ",
+            (
+                "ALTER TABLE IF EXISTS feishu_knowledge_units "
+                "ADD COLUMN IF NOT EXISTS applicability_scope JSONB NOT NULL DEFAULT '{}'::jsonb"
+            ),
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_note TEXT",
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_updated_by VARCHAR(64)",
             "ALTER TABLE IF EXISTS feishu_knowledge_units ADD COLUMN IF NOT EXISTS lifecycle_updated_at TIMESTAMPTZ",

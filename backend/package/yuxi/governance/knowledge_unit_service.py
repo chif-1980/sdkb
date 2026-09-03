@@ -446,7 +446,13 @@ class KnowledgeUnitService:
             }
         package.risk_level = "HIGH" if any(unit.manual_review_required for unit in units) else "LOW"
 
-    async def apply_decision(self, item: FeishuReviewItem, outcome: str) -> None:
+    async def apply_decision(
+        self,
+        item: FeishuReviewItem,
+        outcome: str,
+        *,
+        applicability_scope: dict[str, Any] | None = None,
+    ) -> None:
         if item.subject_type != ReviewSubjectType.KNOWLEDGE_UNIT:
             return
         unit = await self.session.scalar(
@@ -454,6 +460,8 @@ class KnowledgeUnitService:
         )
         if unit is None:
             raise LookupError(f"Knowledge unit not found: {item.subject_id}")
+        if applicability_scope is not None:
+            unit.applicability_scope = dict(applicability_scope)
         if outcome in {ReviewOutcome.PUBLISH, ReviewOutcome.ADOPT_NEW_VERSION, ReviewOutcome.SPLIT_SCOPE}:
             target_state = "INCLUDED"
         elif outcome in {

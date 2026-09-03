@@ -498,6 +498,57 @@ describe('FeishuReviewWorkspace', () => {
     wrapper.unmount()
   })
 
+  it('冲突裁决开放按适用范围拆分并提交范围字段', async () => {
+    const wrapper = mountWorkspace({ targetReviewId: { packageId: 'package-target' } })
+    await flushPromises()
+
+    const splitButton = wrapper
+      .findAll('.outcome-list button')
+      .find((button) => button.text().includes('按适用范围拆分'))
+    expect(splitButton).toBeTruthy()
+    await splitButton.trigger('click')
+    expect(wrapper.get('.applicability-scope-field').text()).toContain('适用范围')
+    await wrapper.get('input[placeholder="适用产品"]').setValue('Q900')
+    await wrapper.get('input[placeholder="产品版本"]').setValue('V2')
+    await wrapper.get('.decision-footer button:last-child').trigger('click')
+    await flushPromises()
+
+    expect(apiAdminPost).toHaveBeenCalledWith(
+      '/api/governance/review-packages/package-target/resolve',
+      expect.objectContaining({
+        decisions: [
+          expect.objectContaining({
+            outcome: 'SPLIT_SCOPE',
+            applicability_scope: { industry: '制造业', product: 'Q900', product_version: 'V2' }
+          })
+        ]
+      })
+    )
+  })
+
+  it('采用新版后明确提示冲突另一侧已移出正式检索', async () => {
+    const wrapper = mountWorkspace({ targetReviewId: { packageId: 'package-target' } })
+    await flushPromises()
+    apiAdminPost.mockResolvedValueOnce({
+      remaining_unit_count: 0,
+      counterpart_actions: [
+        { title: '旧版部署手册', message: '已将冲突的另一侧知识移出正式检索' }
+      ]
+    })
+
+    const adoptButton = wrapper
+      .findAll('.outcome-list button')
+      .find((button) => button.text().includes('采用新版'))
+    expect(adoptButton).toBeTruthy()
+    await adoptButton.trigger('click')
+    await wrapper.get('.decision-footer button:last-child').trigger('click')
+    await flushPromises()
+
+    expect(message.success).toHaveBeenCalledWith(
+      expect.stringContaining('已将冲突的另一侧知识移出正式检索')
+    )
+  })
+
   it('整篇资料可从顶部批量审核，当前知识单元仍从右侧处理', async () => {
     const wrapper = mountWorkspace()
     await flushPromises()
