@@ -282,6 +282,43 @@ class DuplicateKnowledgeService:
                 operator_id=operator_id,
                 now=relation.resolved_at,
             )
+        # Persist the relation decision in both related review packages so the
+        # business audit trail remains visible regardless of which document
+        # the operator opened first.  The relation decision table remains the
+        # source of truth; these events are the human-readable audit entries.
+        related_packages = list(
+            await self.session.scalars(
+                select(FeishuReviewPackage).where(
+                    FeishuReviewPackage.source_version_id.in_(
+                        {relation.source_version_id, relation.target_version_id}
+                    )
+                )
+            )
+        )
+        strategy_label = {
+            DuplicateResolutionStrategy.USE_SOURCE: "保留来源一",
+            DuplicateResolutionStrategy.USE_TARGET: "保留来源二",
+            DuplicateResolutionStrategy.KEEP_SEPARATE: "分别保留",
+        }[payload.strategy]
+        for package in related_packages:
+            self.session.add(
+                FeishuProcessingEvent(
+                    source_id=package.source_id,
+                    item_id=package.source_item_id,
+                    version_id=package.source_version_id,
+                    event_type="cross_document_relation_resolved",
+                    operator_id=operator_id,
+                    message=f"跨文档关系已处理：{strategy_label}",
+                    payload_json={
+                        "package_id": package.package_id,
+                        "relation_id": relation.relation_id,
+                        "strategy": payload.strategy,
+                        "primary_version_id": primary_version_id,
+                        "fragment_match_count": len(matches),
+                        "review_automation": review_automation,
+                    },
+                )
+            )
         await self.session.flush()
 
         response = self._candidate_response(relation, versions, items, matches, decision)

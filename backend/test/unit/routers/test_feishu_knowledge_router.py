@@ -3106,8 +3106,10 @@ async def test_processing_retry_reuses_file_record_created_before_parse_failure(
     assert [call[0] for call in calls] == ["add", "parse", "parse"]
     assert [call[2] for call in calls if call[0] == "parse"] == ["file-one", "file-one"]
     assert [(event.event_type, event.from_status, event.to_status) for event in events] == [
+        ("processing_started", "processing_queued", "processing"),
         ("parse_failed", "processing", "parse_failed"),
         ("retry_queued", "parse_failed", "processing_queued"),
+        ("processing_started", "processing_queued", "processing"),
         ("parsed", "processing", "awaiting_review"),
     ]
 

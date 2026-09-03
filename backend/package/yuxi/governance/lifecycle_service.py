@@ -45,12 +45,28 @@ class KnowledgeLifecycleService:
         operator_id: str,
     ) -> FeishuKnowledgeUnit:
         unit = await self._load_unit(unit_id, lock=True)
-        await self._ensure_formal_unit(unit)
+        version, item = await self._ensure_formal_unit(unit)
         valid_from = self._normalize_datetime(valid_from)
         valid_until = self._normalize_datetime(valid_until)
         review_due_at = self._normalize_datetime(review_due_at)
         if valid_from and valid_until and valid_from > valid_until:
             raise ValueError("valid_from must not be later than valid_until")
+
+        before = {
+            "owner_id": unit.owner_id,
+            "owner_name": unit.owner_name,
+            "valid_from": self._iso_datetime(unit.valid_from),
+            "valid_until": self._iso_datetime(unit.valid_until),
+            "review_due_at": self._iso_datetime(unit.review_due_at),
+        }
+        after = {
+            "owner_id": self._optional_text(owner_id),
+            "owner_name": self._optional_text(owner_name),
+            "valid_from": self._iso_datetime(valid_from),
+            "valid_until": self._iso_datetime(valid_until),
+            "review_due_at": self._iso_datetime(review_due_at),
+        }
+        changed_fields = [field for field in before if before[field] != after[field]]
         unit.owner_id = self._optional_text(owner_id)
         unit.owner_name = self._optional_text(owner_name)
         unit.valid_from = valid_from
@@ -58,6 +74,28 @@ class KnowledgeLifecycleService:
         unit.review_due_at = review_due_at
         unit.lifecycle_updated_by = operator_id
         unit.lifecycle_updated_at = utc_now_naive()
+        self.session.add(
+            FeishuProcessingEvent(
+                source_id=item.source_id,
+                item_id=item.item_id,
+                version_id=version.version_id,
+                event_type="knowledge_unit_metadata_updated",
+                from_status=unit.lifecycle_status,
+                to_status=unit.lifecycle_status,
+                operator_id=operator_id,
+                message=(
+                    "已更新知识单元治理信息"
+                    if changed_fields
+                    else "已确认知识单元治理信息未变化"
+                ),
+                payload_json={
+                    "unit_id": unit.unit_id,
+                    "changed_fields": changed_fields,
+                    "before": before,
+                    "after": after,
+                },
+            )
+        )
         await self.session.flush()
         return unit
 
@@ -399,7 +437,9 @@ class KnowledgeLifecycleService:
             raise LookupError(f"Knowledge unit not found: {unit_id}")
         return unit
 
-    async def _ensure_formal_unit(self, unit: FeishuKnowledgeUnit) -> None:
+    async def _ensure_formal_unit(
+        self, unit: FeishuKnowledgeUnit
+    ) -> tuple[FeishuMaterialVersion, FeishuSourceItem]:
         row = (
             await self.session.execute(
                 select(FeishuMaterialVersion, FeishuSourceItem)
@@ -418,6 +458,7 @@ class KnowledgeLifecycleService:
             or version.published_at is None
         ):
             raise ValueError("Knowledge unit is not part of formal knowledge")
+        return version, item
 
     @staticmethod
     def _normalize_datetime(value: datetime | None) -> datetime | None:
@@ -427,6 +468,10 @@ class KnowledgeLifecycleService:
     def _optional_text(value: str | None) -> str | None:
         normalized = (value or "").strip()
         return normalized or None
+
+    @staticmethod
+    def _iso_datetime(value: datetime | None) -> str | None:
+        return value.isoformat() if value is not None else None
 
     @staticmethod
     def _revision_result(package, review_item, change_request, *, idempotent_replay: bool) -> dict:

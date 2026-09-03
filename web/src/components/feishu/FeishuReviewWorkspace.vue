@@ -262,7 +262,7 @@
                 @click="activeEvidenceView = 'history'"
               >
                 <History :size="14" /> 处理记录
-                <span class="tab-count">{{ packageDetail.change_requests.length }}</span>
+                <span class="tab-count">{{ packageDetail.audit_record_count ?? auditRecords.length }}</span>
               </button>
             </div>
             <div class="record-actions evidence-tabs-actions">
@@ -311,11 +311,16 @@
                 "
                 type="primary"
                 size="small"
-                :disabled="writeDisabled"
+                :disabled="writeDisabled || !itemActionable"
+                :title="itemActionable ? '' : itemStatusLabel(currentItem?.item_status, currentItem)"
                 @click="decisionPanelOpen = true"
               >
                 <ClipboardCheck :size="14" />{{
-                  knowledgeUnitMode ? '处理当前知识单元' : '审核处理'
+                  itemActionable
+                    ? knowledgeUnitMode
+                      ? '处理当前知识单元'
+                      : '审核处理'
+                    : itemStatusLabel(currentItem?.item_status, currentItem)
                 }}
               </a-button>
               <button
@@ -337,6 +342,48 @@
                 批量退回
               </button>
             </div>
+          </div>
+
+          <section
+            v-if="knowledgeUnitMode"
+            class="unit-overview"
+            aria-label="知识单元处理进度"
+          >
+            <div class="unit-overview-heading">
+              <strong>{{ knowledgeUnitItems.length }}</strong>
+              <span>个知识单元</span>
+            </div>
+            <div class="unit-overview-metrics">
+              <span><b>{{ decidedUnitCount }}</b> 已处理</span>
+              <span class="needs-attention"><b>{{ remainingUnitCount }}</b> 待处理</span>
+              <span><b>{{ includedUnitCount }}</b> 已纳入</span>
+              <span><b>{{ excludedUnitCount }}</b> 不纳入</span>
+            </div>
+            <div class="unit-overview-actions">
+              <span
+                class="unit-visibility"
+                title="已处理单元仅可查看，不能重复提交"
+                aria-label="已处理单元仅可查看，不能重复提交"
+              >
+                i
+              </span>
+              <div class="unit-view-switch" role="group" aria-label="知识单元筛选">
+                <button
+                  v-for="view in unitViewOptions"
+                  :key="view.value"
+                  type="button"
+                  class="unit-filter"
+                  :class="{ active: unitView === view.value }"
+                  :aria-pressed="unitView === view.value"
+                  @click="setUnitView(view.value)"
+                >
+                  {{ view.label }} {{ unitViewCount(view.value) }}
+                </button>
+              </div>
+            </div>
+          </section>
+          <div v-if="knowledgeUnitMode && !visibleItems.length" class="unit-filter-empty">
+            当前筛选没有知识单元；已处理单元仍保留在“已处理”或“全部”中查看。
           </div>
 
           <div class="evidence-body">
@@ -562,7 +609,7 @@
                         <dl class="layout-sidebar-facts">
                           <div v-if="currentItem?.knowledge_unit">
                             <dt>当前知识单元</dt>
-                            <dd>{{ currentVisiblePosition }} / {{ itemNavigationItems.length }}</dd>
+                            <dd>{{ currentUnitPosition }} / {{ knowledgeUnitItems.length }}</dd>
                           </div>
                           <div>
                             <dt>预览位置</dt>
@@ -590,9 +637,14 @@
                           type="button"
                           class="layout-sidebar-primary"
                           :disabled="!itemActionable"
+                          :title="itemActionable ? '' : itemStatusLabel(currentItem?.item_status, currentItem)"
                           @click.stop="decisionPanelOpen = true"
                         >
-                          <ClipboardCheck :size="14" />处理当前知识单元
+                          <ClipboardCheck :size="14" />{{
+                            itemActionable
+                              ? '处理当前知识单元'
+                              : itemStatusLabel(currentItem?.item_status, currentItem)
+                          }}
                         </button>
                         <div
                           v-if="itemNavigationItems.length > 1"
@@ -642,6 +694,7 @@
                           >
                             <span>{{ index + 1 }}</span>
                             <strong>{{ item.title || reviewTypeLabel(item.review_type) }}</strong>
+                            <small>{{ itemStatusLabel(item.item_status, item) }}</small>
                           </button>
                         </div>
                       </section>
@@ -814,7 +867,7 @@
                         <dl class="layout-sidebar-facts">
                           <div v-if="currentItem?.knowledge_unit">
                             <dt>当前知识单元</dt>
-                            <dd>{{ currentVisiblePosition }} / {{ itemNavigationItems.length }}</dd>
+                            <dd>{{ currentUnitPosition }} / {{ knowledgeUnitItems.length }}</dd>
                           </div>
                           <div>
                             <dt>预览位置</dt>
@@ -842,9 +895,14 @@
                           type="button"
                           class="layout-sidebar-primary"
                           :disabled="!itemActionable"
+                          :title="itemActionable ? '' : itemStatusLabel(currentItem?.item_status, currentItem)"
                           @click.stop="decisionPanelOpen = true"
                         >
-                          <ClipboardCheck :size="14" />处理当前知识单元
+                          <ClipboardCheck :size="14" />{{
+                            itemActionable
+                              ? '处理当前知识单元'
+                              : itemStatusLabel(currentItem?.item_status, currentItem)
+                          }}
                         </button>
                         <div
                           v-if="itemNavigationItems.length > 1"
@@ -894,6 +952,7 @@
                           >
                             <span>{{ index + 1 }}</span>
                             <strong>{{ item.title || reviewTypeLabel(item.review_type) }}</strong>
+                            <small>{{ itemStatusLabel(item.item_status, item) }}</small>
                           </button>
                         </div>
                       </section>
@@ -917,7 +976,10 @@
                           type="button"
                           class="document-layout-save"
                           :disabled="
-                            writeDisabled || documentEditSaving || !documentBlockDraft.trim()
+                            writeDisabled ||
+                            !itemActionable ||
+                            documentEditSaving ||
+                            !documentBlockDraft.trim()
                           "
                           @click="saveDocumentBlockEdit"
                         >
@@ -976,7 +1038,7 @@
                       <div>
                         <span>
                           知识单元 {{ currentUnitPosition }}/{{
-                            packageDetail.knowledge_unit_count
+                            knowledgeUnitItems.length
                           }}
                           ·
                           {{ changeTypeLabel(currentItem.change_type) }}
@@ -1747,49 +1809,59 @@
             </section>
 
             <section v-else class="history-review">
-              <div v-if="packageDetail.change_requests.length" class="change-request-list">
+              <div v-if="auditRecords.length" class="audit-record-list">
                 <article
-                  v-for="request in packageDetail.change_requests"
-                  :key="request.change_request_id"
-                  class="change-request-card"
+                  v-for="(record, index) in auditRecords"
+                  :key="record.id || `${record.record_type}-${record.event_type}-${record.created_at}-${index}`"
+                  class="audit-record"
                 >
-                  <div>
-                    <span>第 {{ request.round_number }} 轮资料修改</span
-                    ><a-tag :color="changeRequestColor(request.status)">{{
-                      changeRequestStatusLabel(request.status)
-                    }}</a-tag>
+                  <div class="audit-record-heading">
+                    <a-tag :color="auditRecordCategoryColor(record.category)">
+                      {{ auditRecordCategoryLabel(record.category) }}
+                    </a-tag>
+                    <strong>{{ auditRecordTitle(record) }}</strong>
+                    <a-tag
+                      v-if="record.record_type === 'CHANGE_REQUEST'"
+                      :color="changeRequestColor(auditRecordRequest(record).status)"
+                    >
+                      {{ changeRequestStatusLabel(auditRecordRequest(record).status) }}
+                    </a-tag>
+                    <span>{{ formatTime(record.created_at) }}</span>
                   </div>
-                  <strong>{{ request.request_text }}</strong>
-                  <p>
-                    {{ request.responsible_user_name || '未指定资料责任人' }} ·
-                    {{ formatTime(request.updated_at) }}
+                  <p class="audit-record-meta">
+                    {{ record.scope === 'related' ? '关联资料' : '当前资料' }}
+                    <template v-if="record.material?.title">
+                      · {{ record.material.title }}
+                    </template>
+                    <template v-if="record.material?.revision">
+                      · 版本 {{ record.material.revision }}
+                    </template>
+                    ·
+                    {{ record.operator_id || '系统' }}
                   </p>
+                  <p v-if="record.material?.path" class="audit-record-material">
+                    位置：{{ record.material.path }}
+                  </p>
+                  <p v-if="record.from_status || record.to_status" class="audit-record-status">
+                    状态：{{ auditStatusLabel(record.from_status) }} → {{ auditStatusLabel(record.to_status) }}
+                  </p>
+                  <small v-if="record.message">{{ record.message }}</small>
+                  <small v-if="auditRecordDetail(record)" class="audit-record-detail">
+                    {{ auditRecordDetail(record) }}
+                  </small>
                   <a-button
-                    v-if="['OPEN', 'NEW_VERSION_RECEIVED'].includes(request.status)"
+                    v-if="record.record_type === 'CHANGE_REQUEST' && ['OPEN', 'NEW_VERSION_RECEIVED'].includes(auditRecordRequest(record).status)"
                     size="small"
                     danger
                     class="cancel-change-request"
                     :disabled="writeDisabled"
-                    @click="confirmCancelChangeRequest(request)"
+                    @click="confirmCancelChangeRequest(auditRecordRequest(record))"
                     >取消修改任务</a-button
                   >
                 </article>
               </div>
               <div v-else class="content-notice compact">
-                <History :size="22" /><strong>暂无资料修改记录</strong>
-              </div>
-              <div v-if="packageDetail.events.length" class="event-timeline">
-                <div
-                  v-for="(event, index) in packageDetail.events"
-                  :key="`${event.event_type}-${index}`"
-                >
-                  <i />
-                  <p>
-                    <strong>{{ eventLabel(event.event_type) }}</strong
-                    ><span>{{ formatTime(event.created_at) }}</span>
-                  </p>
-                  <small v-if="event.message">{{ event.message }}</small>
-                </div>
+                <History :size="22" /><strong>暂无业务处理记录</strong>
               </div>
             </section>
           </div>
@@ -1814,7 +1886,7 @@
                 <p>
                   {{
                     knowledgeUnitMode
-                      ? `当前为知识单元 ${currentUnitPosition} / ${packageDetail.knowledge_unit_count}，提交后只会处理这一项。`
+                      ? `当前为知识单元 ${currentUnitPosition} / ${knowledgeUnitItems.length}，提交后只会处理这一项。`
                       : currentItem.review_type === 'STALE'
                         ? '内容未变化，请确认是否继续有效。'
                         : '选择业务结果，系统自动执行对应的知识处理动作。'
@@ -1823,8 +1895,9 @@
               </div>
               <div class="decision-heading-actions">
                 <a-button
+                  v-if="itemActionable"
                   size="small"
-                  :disabled="writeDisabled"
+                  :disabled="writeDisabled || !itemActionable"
                   @click="transferOpen = !transferOpen"
                   ><UserRoundCog :size="14" />转交</a-button
                 >
@@ -1839,7 +1912,7 @@
                 </button>
               </div>
             </div>
-            <div v-if="transferOpen" class="transfer-box">
+            <div v-if="transferOpen && itemActionable" class="transfer-box">
               <label>转交给知识管理员</label
               ><a-select
                 v-model:value="transferForm.assignee_id"
@@ -1918,6 +1991,20 @@
                   :disabled="writeDisabled"
                 />
                 <p>后台不会修改飞书正文；责任人完成修改后，由下一次扫描自动重新打开审核。</p>
+              </div>
+              <div v-if="form.outcome === 'SPLIT_SCOPE'" class="field applicability-scope-field">
+                <label>适用范围</label>
+                <p class="field-help">填写当前版本适用的范围；另一侧知识会保留，检索时按范围区分。</p>
+                <div class="scope-grid">
+                  <a-input
+                    v-for="field in scopeFields"
+                    :key="field.key"
+                    v-model:value="form.applicability_scope[field.key]"
+                    :placeholder="field.placeholder"
+                    :aria-label="field.label"
+                    :disabled="writeDisabled"
+                  />
+                </div>
               </div>
               <div class="field">
                 <label>{{ decisionCommentLabel }}</label
@@ -2098,9 +2185,19 @@ const form = reactive({
   outcome: '',
   problem_tags: [],
   decision_comment: '',
-  responsible_user_name: ''
+  responsible_user_name: '',
+  applicability_scope: {}
 })
 const transferForm = reactive({ assignee_id: undefined, comment: '' })
+
+const scopeFields = [
+  { key: 'industry', label: '行业', placeholder: '适用行业' },
+  { key: 'product', label: '产品', placeholder: '适用产品' },
+  { key: 'product_version', label: '产品版本', placeholder: '产品版本' },
+  { key: 'deployment_mode', label: '部署方式', placeholder: '部署方式' },
+  { key: 'customer_type', label: '客户类型', placeholder: '客户类型' },
+  { key: 'region_language', label: '地区/语言', placeholder: '地区或语言' }
+]
 
 const queueViews = [
   { value: 'mine', label: '待我处理', countKey: 'mine' },
@@ -2136,6 +2233,7 @@ const outcomeCopy = {
   EXCLUDE: ['不纳入知识库', '保留来源记录但不发布'],
   ADOPT_NEW_VERSION: ['采用新版', '发布后替换当前版本'],
   KEEP_CURRENT: ['保留当前版本', '本次候选不发布'],
+  SPLIT_SCOPE: ['按适用范围拆分', '保留两侧知识并按适用范围区分'],
   WAIT_BUSINESS_CONFIRMATION: ['等待业务确认', '暂缓裁决并保留任务'],
   CONFIRM_VALID: ['确认仍有效', '继续保留当前正式知识'],
   REQUEST_SUPPORTING_SOURCE: ['补充来源', '补充可靠资料后重新判断'],
@@ -2155,16 +2253,28 @@ const sourceUpdateCount = computed(() => Number(packageResponse.value.counts?.so
 const showSourceUpdateNotice = computed(
   () => sourceUpdateCount.value > 0 && reviewTypeFilter.value !== 'UPDATE'
 )
-const knowledgeUnitMode = computed(() => Boolean(packageDetail.value?.knowledge_unit_count))
+const knowledgeUnitItems = computed(() =>
+  (packageDetail.value?.items || []).filter((item) => item.knowledge_unit)
+)
+const knowledgeUnitMode = computed(() =>
+  Boolean(packageDetail.value?.knowledge_unit_count || knowledgeUnitItems.value.length)
+)
+const unitViewOptions = [
+  { value: 'pending', label: '待处理' },
+  { value: 'decided', label: '已处理' },
+  { value: 'all', label: '全部' }
+]
 const visibleItems = computed(() => {
   const items = packageDetail.value?.items || []
-  if (!knowledgeUnitMode.value || unitView.value === 'all') return items
+  if (!knowledgeUnitMode.value) return items
+  const units = knowledgeUnitItems.value
+  if (unitView.value === 'all') return units
   if (unitView.value === 'decided') {
-    return items.filter((item) =>
+    return units.filter((item) =>
       ['DECIDED', 'SOURCE_UPDATED', 'INVALIDATED'].includes(item.item_status)
     )
   }
-  return items.filter((item) =>
+  return units.filter((item) =>
     ['PENDING', 'WAITING_SOURCE_CHANGE', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
   )
 })
@@ -2180,19 +2290,40 @@ const itemNavigationItems = computed(() => {
 })
 const currentUnitPosition = computed(() => {
   if (!currentItem.value?.knowledge_unit) return 0
-  const units = (packageDetail.value?.items || []).filter((item) => item.knowledge_unit)
-  const index = units.findIndex((item) => item.review_item_id === currentItem.value.review_item_id)
+  const index = knowledgeUnitItems.value.findIndex(
+    (item) => item.review_item_id === currentItem.value.review_item_id
+  )
   return index >= 0 ? index + 1 : 0
 })
+const decidedUnitCount = computed(() =>
+  knowledgeUnitItems.value.filter((item) =>
+    ['DECIDED', 'SOURCE_UPDATED', 'INVALIDATED'].includes(item.item_status)
+  ).length
+)
+const remainingUnitCount = computed(() => Math.max(knowledgeUnitItems.value.length - decidedUnitCount.value, 0))
+const includedUnitCount = computed(() =>
+  knowledgeUnitItems.value.filter((item) =>
+    ['PUBLISH', 'ADOPT_NEW_VERSION', 'SPLIT_SCOPE', 'CONFIRM_VALID'].includes(item.outcome)
+  ).length
+)
+const excludedUnitCount = computed(() =>
+  knowledgeUnitItems.value.filter((item) =>
+    ['EXCLUDE', 'KEEP_CURRENT', 'ARCHIVE', 'DUPLICATE_SOURCE'].includes(item.outcome)
+  ).length
+)
+function unitViewCount(view) {
+  if (view === 'all') return knowledgeUnitItems.value.length
+  if (view === 'decided') return decidedUnitCount.value
+  return remainingUnitCount.value
+}
 const currentVisibleIndex = computed(() =>
   itemNavigationItems.value.findIndex((item) => item.review_item_id === selectedItemId.value)
 )
-const currentVisiblePosition = computed(() =>
-  currentVisibleIndex.value >= 0 ? currentVisibleIndex.value + 1 : 0
-)
 const hasPreviousItem = computed(() => currentVisibleIndex.value > 0)
 const hasNextItem = computed(
-  () => currentVisibleIndex.value >= 0 && currentVisibleIndex.value < visibleItems.value.length - 1
+  () =>
+    currentVisibleIndex.value >= 0 &&
+    currentVisibleIndex.value < itemNavigationItems.value.length - 1
 )
 const selectedSourceSegment = computed(() =>
   sourceSegments.value.find((segment) => segment.segment_id === selectedSourceSegmentId.value)
@@ -2243,7 +2374,6 @@ const itemActionable = computed(() =>
 )
 const outcomeOptions = computed(() =>
   (currentItem.value?.allowed_outcomes || [])
-    .filter((value) => value !== 'SPLIT_SCOPE')
     .map((value) => ({
       value,
       label: outcomeCopy[value]?.[0] || value,
@@ -2254,6 +2384,29 @@ const selectedRelations = computed(() => {
   const relationIds = new Set(currentItem.value?.relation_ids || [])
   return (packageDetail.value?.relations || []).filter((relation) =>
     relationIds.has(relation.relation_id)
+  )
+})
+const auditRecords = computed(() => {
+  const detail = packageDetail.value
+  if (Array.isArray(detail?.audit_records)) return detail.audit_records
+  const requests = (detail?.change_requests || []).map((request) => ({
+    record_type: 'CHANGE_REQUEST',
+    category: 'SOURCE_CHANGE',
+    event_type: 'source_change_requested',
+    scope: 'current',
+    created_at: request.updated_at || request.created_at,
+    operator_id: request.created_by,
+    message: request.request_text,
+    request
+  }))
+  const events = (detail?.events || []).map((event) => ({
+    record_type: 'EVENT',
+    category: event.category || auditEventCategory(event.event_type),
+    scope: event.scope || 'current',
+    ...event
+  }))
+  return [...requests, ...events].sort((left, right) =>
+    String(right.created_at || '').localeCompare(String(left.created_at || ''))
   )
 })
 const activeRelation = computed(
@@ -2576,7 +2729,8 @@ async function loadPackages(options = {}) {
     const selected = packages.value.find((item) => item.package_id === selectedPackageId.value)
     await selectPackage(
       requested?.package_id || selected?.package_id || packages.value[0]?.package_id || '',
-      requested ? target.relationId : ''
+      requested ? target.relationId : '',
+      options.preferredItemId || ''
     )
     if (requested) emit('target-consumed')
   } catch (error) {
@@ -2666,7 +2820,7 @@ function showSourceUpdates() {
   reviewTypeFilter.value = 'UPDATE'
   problemFilter.value = ''
 }
-async function selectPackage(packageId, relationId = '') {
+async function selectPackage(packageId, relationId = '', preferredItemId = '') {
   selectedPackageId.value = packageId
   packageDetail.value = null
   selectedItemId.value = ''
@@ -2706,11 +2860,17 @@ async function selectPackage(packageId, relationId = '') {
     const actionable = response.items?.find((item) =>
       ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
     )
+    const preferred = response.items?.find(
+      (item) =>
+        item.review_item_id === preferredItemId &&
+        ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
+    )
     const waitingSourceItem = response.items?.find(
       (item) => item.item_status === 'WAITING_SOURCE_CHANGE'
     )
     selectItem(
       relationItem?.review_item_id ||
+        preferred?.review_item_id ||
         waitingSourceItem?.review_item_id ||
         attentionItem?.review_item_id ||
         actionable?.review_item_id ||
@@ -2740,7 +2900,7 @@ function selectItem(itemId) {
   activeEvidenceView.value = item.review_type === 'UPDATE' ? 'changes' : 'content'
   const draft =
     packageDetail.value?.draft?.review_item_id === itemId ? packageDetail.value.draft : {}
-  const visibleOutcomes = (item.allowed_outcomes || []).filter((value) => value !== 'SPLIT_SCOPE')
+  const visibleOutcomes = item.allowed_outcomes || []
   const recommendedOutcome = visibleOutcomes.includes(item.recommended_outcome)
     ? item.recommended_outcome
     : ''
@@ -2751,9 +2911,24 @@ function selectItem(itemId) {
   form.problem_tags = [...(draft.problem_tags || item.problem_tags || [])]
   form.decision_comment = draft.decision_comment || item.decision_comment || ''
   form.responsible_user_name = draft.responsible_user_name || ''
+  form.applicability_scope = {
+    ...(item.applicability_scope || {}),
+    ...(draft.applicability_scope || {})
+  }
   transferForm.assignee_id = undefined
   transferForm.comment = ''
   focusKnowledgeUnit(item)
+}
+function setUnitView(view) {
+  if (!unitViewOptions.some((option) => option.value === view)) return
+  unitView.value = view
+  unitListExpanded.value = false
+  const selectedVisible = visibleItems.value.some(
+    (item) => item.review_item_id === selectedItemId.value
+  )
+  if (!selectedVisible && visibleItems.value[0]) {
+    selectItem(visibleItems.value[0].review_item_id)
+  }
 }
 async function loadReviewContent() {
   const detail = packageDetail.value
@@ -3289,13 +3464,18 @@ function decisionPayload() {
     outcome: form.outcome,
     problem_tags: form.problem_tags,
     decision_comment: form.decision_comment.trim() || undefined,
-    applicability_scope: {},
+    applicability_scope: cleanApplicabilityScope(form.applicability_scope),
     responsible_user_name: form.responsible_user_name.trim() || undefined,
     layout_edits: packageDetail.value?.draft?.layout_edits || {}
   }
 }
+function cleanApplicabilityScope(scope) {
+  return Object.fromEntries(
+    Object.entries(scope || {}).filter(([, value]) => String(value || '').trim())
+  )
+}
 async function saveDraft() {
-  if (props.writeDisabled || !packageDetail.value || !currentItem.value) return
+  if (props.writeDisabled || !packageDetail.value || !currentItem.value || !itemActionable.value) return
   savingDraft.value = true
   try {
     const response = await governanceApi.saveReviewPackageDraft(packageDetail.value.package_id, {
@@ -3313,6 +3493,11 @@ async function saveDraft() {
 }
 async function resolveItem() {
   if (props.writeDisabled || !packageDetail.value || !currentItem.value) return
+  if (!itemActionable.value) {
+    message.warning('该知识单元已处理，不能重复提交')
+    decisionPanelOpen.value = false
+    return
+  }
   if (publishOutcome(form.outcome) && publishUnavailable.value) {
     message.warning(
       reviewContent.value.loading
@@ -3325,28 +3510,41 @@ async function resolveItem() {
     message.warning(`请填写${decisionCommentLabel.value}`)
     return
   }
+  if (form.outcome === 'SPLIT_SCOPE' && !Object.keys(cleanApplicabilityScope(form.applicability_scope)).length) {
+    message.warning('请至少填写一项适用范围')
+    return
+  }
   resolving.value = true
   try {
     const itemTitle = currentItem.value.title || '该知识单元'
     const outcome = form.outcome
+    const currentReviewItemId = currentItem.value.review_item_id
+    const nextActionableItem = itemNavigationItems.value.find(
+      (item) =>
+        item.review_item_id !== currentReviewItemId &&
+        ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
+    )
     const response = await governanceApi.resolveReviewPackage(packageDetail.value.package_id, {
       request_id: newRequestId(),
       lock_version: packageDetail.value.lock_version,
       decisions: [decisionPayload()]
     })
+    let successText = ''
     if (response.unit_publish_version_ids?.length) {
-      message.success(
+      successText =
         `“${itemTitle}”已确认纳入，正在加入正式知识；本材料还有 ${response.remaining_unit_count || 0} 个知识单元待处理`
-      )
       emit('knowledge-change')
     } else if (currentItem.value.knowledge_unit) {
-      message.success(
-        `已记录“${outcomeLabel(outcome)}”；剩余 ${response.remaining_unit_count || 0} 个知识单元待处理`
-      )
+      successText = `已记录“${outcomeLabel(outcome)}”；剩余 ${response.remaining_unit_count || 0} 个知识单元待处理`
     } else {
-      message.success(`已记录“${outcomeLabel(outcome)}”`)
+      successText = `已记录“${outcomeLabel(outcome)}”`
     }
-    await loadPackages()
+    const counterpartNotice = (response.counterpart_actions || [])
+      .map((action) => action.message || action.title)
+      .filter(Boolean)
+      .join('；')
+    message.success(counterpartNotice ? `${successText}；${counterpartNotice}` : successText)
+    await loadPackages({ preferredItemId: nextActionableItem?.review_item_id || '' })
   } catch (error) {
     message.error(governanceApi.getErrorMessage(error, '提交审核结果失败'))
   } finally {
@@ -3517,7 +3715,7 @@ async function resolveBulkItems(items, outcomeOverride = '') {
   }
 }
 async function transferPackage() {
-  if (props.writeDisabled || !packageDetail.value) return
+  if (props.writeDisabled || !packageDetail.value || !itemActionable.value) return
   if (!transferForm.assignee_id || !transferForm.comment.trim()) {
     message.warning('请选择转交对象并填写转交原因')
     return
@@ -4215,6 +4413,14 @@ function itemStatusLabel(value, item = null) {
   if (value === 'INVALIDATED' && item?.outcome === 'REQUEST_SOURCE_CHANGE') {
     return '修改任务已结束'
   }
+  if (value === 'DECIDED') {
+    if (['PUBLISH', 'ADOPT_NEW_VERSION', 'SPLIT_SCOPE', 'CONFIRM_VALID'].includes(item?.outcome)) {
+      return '已提交发布'
+    }
+    if (['EXCLUDE', 'KEEP_CURRENT', 'ARCHIVE', 'DUPLICATE_SOURCE'].includes(item?.outcome)) {
+      return '已处理（未发布）'
+    }
+  }
   return (
     {
       PENDING: '待审核',
@@ -4394,6 +4600,153 @@ function changeRequestColor(value) {
     'default'
   )
 }
+function auditEventCategory(value) {
+  if (String(value).startsWith('source_change_') || value === 'review_item_reopened') {
+    return 'SOURCE_CHANGE'
+  }
+  if (
+    String(value).includes('conflict') ||
+    String(value).includes('duplicate') ||
+    String(value).includes('relation')
+  ) {
+    return 'CROSS_DOCUMENT'
+  }
+  if (String(value).includes('transfer')) return 'ASSIGNMENT'
+  if (
+    [
+      'material_discovered',
+      'parsed',
+      'parse_failed',
+      'processing_queued',
+      'processing_enqueue_failed',
+      'retry_queued',
+      'scan_failed',
+      'startup_reconciled'
+    ].includes(value) ||
+    String(value).includes('scan') ||
+    String(value).includes('processing') ||
+    String(value).includes('startup')
+  ) {
+    return 'PROCESSING'
+  }
+  if (
+    String(value).includes('publish') ||
+    String(value).includes('lifecycle') ||
+    [
+      'approved',
+      'rejected',
+      'review_package_completed',
+      'review_item_decided',
+      'knowledge_unit_metadata_updated',
+      'reindex_queued',
+      'source_offline_started',
+      'source_offline_failed',
+      'source_offline_completed',
+      'source_restore_queued',
+      'source_rollback_queued',
+      'removal_started',
+      'removal_confirmed',
+      'removal_failed',
+      'replacement_cleanup_failed'
+    ].includes(value)
+  ) {
+    return 'KNOWLEDGE'
+  }
+  return 'REVIEW'
+}
+function auditRecordCategoryLabel(value) {
+  return (
+    {
+      SOURCE_CHANGE: '资料变更',
+      CROSS_DOCUMENT: '跨文档',
+      ASSIGNMENT: '责任归属',
+      PROCESSING: '系统加工',
+      KNOWLEDGE: '知识处理',
+      REVIEW: '审核'
+    }[value] || '业务操作'
+  )
+}
+function auditRecordCategoryColor(value) {
+  return (
+    {
+      SOURCE_CHANGE: 'orange',
+      CROSS_DOCUMENT: 'purple',
+      ASSIGNMENT: 'blue',
+      PROCESSING: 'default',
+      KNOWLEDGE: 'green',
+      REVIEW: 'cyan'
+    }[value] || 'default'
+  )
+}
+function auditRecordRequest(record) {
+  return record.request || record.payload?.change_request || {}
+}
+function auditStatusLabel(value) {
+  if (!value) return '—'
+  return (
+    {
+      discovered: '已发现',
+      processing_queued: '待加工',
+      processing: '加工中',
+      parsed: '已解析',
+      awaiting_review: '待审核',
+      pending: '待处理',
+      resolved: '已解决',
+      changes_requested: '已要求修改',
+      publish_queued: '待发布',
+      publishing: '发布中',
+      published: '已发布',
+      publish_failed: '发布失败',
+      parse_failed: '解析失败',
+      replaced: '已被替代',
+      removal_pending: '移除中',
+      removed: '已移除',
+      removal_failed: '移除失败',
+      approved: '已通过',
+      rejected: '已驳回',
+      OPEN: '待处理',
+      NEW_VERSION_RECEIVED: '已收到新版本',
+      FULFILLED: '已完成',
+      CANCELLED: '已取消'
+    }[value] || value
+  )
+}
+function auditFieldLabel(value) {
+  return (
+    {
+      owner_id: '负责人 ID',
+      owner_name: '负责人',
+      valid_from: '生效时间',
+      valid_until: '失效时间',
+      review_due_at: '复核时间'
+    }[value] || value
+  )
+}
+function auditValueLabel(value) {
+  if (value === null || value === undefined || value === '') return '未设置'
+  return String(value)
+}
+function auditRecordDetail(record) {
+  const payload = record.payload || {}
+  const changedFields = payload.changed_fields
+  if (!Array.isArray(changedFields)) return ''
+  if (!changedFields.length) return '治理信息未发生变化（仅确认操作）'
+  const before = payload.before || {}
+  const after = payload.after || {}
+  return `变更：${changedFields
+    .map(
+      (field) =>
+        `${auditFieldLabel(field)} ${auditValueLabel(before[field])} → ${auditValueLabel(after[field])}`
+    )
+    .join('；')}`
+}
+function auditRecordTitle(record) {
+  if (record.record_type === 'CHANGE_REQUEST') {
+    const request = auditRecordRequest(record)
+    return `第 ${request.round_number || 1} 轮资料修改`
+  }
+  return eventLabel(record.event_type)
+}
 function eventLabel(value) {
   return (
     {
@@ -4403,9 +4756,46 @@ function eventLabel(value) {
       source_change_request_fulfilled: '资料修改已验证',
       source_change_request_cancelled: '资料修改任务已取消',
       review_item_decided: '已记录审核结果',
+      review_transferred: '审核任务已转交',
+      changes_requested: '已要求修改资料',
       review_package_transferred: '审核包已转交',
       review_package_completed: '审核包已完成',
-      review_draft_saved: '已保存审核草稿'
+      review_draft_saved: '已保存审核草稿',
+      review_layout_edit_saved: '已保存版式编辑',
+      cross_document_relation_resolved: '跨文档关系已处理',
+      conflict_counterpart_superseded: '冲突另一侧已移出检索',
+      conflict_review_superseded: '冲突审核项已被替代',
+      duplicate_review_items_auto_decided: '重复来源审核已自动处理',
+      knowledge_unit_lifecycle_queued: '知识生命周期任务已排队',
+      knowledge_unit_metadata_updated: '已更新知识单元治理信息',
+      approved: '资料审核通过',
+      rejected: '资料已驳回',
+      retry_queued: '资料重试已排队',
+      processing_started: '资料开始加工',
+      reindex_queued: '索引重建已排队',
+      unit_publish_queued: '知识单元发布已排队',
+      publishing: '资料正在发布',
+      published: '资料已发布',
+      publish_failed: '资料发布失败',
+      publish_obsolete: '候选版本已过期',
+      publish_obsolete_cleanup_failed: '过期候选清理失败',
+      replacement_cleanup_failed: '旧索引清理失败',
+      source_offline_started: '资料下架已开始',
+      source_offline_failed: '资料下架失败',
+      source_offline_completed: '资料已下架',
+      source_restore_queued: '资料恢复已排队',
+      source_rollback_queued: '资料版本回滚已排队',
+      removal_started: '失效资料移除已开始',
+      removal_confirmed: '失效资料已移除',
+      removal_failed: '失效资料移除失败',
+      parsed: '资料解析完成',
+      parse_failed: '资料解析失败',
+      processing_enqueue_failed: '资料加工入队失败',
+      material_discovered: '发现新资料',
+      processing_queued: '资料已进入加工队列',
+      scan_failed: '扫描失败',
+      startup_reconciled: '服务恢复时已处理异常任务',
+      user_oauth_authorized: '已完成飞书授权'
     }[value] || '加工状态已更新'
   )
 }
@@ -6073,10 +6463,17 @@ loadReviewers()
 }
 .layout-sidebar-unit-list strong {
   min-width: 0;
+  flex: 1;
   overflow: hidden;
   font-size: 10px;
   font-weight: 550;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.layout-sidebar-unit-list small {
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  font-size: 9px;
   white-space: nowrap;
 }
 .document-layout-canvas {
@@ -7538,37 +7935,55 @@ loadReviewers()
   padding: 12px 0 3px;
   text-align: center;
 }
-.change-request-list {
+.audit-record-list {
   display: grid;
   gap: 8px;
   margin-top: 8px;
 }
-.change-request-card {
+.audit-record {
   padding: 10px;
   border: 1px solid var(--gray-150);
   border-radius: 6px;
   background: var(--gray-10);
 }
-.change-request-card > div {
+.audit-record-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
 }
-.change-request-card > div > span {
+.audit-record-heading strong {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+}
+.audit-record-heading > span {
   color: var(--color-text-tertiary);
   font-size: 10px;
 }
-.change-request-card > strong {
-  display: block;
-  margin-top: 7px;
-  font-size: 11px;
-  line-height: 1.55;
-}
-.change-request-card > p {
+.audit-record-meta {
   margin: 4px 0 0;
   color: var(--color-text-tertiary);
   font-size: 10px;
+}
+.audit-record-material,
+.audit-record-status {
+  margin: 3px 0 0;
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.audit-record small {
+  display: block;
+  margin-top: 5px;
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.audit-record-detail {
+  color: var(--color-text-tertiary);
 }
 .cancel-change-request {
   margin-top: 8px;
@@ -7802,6 +8217,17 @@ loadReviewers()
   color: var(--color-text-tertiary);
   font-size: 9px;
   line-height: 1.5;
+}
+.applicability-scope-field .field-help {
+  margin: -1px 0 7px;
+  color: var(--color-text-tertiary);
+  font-size: 9px;
+  line-height: 1.5;
+}
+.scope-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
 }
 .field-control {
   width: 100%;
