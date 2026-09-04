@@ -240,6 +240,10 @@ def test_product_request_schemas_reject_extra_fields_and_enforce_message_length(
     with pytest.raises(ValidationError):
         SendMessageRequest(content="x" * 20_001)
 
+    skill_request = SendMessageRequest(content="@查资料 语音智控相关文档", skillId="MATERIAL_SEARCH")
+    assert skill_request.skill_id == "MATERIAL_SEARCH"
+    assert skill_request.model_dump(by_alias=True)["skillId"] == "MATERIAL_SEARCH"
+
     assert CreateConversationRequest(title=None).title is None
     with pytest.raises(ValidationError):
         CreateConversationRequest(title="x" * 81)

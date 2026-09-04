@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -36,7 +37,9 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuSource,
     FeishuSourceChangeRequest,
     FeishuSourceItem,
+    KnowledgeBase,
     KnowledgeChunk,
+    KnowledgeFile,
 )
 from yuxi.storage.postgres.models_product import (
     ConversationStatus,
@@ -209,6 +212,8 @@ async def chat_api_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ("GET", "/api/chat/conversations/missing", None),
         ("POST", "/api/chat/conversations/missing/messages", {"content": "问题"}),
         ("POST", "/api/chat/conversations/missing/messages/stream", {"content": "问题"}),
+        ("GET", "/api/chat/materials/missing/download", None),
+        ("POST", "/api/chat/materials/missing/distributions", {"channel": "FEISHU"}),
         ("PUT", "/api/chat/messages/missing/feedback", {"rating": "LIKE"}),
         ("POST", "/api/chat/conversations/missing/archive", None),
         ("POST", "/api/chat/conversations/missing/restore", None),
@@ -394,6 +399,160 @@ async def test_stream_message_emits_real_progress_and_persists_the_exchange(
     assert '"messageCount": 2' in response.text
     assert detail_response.json()["messages"][0]["content"] == "部署前需要准备什么？"
     assert detail_response.json()["messages"][1]["content"] == "该产品支持私有部署。"
+
+
+async def test_stream_accepts_skill_marker_and_removes_it_from_knowledge_question(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation()
+    received_questions: list[str] = []
+
+    async def answer_events(self, question: str, user: User, conversation_id: str, *, mode: str):
+        received_questions.append(question)
+        yield _answer("INSUFFICIENT")
+
+    monkeypatch.setattr(AnswerService, "answer_events", answer_events)
+
+    response = await context.client.post(
+        f"/api/chat/conversations/{conversation.conversation_id}/messages/stream",
+        headers=context.owner_headers,
+        json={
+            "content": "@查资料 语音智控相关文档",
+            "skillId": "MATERIAL_SEARCH",
+        },
+    )
+
+    assert response.status_code == 200
+    assert received_questions == ["语音智控相关文档"]
+    detail_response = await context.client.get(
+        f"/api/chat/conversations/{conversation.conversation_id}",
+        headers=context.owner_headers,
+    )
+    assert detail_response.json()["messages"][0]["content"] == "@查资料 语音智控相关文档"
+
+
+async def test_material_search_returns_reloadable_cards_and_secured_download_and_share(
+    chat_api_context,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = chat_api_context
+    conversation = await context.create_conversation()
+    async with context.factory() as session:
+        session.add_all(
+            [
+                KnowledgeBase(
+                    kb_id="kb-1",
+                    name="产品正式资料",
+                    kb_type="milvus",
+                    share_config={"access_level": "global"},
+                ),
+                KnowledgeFile(
+                    file_id="file-1",
+                    kb_id="kb-1",
+                    filename="产品/语音智控产品白皮书.docx",
+                    file_type="docx",
+                    minio_url="minio://files/source.docx",
+                    status="done",
+                    file_size=4096,
+                    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+                FeishuSource(
+                    source_id="source-1",
+                    name="善达知识库",
+                    wiki_root_token="root",
+                    target_kb_id="kb-1",
+                    credential_env_name="FEISHU_USER_OAUTH",
+                ),
+                FeishuSourceItem(
+                    item_id="item-1",
+                    source_id="source-1",
+                    item_key="attachment:item-1",
+                    item_type="attachment",
+                    title="语音智控产品白皮书.docx",
+                    path_text="产品 / 语音智控",
+                    source_url="https://quickdone.feishu.cn/wiki/item-1",
+                    source_updated_at=datetime(2026, 8, 16, 8, 0, tzinfo=UTC),
+                    source_validity="valid",
+                    active_version_id="version-1",
+                    publication_status="ACTIVE",
+                ),
+                FeishuMaterialVersion(
+                    version_id="version-1",
+                    item_id="item-1",
+                    revision="1",
+                    content_hash="version-hash",
+                    processing_status="published",
+                    review_status="approved",
+                    yuxi_file_id="file-1",
+                    published_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        await session.commit()
+
+    async def answer_events(self, question: str, user: User, conversation_id: str, *, mode: str):
+        assert question == "语音智控相关资料"
+        yield _answer("SUPPORTED")
+
+    async def download_file(*, kb_id: str, file_id: str, variant: str):
+        assert (kb_id, file_id, variant) == ("kb-1", "file-1", "original")
+        return {
+            "filename": "语音智控产品白皮书.docx",
+            "content": b"official-material",
+            "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
+
+    monkeypatch.setattr(AnswerService, "answer_events", answer_events)
+    monkeypatch.setattr(product_chat_router.knowledge_base, "get_file_download", download_file)
+
+    response = await context.client.post(
+        f"/api/chat/conversations/{conversation.conversation_id}/messages/stream",
+        headers=context.owner_headers,
+        json={"content": "@查资料 语音智控相关资料", "skillId": "MATERIAL_SEARCH"},
+    )
+    completed = json.loads(response.text.split("event: complete\ndata: ", 1)[1].split("\n\n", 1)[0])
+    material = completed["assistantMessage"]["materials"][0]
+
+    assert material["id"] == completed["assistantMessage"]["citations"][0]["id"]
+    assert material["title"] == "语音智控产品白皮书.docx"
+    assert material["type"] == "产品说明"
+    assert material["fileName"] == "语音智控产品白皮书.docx"
+    assert material["sizeBytes"] == 4096
+    assert material["approvalStatus"] == "APPROVED"
+    assert material["publicationStatus"] == "PUBLISHED"
+
+    detail = await context.client.get(
+        f"/api/chat/conversations/{conversation.conversation_id}",
+        headers=context.owner_headers,
+    )
+    assert detail.json()["messages"][1]["materials"] == [material]
+
+    downloaded = await context.client.get(
+        f"/api/chat/materials/{material['id']}/download",
+        headers=context.owner_headers,
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"official-material"
+    assert "filename*=UTF-8''" in downloaded.headers["content-disposition"]
+
+    distributed = await context.client.post(
+        f"/api/chat/materials/{material['id']}/distributions",
+        headers=context.owner_headers,
+        json={"channel": "FEISHU"},
+    )
+    assert distributed.status_code == 200
+    assert distributed.json()["distribution"]["status"] == "READY"
+    assert distributed.json()["downloadUrl"].endswith(f"/{material['id']}/download")
+    assert distributed.json()["requiresUserConfirmation"] is True
+
+    forbidden = await context.client.get(
+        f"/api/chat/materials/{material['id']}/download",
+        headers=context.other_headers,
+    )
+    assert forbidden.status_code == 404
+    assert forbidden.json()["error"]["code"] == "CITATION_NOT_FOUND"
 
 
 async def test_stream_failure_emits_stable_error_without_persisting_half_exchange(

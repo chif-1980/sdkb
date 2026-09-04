@@ -22,9 +22,13 @@ class CreateConversationRequest(StrictRequest):
     title: str | None = Field(default=None, max_length=80)
 
 
+ProductSkillId = Literal["MATERIAL_SEARCH", "SOLUTION_DRAFT", "MEETING_ANALYSIS"]
+
+
 class SendMessageRequest(StrictRequest):
     content: str = Field(min_length=1, max_length=20_000)
     mode: Literal["CONCISE", "DETAILED"] = "CONCISE"
+    skill_id: ProductSkillId | None = Field(default=None, alias="skillId")
 
 
 class MessageFeedbackRequest(StrictRequest):
@@ -77,6 +81,23 @@ class CitationResponse(ProductResponse):
     image_alt: str | None = None
 
 
+class ProductMaterialResponse(ProductResponse):
+    """A complete, currently published Feishu material returned by chat."""
+
+    id: str
+    title: str
+    type: str
+    file_name: str
+    mime_type: str
+    size_bytes: int
+    updated_at: str
+    summary: str
+    status: Literal["APPROVED", "PUBLISHED"]
+    approval_status: Literal["APPROVED"]
+    publication_status: Literal["PUBLISHED"]
+    citation: CitationResponse
+
+
 class MessageResponse(ProductResponse):
     id: str
     role: Literal["USER", "ASSISTANT"]
@@ -86,6 +107,7 @@ class MessageResponse(ProductResponse):
     feedback_reason_type: str | None = None
     feedback_reason_text: str | None = None
     citations: list[CitationResponse]
+    materials: list[ProductMaterialResponse] = Field(default_factory=list)
     created_at: str
 
 
@@ -111,3 +133,29 @@ class ConversationDetailResponse(ConversationResponse):
 class MessageExchangeResponse(ConversationResponse):
     user_message: MessageResponse
     assistant_message: MessageResponse
+
+
+MaterialShareChannel = Literal["WECHAT", "FEISHU", "DINGTALK"]
+MaterialDistributionStatus = Literal["READY", "DISPATCHED", "FAILED", "CANCELLED"]
+
+
+class MaterialDistributionRequest(StrictRequest):
+    channel: MaterialShareChannel
+
+
+class MaterialDistributionTaskResponse(ProductResponse):
+    id: str
+    material_id: str
+    requester_id: str
+    channel: MaterialShareChannel
+    mode: Literal["DEVICE_SHARE"]
+    status: MaterialDistributionStatus
+    created_at: str
+
+
+class MaterialDistributionResponse(ProductResponse):
+    distribution: MaterialDistributionTaskResponse
+    title: str
+    text: str
+    download_url: str
+    requires_user_confirmation: Literal[True]

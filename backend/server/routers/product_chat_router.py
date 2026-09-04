@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
+import re
 from collections.abc import AsyncIterator
+from urllib.parse import quote
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -13,6 +17,8 @@ from server.routers.product_api_route import ProductApiRoute
 from server.utils.auth_middleware import get_product_user
 from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
 from yuxi.product_chat.answer_service import AnswerDelta, AnswerProgress, AnswerService, GroundedAnswer
+from yuxi.product_chat.citation_service import CitationResolutionError
+from yuxi.product_chat.material_service import ProductMaterialService
 from yuxi.product_chat.repository import (
     ProductChatNotFoundError,
     ProductChatRepository,
@@ -29,6 +35,10 @@ from yuxi.product_chat.schemas import (
     MessageFeedbackRequest,
     MessageFeedbackResponse,
     MessageResponse,
+    MaterialDistributionRequest,
+    MaterialDistributionResponse,
+    MaterialDistributionTaskResponse,
+    ProductMaterialResponse,
     SendMessageRequest,
 )
 from yuxi.storage.postgres.manager import pg_manager
@@ -38,10 +48,24 @@ from yuxi.storage.postgres.models_product import (
     ProductConversation,
     ProductMessage,
 )
+from yuxi.knowledge.runtime import knowledge_base
 from yuxi.utils import logger
-from yuxi.utils.datetime_utils import format_utc_datetime
+from yuxi.utils.datetime_utils import format_utc_datetime, utc_isoformat
 
 product_chat = APIRouter(route_class=ProductApiRoute)
+
+_SKILL_MENTION_PATTERN = re.compile(r"(^|\s)@(查资料|做方案|分析会议)(?=\s|$)")
+_MATERIAL_INTENT_PATTERN = re.compile(r"查资料|产品说明|宣传手册|宣传册|解决方案|下载|分发|飞书原文")
+
+
+def _knowledge_question(content: str) -> str:
+    """Keep the visible command in history but omit it from retrieval/model input."""
+    cleaned = _SKILL_MENTION_PATTERN.sub(lambda match: match.group(1), content).strip()
+    return cleaned or content
+
+
+def _uses_material_search(content: str, skill_id: str | None = None) -> bool:
+    return skill_id == "MATERIAL_SEARCH" or "@查资料" in content or bool(_MATERIAL_INTENT_PATTERN.search(content))
 
 
 def _not_found() -> HTTPException:
@@ -112,6 +136,7 @@ def _citation_response(citation: MessageCitation) -> CitationResponse:
 def _message_response(
     message: ProductMessage,
     citations: list[MessageCitation],
+    materials: list[ProductMaterialResponse] | None = None,
 ) -> MessageResponse:
     return MessageResponse(
         id=message.message_id,
@@ -122,7 +147,15 @@ def _message_response(
         feedback_reason_type=message.feedback_reason_type,
         feedback_reason_text=message.feedback_reason_text,
         citations=[_citation_response(citation) for citation in citations],
+        materials=materials or [],
         created_at=format_utc_datetime(message.created_at) or "",
+    )
+
+
+def _material_http_error(error: CitationResolutionError) -> HTTPException:
+    return HTTPException(
+        status_code=error.status_code,
+        detail={"code": error.code, "message": error.message},
     )
 
 
@@ -191,9 +224,19 @@ async def get_conversation(
                 current_user.id,
             )
             messages = await repository.list_messages_with_citations(conversation_id)
+            message_responses: list[MessageResponse] = []
+            preceding_user_content = ""
+            material_service = ProductMaterialService(db)
+            for message, citations in messages:
+                materials: list[ProductMaterialResponse] = []
+                if message.role == "USER":
+                    preceding_user_content = message.content
+                elif citations and _uses_material_search(preceding_user_content):
+                    materials = await material_service.list_from_citations(citations, current_user)
+                message_responses.append(_message_response(message, citations, materials))
             return ConversationDetailResponse(
                 conversation=_conversation_response(conversation, len(messages)),
-                messages=[_message_response(message, citations) for message, citations in messages],
+                messages=message_responses,
             )
     except ProductChatNotFoundError:
         raise _not_found() from None
@@ -235,7 +278,7 @@ async def send_message(
     assert answer_service is not None
     try:
         answer = await answer_service.answer(
-            request.content,
+            _knowledge_question(request.content),
             current_user,
             conversation_id,
             mode=request.mode,
@@ -252,6 +295,11 @@ async def send_message(
                 request.content,
                 answer,
             )
+            assistant_materials = (
+                await ProductMaterialService(write_db).list_from_citations(assistant_citations, current_user)
+                if _uses_material_search(request.content, request.skill_id)
+                else []
+            )
             stored_conversation = await repository.require_conversation(
                 conversation_id,
                 current_user.id,
@@ -263,7 +311,7 @@ async def send_message(
                     message_count,
                 ),
                 user_message=_message_response(user_message, []),
-                assistant_message=_message_response(assistant_message, assistant_citations),
+                assistant_message=_message_response(assistant_message, assistant_citations, assistant_materials),
             )
     except ProductChatNotFoundError:
         raise _not_found() from None
@@ -299,7 +347,7 @@ async def stream_message(
         answer: GroundedAnswer | None = None
         try:
             async for event in answer_service.answer_events(
-                request.content,
+                _knowledge_question(request.content),
                 current_user,
                 conversation_id,
                 mode=request.mode,
@@ -325,6 +373,11 @@ async def stream_message(
                     request.content,
                     answer,
                 )
+                assistant_materials = (
+                    await ProductMaterialService(write_db).list_from_citations(assistant_citations, current_user)
+                    if _uses_material_search(request.content, request.skill_id)
+                    else []
+                )
                 stored_conversation = await repository.require_conversation(
                     conversation_id,
                     current_user.id,
@@ -333,7 +386,7 @@ async def stream_message(
                 response = MessageExchangeResponse(
                     conversation=_conversation_response(stored_conversation, message_count),
                     user_message=_message_response(user_message, []),
-                    assistant_message=_message_response(assistant_message, assistant_citations),
+                    assistant_message=_message_response(assistant_message, assistant_citations, assistant_materials),
                 )
             yield _sse_event("complete", response.model_dump(mode="json", by_alias=True))
         except ProductChatNotFoundError:
@@ -362,6 +415,92 @@ async def stream_message(
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@product_chat.get("/chat/materials/{material_id}/download")
+async def download_material(
+    material_id: str,
+    current_user: User = Depends(get_product_user),
+) -> StreamingResponse:
+    """Download a currently governed material through the existing KB service."""
+
+    try:
+        async with pg_manager.get_async_session_context() as db:
+            material = await ProductMaterialService(db).resolve(material_id, current_user)
+            data = await knowledge_base.get_file_download(
+                kb_id=material.source.target_kb_id,
+                file_id=material.version.yuxi_file_id,
+                variant="original",
+            )
+    except CitationResolutionError as exc:
+        raise _material_http_error(exc) from None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "MATERIAL_GONE", "message": "资料暂不可下载"},
+        ) from exc
+    except Exception as exc:
+        logger.error("product_material_download_failed material_id={} error_type={}", material_id, type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "MATERIAL_DOWNLOAD_UNAVAILABLE", "message": "资料下载服务暂不可用"},
+        ) from exc
+
+    filename = data.get("filename") or material.response.file_name
+    return StreamingResponse(
+        io.BytesIO(data.get("content") or b""),
+        media_type=data.get("media_type") or material.response.mime_type,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+@product_chat.post(
+    "/chat/materials/{material_id}/distributions",
+    response_model=MaterialDistributionResponse,
+)
+async def prepare_material_distribution(
+    material_id: str,
+    request: MaterialDistributionRequest,
+    current_user: User = Depends(get_product_user),
+) -> MaterialDistributionResponse:
+    """Create a safe, user-confirmed device-share preparation task.
+
+    The API deliberately does not send to a contact or create a public link;
+    the browser/device share sheet performs the final user-confirmed action.
+    """
+
+    if request.channel == "DINGTALK":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "CHANNEL_NOT_AVAILABLE", "message": "钉钉暂未接入，请选择微信或飞书"},
+        )
+    try:
+        async with pg_manager.get_async_session_context() as db:
+            material = await ProductMaterialService(db).resolve(material_id, current_user)
+    except CitationResolutionError as exc:
+        raise _material_http_error(exc) from None
+
+    now = utc_isoformat()
+    task_id = f"DST-{uuid4().hex[:24].upper()}"
+    share_text = (
+        f"{material.response.title}\n\n{material.response.summary or '企业正式资料'}\n\n"
+        f"来源：{material.response.citation.path or '飞书知识库'}"
+    )
+    return MaterialDistributionResponse(
+        distribution=MaterialDistributionTaskResponse(
+            id=task_id,
+            material_id=material_id,
+            requester_id=str(current_user.id),
+            channel=request.channel,
+            mode="DEVICE_SHARE",
+            status="READY",
+            created_at=now,
+        ),
+        title=material.response.title,
+        text=share_text,
+        download_url=f"/api/chat/materials/{quote(material_id, safe='')}/download",
+        requires_user_confirmation=True,
     )
 
 

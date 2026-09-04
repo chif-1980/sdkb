@@ -15,6 +15,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuSource,
     FeishuSourceItem,
     KnowledgeChunk,
+    KnowledgeFile,
 )
 from yuxi.storage.postgres.models_product import (
     CitationKind,
@@ -217,6 +218,28 @@ class ProductChatRepository:
             select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == citation.version_id)
         )
         return source, item, version
+
+    async def get_citation_material_with_file(
+        self,
+        citation: MessageCitation,
+    ) -> tuple[
+        FeishuSource | None,
+        FeishuSourceItem | None,
+        FeishuMaterialVersion | None,
+        KnowledgeFile | None,
+    ]:
+        """Resolve the governed source row and the indexed/downloadable file."""
+
+        source, item, version = await self.get_citation_material(citation)
+        knowledge_file = None
+        if source is not None and version is not None and version.yuxi_file_id:
+            knowledge_file = await self.session.scalar(
+                select(KnowledgeFile).where(
+                    KnowledgeFile.file_id == version.yuxi_file_id,
+                    KnowledgeFile.kb_id == source.target_kb_id,
+                )
+            )
+        return source, item, version, knowledge_file
 
     async def archive_conversation(self, conversation_id: str, owner_user_id: int) -> None:
         try:
