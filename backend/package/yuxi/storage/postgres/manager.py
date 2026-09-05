@@ -143,6 +143,21 @@ class PostgresManager(metaclass=SingletonMeta):
                     END IF;
                 END IF;
 
+                IF to_regclass('message_citations') IS NOT NULL AND (
+                    SELECT count(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'message_citations'
+                      AND column_name IN ('chunk_id', 'media_type', 'image_url', 'preview_url', 'image_alt')
+                ) < 5 THEN
+                    ALTER TABLE message_citations
+                    ADD COLUMN IF NOT EXISTS chunk_id VARCHAR(128),
+                    ADD COLUMN IF NOT EXISTS media_type VARCHAR(16),
+                    ADD COLUMN IF NOT EXISTS image_url VARCHAR(2048),
+                    ADD COLUMN IF NOT EXISTS preview_url VARCHAR(2048),
+                    ADD COLUMN IF NOT EXISTS image_alt VARCHAR(512);
+                END IF;
+
                 ALTER TABLE product_messages
                 ADD COLUMN IF NOT EXISTS feedback_rating VARCHAR(8);
 
@@ -151,6 +166,15 @@ class PostgresManager(metaclass=SingletonMeta):
 
                 ALTER TABLE product_messages
                 ADD COLUMN IF NOT EXISTS feedback_reason_text TEXT;
+
+                ALTER TABLE product_messages
+                ADD COLUMN IF NOT EXISTS solution_draft_id VARCHAR(64);
+
+                ALTER TABLE product_messages
+                ADD COLUMN IF NOT EXISTS request_id VARCHAR(128);
+
+                ALTER TABLE product_messages
+                ADD COLUMN IF NOT EXISTS skill_id VARCHAR(32);
 
                 IF NOT EXISTS (
                     SELECT 1
@@ -165,6 +189,60 @@ class PostgresManager(metaclass=SingletonMeta):
             END
             $$
             """,
+            """
+            CREATE TABLE IF NOT EXISTS solution_drafts (
+                id VARCHAR(64) PRIMARY KEY,
+                conversation_id VARCHAR(26) NOT NULL REFERENCES product_conversations(conversation_id),
+                source_run_id VARCHAR(64) NOT NULL UNIQUE,
+                current_version INTEGER NOT NULL DEFAULT 1,
+                status VARCHAR(32) NOT NULL DEFAULT 'GENERATING',
+                title VARCHAR(512) NOT NULL DEFAULT '方案草稿',
+                customer_context TEXT NOT NULL DEFAULT '',
+                executive_summary TEXT NOT NULL DEFAULT '',
+                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS solution_draft_versions (
+                id SERIAL PRIMARY KEY,
+                draft_id VARCHAR(64) NOT NULL REFERENCES solution_drafts(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                editor_user_id INTEGER REFERENCES users(id),
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_solution_draft_versions_draft_version UNIQUE (draft_id, version)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS capability_catalog (
+                id VARCHAR(64) PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                category VARCHAR(128) NOT NULL DEFAULT '',
+                delivery_status VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN',
+                description TEXT NOT NULL DEFAULT '',
+                supported_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                limitations JSONB NOT NULL DEFAULT '[]'::jsonb,
+                owner VARCHAR(255),
+                valid_until TIMESTAMP,
+                tenant_key VARCHAR(128),
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS capability_evidence (
+                id SERIAL PRIMARY KEY,
+                capability_id VARCHAR(64) NOT NULL REFERENCES capability_catalog(id) ON DELETE CASCADE,
+                citation_id VARCHAR(128) NOT NULL,
+                evidence_type VARCHAR(64) NOT NULL DEFAULT 'ENTERPRISE_FORMAL',
+                status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+                valid_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_capability_evidence_capability_citation UNIQUE (capability_id, citation_id)
+            )
+            """,
             (
                 "CREATE INDEX IF NOT EXISTS ix_product_conversations_owner_status_updated "
                 "ON product_conversations (owner_user_id, status, updated_at)"
@@ -175,11 +253,25 @@ class PostgresManager(metaclass=SingletonMeta):
             ),
             "CREATE INDEX IF NOT EXISTS ix_message_citations_message_id ON message_citations (message_id)",
             "CREATE INDEX IF NOT EXISTS ix_message_citations_version_id ON message_citations (version_id)",
-            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS chunk_id VARCHAR(128)",
-            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS media_type VARCHAR(16)",
-            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS image_url VARCHAR(2048)",
-            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS preview_url VARCHAR(2048)",
-            "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS image_alt VARCHAR(512)",
+            "CREATE INDEX IF NOT EXISTS ix_product_messages_solution_draft_id ON product_messages (solution_draft_id)",
+            "CREATE INDEX IF NOT EXISTS ix_product_messages_request_id ON product_messages (request_id)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_solution_drafts_conversation_updated "
+                "ON solution_drafts (conversation_id, updated_at)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_solution_draft_versions_draft_created "
+                "ON solution_draft_versions (draft_id, created_at)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_capability_catalog_tenant_status "
+                "ON capability_catalog (tenant_key, delivery_status)"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_capability_catalog_name ON capability_catalog (name)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_capability_evidence_capability_status "
+                "ON capability_evidence (capability_id, status)"
+            ),
         ]
 
         async with self.async_engine.begin() as conn:
@@ -843,6 +935,10 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS conversation_thread_id VARCHAR(64)",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS created_by_run_id VARCHAR(64)",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS subagent_thread_relation_id INTEGER",
+            (
+                "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS execution_trace "
+                "JSONB NOT NULL DEFAULT '{}'::jsonb"
+            ),
             "ALTER TABLE IF EXISTS subagent_threads ADD COLUMN IF NOT EXISTS subagent_slug VARCHAR(64)",
             "ALTER TABLE IF EXISTS subagent_threads ADD COLUMN IF NOT EXISTS created_by_run_id VARCHAR(64)",
             """

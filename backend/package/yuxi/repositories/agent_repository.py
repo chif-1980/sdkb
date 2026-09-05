@@ -61,6 +61,25 @@ DEEP_RESEARCH_SYSTEM_PROMPT = """你是「深度研究」智能体，负责一�
 
 始终全程跟踪进度，最终交付一份可直接使用、围绕论证组织、来源可追溯的报告。"""
 
+SOLUTION_DRAFT_AGENT_SLUG = "solution-draft"
+SOLUTION_DRAFT_AGENT_NAME = "方案设计"
+SOLUTION_DRAFT_AGENT_DESCRIPTION = "企业级方案设计智能体：分析需求、匹配企业能力、设计方案骨架并标注证据边界。"
+SOLUTION_DRAFT_SYSTEM_PROMPT = (
+        """你是「企业方案设计」智能体（Solution Architect Agent），负责把客户需求整理为
+可审阅、可编辑的 Solution Blueprint。
+
+必须读取并严格执行 `solution-draft` 技能。在同一个 Parent Agent Run 中按需求分析、企业
+能力匹配、方案架构、知识增强和质量审核阶段工作；不要创建新的运行器或状态机。
+仅使用当前用户有权限访问的正式企业知识、企业能力目录和当前会话附件，不得使用网页搜索或
+外部资料。
+企业能力只能来自 `match_enterprise_capabilities` 工具返回的登记条目；未匹配到的需求必须标记
+UNKNOWN，不能凭模型常识承诺能力。
+遇到信息不足时可调用 ask_user_question，最多提出必要问题后等待恢复。报价、参数、版本、生效
+时间、承诺和适用范围等高风险结论必须交叉核验；冲突保留双方证据，不自行裁决，必要时使用
+fact-verifier 子智能体。
+最终只输出技能规定的 Blueprint JSON 草稿，不发布、不提交审核、不外发。"""
+)
+
 RESEARCH_EXPLORER_AGENT_SLUG = "research-explorer"
 RESEARCH_EXPLORER_AGENT_NAME = "调研探索员"
 RESEARCH_EXPLORER_AGENT_DESCRIPTION = "围绕单个子问题多轮检索网页与知识库，交叉验证后返回带引用的结构化发现。"
@@ -104,7 +123,11 @@ ADMIN_ROLES = {"admin", "superadmin"}
 
 
 def is_builtin_agent(agent: Agent) -> bool:
-    return agent.slug == DEFAULT_AGENT_SLUG
+    return agent.slug in {
+        DEFAULT_AGENT_SLUG,
+        SOLUTION_DRAFT_AGENT_SLUG,
+        DEEP_RESEARCH_AGENT_SLUG,
+    }
 
 
 def resolve_agent_is_subagent(backend_id: str, is_subagent: bool | None = None) -> bool:
@@ -303,6 +326,7 @@ class AgentRepository:
             is_subagent=True,
             created_by=created_by,
         )
+
         await self._ensure_builtin_agent(
             slug=FACT_VERIFIER_AGENT_SLUG,
             backend_id=SUB_AGENT_BACKEND_ID,
@@ -326,6 +350,53 @@ class AgentRepository:
             created_by=created_by,
         )
 
+    async def ensure_solution_draft_agent(self, *, created_by: str | None = None) -> Agent:
+        """Ensure the product-facing Agentic solution drafting agent exists."""
+        config_context = {
+            "system_prompt": SOLUTION_DRAFT_SYSTEM_PROMPT,
+            # Keep the ordinary tool surface closed.  Knowledge-base and
+            # capability tools are activated by the solution Skill, while
+            # ask_user_question remains available for required clarification.
+            "tools": ["ask_user_question", "match_enterprise_capabilities"],
+            "filesystem_read_only": True,
+            "skills": ["solution-draft", "knowledge-base"],
+            "subagents": [FACT_VERIFIER_AGENT_SLUG],
+            "mcps": [],
+            "max_execution_steps": 40,
+            "enable_web_search": False,
+        }
+        existing = await self.get_by_slug(SOLUTION_DRAFT_AGENT_SLUG)
+        if existing:
+            changed = False
+            if existing.name != SOLUTION_DRAFT_AGENT_NAME:
+                existing.name = SOLUTION_DRAFT_AGENT_NAME
+                changed = True
+            if existing.description != SOLUTION_DRAFT_AGENT_DESCRIPTION:
+                existing.description = SOLUTION_DRAFT_AGENT_DESCRIPTION
+                changed = True
+            current_context = (
+                (existing.config_json or {}).get("context")
+                if isinstance(existing.config_json, dict)
+                else None
+            )
+            if current_context != config_context:
+                existing.config_json = {"context": config_context}
+                changed = True
+            if changed:
+                existing.updated_by = created_by
+                existing.updated_at = utc_now_naive()
+                await self.db.commit()
+                await self.db.refresh(existing)
+            return existing
+        return await self._ensure_builtin_agent(
+            slug=SOLUTION_DRAFT_AGENT_SLUG,
+            backend_id=DEFAULT_AGENT_BACKEND_ID,
+            name=SOLUTION_DRAFT_AGENT_NAME,
+            description=SOLUTION_DRAFT_AGENT_DESCRIPTION,
+            config_context=config_context,
+            is_subagent=False,
+            created_by=created_by,
+        )
     async def list_visible(self, *, user: User, include_subagent_definitions: bool = False) -> list[Agent]:
         """列出用户可见的主智能体，只有显式请求时才包含子智能体定义。"""
         stmt = select(Agent)

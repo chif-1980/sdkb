@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    JSON,
     UniqueConstraint,
 )
 
@@ -156,6 +157,12 @@ class ProductMessage(Base):
     feedback_rating = Column(String(8), nullable=True)
     feedback_reason_type = Column(String(32), nullable=True)
     feedback_reason_text = Column(Text, nullable=True)
+    solution_draft_id = Column(String(64), nullable=True, index=True)
+    # A product request can be retried after a browser/network interruption.
+    # Keep the id on both messages so the repository can return the original
+    # exchange instead of appending a duplicate pair.
+    request_id = Column(String(128), nullable=True, index=True)
+    skill_id = Column(String(32), nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
 
     __table_args__ = (
@@ -169,6 +176,89 @@ class ProductMessage(Base):
             name="ck_product_messages_feedback_rating",
         ),
         Index("ix_product_messages_conversation_created", "conversation_id", "created_at"),
+    )
+
+
+class SolutionDraft(Base):
+    """Current immutable projection of one solution-draft Agent Run."""
+
+    __tablename__ = "solution_drafts"
+
+    id = Column(String(64), primary_key=True)
+    conversation_id = Column(String(26), ForeignKey("product_conversations.conversation_id"), nullable=False)
+    source_run_id = Column(String(64), nullable=False, unique=True)
+    current_version = Column(Integer, nullable=False, default=1)
+    status = Column(String(32), nullable=False, default="GENERATING")
+    title = Column(String(512), nullable=False, default="方案草稿")
+    customer_context = Column(Text, nullable=False, default="")
+    executive_summary = Column(Text, nullable=False, default="")
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive)
+
+    __table_args__ = (
+        Index("ix_solution_drafts_conversation_updated", "conversation_id", "updated_at"),
+    )
+
+
+class SolutionDraftVersion(Base):
+    """Append-only version history for a solution draft."""
+
+    __tablename__ = "solution_draft_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    draft_id = Column(String(64), ForeignKey("solution_drafts.id", ondelete="CASCADE"), nullable=False)
+    version = Column(Integer, nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    editor_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+    __table_args__ = (
+        UniqueConstraint("draft_id", "version", name="uq_solution_draft_versions_draft_version"),
+        Index("ix_solution_draft_versions_draft_created", "draft_id", "created_at"),
+    )
+
+
+class CapabilityCatalog(Base):
+    """Governed enterprise capability map used by the solution architect."""
+
+    __tablename__ = "capability_catalog"
+
+    id = Column(String(64), primary_key=True)
+    name = Column(String(255), nullable=False)
+    category = Column(String(128), nullable=False, default="")
+    delivery_status = Column(String(32), nullable=False, default="UNKNOWN")
+    description = Column(Text, nullable=False, default="")
+    supported_scopes = Column(JSON, nullable=False, default=list)
+    limitations = Column(JSON, nullable=False, default=list)
+    owner = Column(String(255), nullable=True)
+    valid_until = Column(DateTime, nullable=True)
+    tenant_key = Column(String(128), nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive)
+
+    __table_args__ = (
+        Index("ix_capability_catalog_tenant_status", "tenant_key", "delivery_status"),
+        Index("ix_capability_catalog_name", "name"),
+    )
+
+
+class CapabilityEvidence(Base):
+    """Traceable evidence backing a catalog capability."""
+
+    __tablename__ = "capability_evidence"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    capability_id = Column(String(64), ForeignKey("capability_catalog.id", ondelete="CASCADE"), nullable=False)
+    citation_id = Column(String(128), nullable=False)
+    evidence_type = Column(String(64), nullable=False, default="ENTERPRISE_FORMAL")
+    status = Column(String(32), nullable=False, default="ACTIVE")
+    valid_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+    __table_args__ = (
+        Index("ix_capability_evidence_capability_status", "capability_id", "status"),
+        UniqueConstraint("capability_id", "citation_id", name="uq_capability_evidence_capability_citation"),
     )
 
 

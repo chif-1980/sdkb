@@ -76,6 +76,47 @@ async def test_resolve_agent_runtime_includes_subagents_only_when_requested(monk
     assert agent_config == {}
 
 
+@pytest.mark.asyncio
+async def test_resolve_agent_runtime_keeps_trusted_agent_step_limit_for_regular_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAgentRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_visible_by_slug(self, *, slug: str, user, kind="main"):
+            del user, kind
+            return SimpleNamespace(
+                slug=slug,
+                backend_id="ChatbotAgent",
+                config_json={"context": {"max_execution_steps": 40}},
+            )
+
+    class FakeConversationRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_conversation_by_thread_id(self, _thread_id: str):
+            return None
+
+    async def drop_admin_only_fields(_context, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(svc, "AgentRepository", FakeAgentRepository)
+    monkeypatch.setattr(svc, "ConversationRepository", FakeConversationRepository)
+    monkeypatch.setattr(svc, "normalize_agent_context_config", drop_admin_only_fields)
+    monkeypatch.setattr(svc.agent_manager, "get_agent", lambda _backend_id: SimpleNamespace(context_schema=None))
+
+    _, _, agent_config = await svc._resolve_agent_runtime(
+        db=object(),
+        user=SimpleNamespace(uid="user-1", role="user"),
+        requested_agent_slug="solution-draft",
+        thread_id=None,
+    )
+
+    assert agent_config["max_execution_steps"] == 40
+
+
 class _FakeConvRepo:
     def __init__(self, _db):
         self.db = _db

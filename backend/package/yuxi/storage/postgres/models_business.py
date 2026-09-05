@@ -847,6 +847,12 @@ class AgentRun(Base):
     output_message_id = Column(Integer, nullable=True, comment="Output message ID")
     last_event_id = Column(String(64), nullable=True, comment="Last Redis stream event ID")
     input_payload = Column(JSON, nullable=False, default=dict, comment="Original input payload")
+    execution_trace = Column(
+        JSON,
+        nullable=False,
+        default=dict,
+        comment="安全执行轨迹：阶段、状态和耗时，不含思维链或工具参数",
+    )
     error_type = Column(String(64), nullable=True, comment="Error type")
     error_message = Column(Text, nullable=True, comment="Error message")
     started_at = Column(DateTime, nullable=True, comment="Start time")
@@ -870,6 +876,7 @@ class AgentRun(Base):
             "output_message_id": self.output_message_id,
             "last_event_id": self.last_event_id,
             "input_payload": self.input_payload or {},
+            "execution_trace": self.execution_trace or {},
             "error_type": self.error_type,
             "error_message": self.error_message,
             "started_at": format_utc_datetime(self.started_at),

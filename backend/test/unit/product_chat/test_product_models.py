@@ -130,6 +130,9 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
         "feedback_rating",
         "feedback_reason_type",
         "feedback_reason_text",
+        "solution_draft_id",
+        "request_id",
+        "skill_id",
         "created_at",
     }
     assert set(citation.columns.keys()) == {
@@ -182,7 +185,11 @@ def test_product_models_define_ids_uniqueness_foreign_keys_and_indexes():
     assert _foreign_key_target(citation, "message_id") == "product_messages.message_id"
 
     assert {index.name for index in conversation.indexes} == {"ix_product_conversations_owner_status_updated"}
-    assert {index.name for index in message.indexes} == {"ix_product_messages_conversation_created"}
+    assert {index.name for index in message.indexes} == {
+        "ix_product_messages_conversation_created",
+        "ix_product_messages_solution_draft_id",
+        "ix_product_messages_request_id",
+    }
     assert {index.name for index in citation.indexes} == {
         "ix_message_citations_message_id",
         "ix_message_citations_version_id",

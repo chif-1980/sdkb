@@ -1103,6 +1103,9 @@ async def test_get_agent_run_result_uses_output_message_id(monkeypatch: pytest.M
         async def execute(self, _stmt):
             return FakeResult()
 
+        async def scalar(self, _stmt):
+            return messages[0]
+
     class RunRepo:
         def __init__(self, db):
             self.db = db
@@ -1121,6 +1124,64 @@ async def test_get_agent_run_result_uses_output_message_id(monkeypatch: pytest.M
     assert payload["final_message_id"] == 2
     assert payload["langfuse_trace_id"] == "trace-old"
     assert "debug" not in payload
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_result_falls_back_to_structured_metadata_content(monkeypatch: pytest.MonkeyPatch):
+    run = SimpleNamespace(
+        id="run-structured",
+        status="completed",
+        agent_slug="solution-draft",
+        conversation_thread_id="thread-structured",
+        conversation_id=11,
+        request_id="req-structured",
+        output_message_id=4,
+        error_type=None,
+        error_message=None,
+    )
+    blueprint = {"title": "投标一体机方案", "sections": [{"title": "架构", "content_markdown": "正文"}]}
+    messages = [
+        SimpleNamespace(id=4, role="assistant", content="", extra_metadata={"content": blueprint}),
+    ]
+
+    class FakeScalars:
+        def unique(self):
+            return self
+
+        def all(self):
+            return messages
+
+    class FakeResult:
+        def scalars(self):
+            return FakeScalars()
+
+    class FakeDB:
+        async def execute(self, _stmt):
+            return FakeResult()
+
+        async def scalar(self, _stmt):
+            return messages[0]
+
+    class RunRepo:
+        def __init__(self, db):
+            self.db = db
+
+        async def get_run_for_user(self, run_id: str, uid: str):
+            assert run_id == "run-structured"
+            assert uid == "user-1"
+            return run
+
+    monkeypatch.setattr(agent_run_service, "AgentRunRepository", RunRepo)
+
+    payload = await agent_run_service.get_agent_run_result(
+        run_id="run-structured",
+        current_uid="user-1",
+        db=FakeDB(),
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["output"] == blueprint
+    assert payload["final_message_id"] == 4
 
 
 @pytest.mark.asyncio

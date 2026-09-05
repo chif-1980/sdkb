@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import User
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.auth_middleware import get_agent_authenticated_user, get_db, get_required_user
 from yuxi import config as conf
 from yuxi.models import select_model
 from yuxi.services.chat_service import get_agent_state_view
@@ -123,6 +123,7 @@ class ThreadCreate(BaseModel):
     title: str | None = None
     agent_id: str
     metadata: dict | None = None
+    thread_id: str | None = Field(None, min_length=1, max_length=128)
 
 
 class ThreadResponse(BaseModel):
@@ -272,13 +273,14 @@ class SaveThreadArtifactResponse(BaseModel):
 
 @chat.post("/thread", response_model=ThreadResponse)
 async def create_thread(
-    thread: ThreadCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_required_user)
+    thread: ThreadCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_agent_authenticated_user)
 ):
     """创建新对话线程 (使用新存储系统)"""
     return await create_thread_view(
         agent_slug=thread.agent_id,
         title=thread.title,
         metadata=thread.metadata,
+        thread_id=thread.thread_id,
         db=db,
         current_uid=str(current_user.uid),
     )
@@ -395,7 +397,7 @@ async def upload_thread_attachment(
     thread_id: str,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(get_agent_authenticated_user),
 ):
     """上传原始附件并关联到指定对话线程。"""
     return await upload_thread_attachment_view(

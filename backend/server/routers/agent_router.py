@@ -5,9 +5,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_admin_user, get_agent_authenticated_user, get_db, get_required_user
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import filter_config_by_role
 from yuxi.repositories.agent_repository import (
@@ -25,7 +26,7 @@ from yuxi.services.agent_run_service import (
     stream_agent_run_events,
 )
 from yuxi.services.input_message_service import build_chat_input_message
-from yuxi.storage.postgres.models_business import User
+from yuxi.storage.postgres.models_business import Message, User
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -255,7 +256,7 @@ async def set_agent_default(
 @agent_router.post("/runs")
 async def create_agent_run(
     payload: AgentRunCreate,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(get_agent_authenticated_user),
     db: AsyncSession = Depends(get_db),
 ):
     input_message = None
@@ -276,21 +277,21 @@ async def create_agent_run(
 
 @agent_router.get("/runs/{run_id}")
 async def get_agent_run(
-    run_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+    run_id: str, current_user: User = Depends(get_agent_authenticated_user), db: AsyncSession = Depends(get_db)
 ):
     return await get_agent_run_view(run_id=run_id, current_uid=str(current_user.uid), db=db)
 
 
 @agent_router.get("/runs/{run_id}/result")
 async def get_agent_run_result_route(
-    run_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+    run_id: str, current_user: User = Depends(get_agent_authenticated_user), db: AsyncSession = Depends(get_db)
 ):
     return await get_agent_run_result(run_id=run_id, current_uid=str(current_user.uid), db=db)
 
 
 @agent_router.post("/runs/{run_id}/cancel")
 async def cancel_agent_run(
-    run_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+    run_id: str, current_user: User = Depends(get_agent_authenticated_user), db: AsyncSession = Depends(get_db)
 ):
     return await cancel_agent_run_view(run_id=run_id, current_uid=str(current_user.uid), db=db)
 
@@ -301,7 +302,7 @@ async def stream_run_events(
     after_seq: str = "0-0",
     verbose: bool = Query(default=True, description="是否返回完整事件载荷；false 时仅返回 UI/客户端消费所需字段"),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(get_agent_authenticated_user),
 ):
     cursor = last_event_id or after_seq
     return StreamingResponse(
@@ -314,7 +315,19 @@ async def stream_run_events(
 @agent_router.get("/thread/{thread_id}/active_run")
 async def get_thread_active_run(
     thread_id: str,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(get_agent_authenticated_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await get_active_run_by_thread(thread_id=thread_id, current_uid=str(current_user.uid), db=db)
+    result = await get_active_run_by_thread(thread_id=thread_id, current_uid=str(current_user.uid), db=db)
+    run_data = result.get("run") if isinstance(result, dict) else None
+    if isinstance(run_data, dict) and run_data.get("input_message_id"):
+        input_message = await db.scalar(
+            select(Message).where(
+                Message.id == run_data["input_message_id"],
+                Message.role == "user",
+            )
+        )
+        if input_message:
+            run_data["input_content"] = input_message.content
+            run_data["input_metadata"] = input_message.extra_metadata or {}
+    return result

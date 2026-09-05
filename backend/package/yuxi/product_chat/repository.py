@@ -320,6 +320,10 @@ class ProductChatRepository:
         owner_user_id: int,
         user_content: str,
         answer: GroundedAnswer,
+        solution_draft_id: str | None = None,
+        *,
+        request_id: str | None = None,
+        skill_id: str | None = None,
     ) -> tuple[ProductMessage, ProductMessage, list[MessageCitation]]:
         result = await self.session.execute(
             select(ProductConversation)
@@ -334,10 +338,51 @@ class ProductChatRepository:
         if active_conversation is None:
             raise ProductChatNotFoundError
 
+        # The conversation row is locked above, so this check also protects
+        # retries arriving concurrently for the same request.  A completed
+        # user/assistant pair is returned as-is; no duplicate exchange or
+        # citations are appended.
+        normalized_request_id = (request_id or "").strip()
+        if normalized_request_id:
+            existing_messages = list(
+                (
+                    await self.session.execute(
+                        select(ProductMessage)
+                        .where(
+                            ProductMessage.conversation_id == active_conversation.conversation_id,
+                            ProductMessage.request_id == normalized_request_id,
+                        )
+                        .order_by(ProductMessage.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            existing_user = next((message for message in existing_messages if message.role == MessageRole.USER), None)
+            existing_assistant = next(
+                (message for message in existing_messages if message.role == MessageRole.ASSISTANT),
+                None,
+            )
+            if existing_user is not None and existing_assistant is not None:
+                citations = list(
+                    (
+                        await self.session.execute(
+                            select(MessageCitation)
+                            .where(MessageCitation.message_id == existing_assistant.message_id)
+                            .order_by(MessageCitation.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                return existing_user, existing_assistant, citations
+
         user_message = ProductMessage(
             conversation_id=active_conversation.conversation_id,
             role=MessageRole.USER,
             content=user_content,
+            request_id=normalized_request_id or None,
+            skill_id=skill_id,
         )
         assistant_message = ProductMessage(
             conversation_id=active_conversation.conversation_id,
@@ -346,6 +391,9 @@ class ProductChatRepository:
             answer_status=answer.status,
             model_version=answer.model_version,
             prompt_version=answer.prompt_version,
+            solution_draft_id=solution_draft_id,
+            request_id=normalized_request_id or None,
+            skill_id=skill_id,
         )
         now = utc_now_naive()
         if not (active_conversation.title or "").strip():
@@ -395,6 +443,54 @@ class ProductChatRepository:
                 .all()
             )
         return user_message, assistant_message, citations
+
+    async def get_exchange_for_solution_draft(
+        self,
+        draft_id: str,
+        owner_user_id: int,
+    ) -> tuple[ProductMessage, ProductMessage, list[MessageCitation]] | None:
+        """Return an already-projected draft exchange for idempotent retries."""
+        assistant = await self.session.scalar(
+            select(ProductMessage)
+            .join(
+                ProductConversation,
+                ProductMessage.conversation_id == ProductConversation.conversation_id,
+            )
+            .where(
+                ProductMessage.solution_draft_id == draft_id,
+                ProductMessage.role == MessageRole.ASSISTANT,
+                ProductConversation.owner_user_id == owner_user_id,
+                ProductConversation.status == ConversationStatus.ACTIVE,
+            )
+            .order_by(ProductMessage.id.asc())
+        )
+        if assistant is None:
+            return None
+
+        user_message = await self.session.scalar(
+            select(ProductMessage)
+            .where(
+                ProductMessage.conversation_id == assistant.conversation_id,
+                ProductMessage.role == MessageRole.USER,
+                ProductMessage.id < assistant.id,
+            )
+            .order_by(ProductMessage.id.desc())
+        )
+        if user_message is None:
+            return None
+
+        citations = list(
+            (
+                await self.session.execute(
+                    select(MessageCitation)
+                    .where(MessageCitation.message_id == assistant.message_id)
+                    .order_by(MessageCitation.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return user_message, assistant, citations
 
     async def get_published_evidence(
         self,

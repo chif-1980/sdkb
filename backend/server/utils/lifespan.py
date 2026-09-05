@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
             await repository.ensure_general_purpose_subagent()
             await repository.ensure_web_search_subagent()
             await repository.ensure_deep_research_agents()
+            await repository.ensure_solution_draft_agent()
     except Exception as e:
         logger.error(f"Failed to ensure default agent during startup: {e}")
 

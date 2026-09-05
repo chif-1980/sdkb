@@ -15,6 +15,7 @@ from yuxi.config import config as sys_config
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
+from yuxi.product_chat.progress import ProgressAccumulator, progress_stage_from_chunk
 from yuxi.services.run_queue_service import (
     append_run_stream_event,
     clear_cancel_signal,
@@ -148,6 +149,22 @@ async def mark_run_terminal(run_id: str, status: str, error_type: str | None = N
     async with pg_manager.get_async_session_context() as db:
         repo = AgentRunRepository(db)
         await repo.set_terminal_status(run_id, status=status, error_type=error_type, error_message=error_message)
+
+
+async def persist_execution_trace(run_id: str, accumulator: ProgressAccumulator) -> None:
+    """Persist only stage transitions/terminal state, never token-level data."""
+    if not accumulator.dirty:
+        return
+    async with pg_manager.get_async_session_context() as db:
+        # A few integrations provide a lightweight session shim.  Trace
+        # persistence is additive, so do not make the run fail before the
+        # actual agent work starts when that shim does not expose SQLAlchemy's
+        # execute API.  Real async sessions always implement it.
+        if not hasattr(db, "execute"):
+            return
+        await AgentRunRepository(db).set_execution_trace(run_id, accumulator.snapshot())
+        await db.commit()
+    accumulator.dirty = False
 
 
 async def _load_user(uid: str):
@@ -347,6 +364,10 @@ async def process_agent_run(ctx, run_id: str):
         meta["agent_invocation_meta"] = input_metadata.get("agent_invocation_meta") or {}
 
     await mark_run_running(run_id)
+    run_trace = getattr(run, "execution_trace", None)
+    trace = ProgressAccumulator(run_trace if isinstance(run_trace, dict) else None)
+    trace.push("UNDERSTANDING", "正在分析需求并规划方案")
+    await persist_execution_trace(run_id, trace)
     run_ctx = RunContext(run_id=run_id)
     writer = ChunkedEventWriter(
         run_id=run_id,
@@ -402,11 +423,17 @@ async def process_agent_run(ctx, run_id: str):
                 for chunk in _iter_json_chunks(chunk_bytes):
                     target_thread_id = _chunk_thread_id(chunk, thread_id)
                     if chunk.get("status") == "loading":
+                        stage = progress_stage_from_chunk(chunk)
+                        if stage and trace.push(*stage):
+                            await persist_execution_trace(run_id, trace)
                         await writer.append(chunk, thread_id=target_thread_id)
                         continue
 
                     await writer.flush(target_thread_id)
                     status = chunk.get("status") or "event"
+                    stage = progress_stage_from_chunk(chunk)
+                    if stage and trace.push(*stage):
+                        await persist_execution_trace(run_id, trace)
                     event_type, event_payload = _map_chunk_to_run_event(chunk)
                     if event_type != "end":
                         await append_run_event(run_id, event_type, event_payload, thread_id=target_thread_id)
@@ -417,10 +444,15 @@ async def process_agent_run(ctx, run_id: str):
                         continue
 
                     if status == "finished":
+                        trace.push("COMPOSING", "正在校验并保存方案草稿")
+                        trace.finish("COMPLETED")
+                        await persist_execution_trace(run_id, trace)
                         await mark_run_terminal(run_id, "completed")
                         await _append_end_event(run_id, "completed", thread_id=thread_id, payload={"chunk": chunk})
                         terminal_set = True
                     elif status == "error":
+                        trace.finish("FAILED")
+                        await persist_execution_trace(run_id, trace)
                         await mark_run_terminal(
                             run_id,
                             "failed",
@@ -431,6 +463,12 @@ async def process_agent_run(ctx, run_id: str):
                         terminal_set = True
                     elif status == "interrupted":
                         status_value = "cancelled" if await _is_cancel_requested(run_id) else "interrupted"
+                        if status_value == "cancelled":
+                            trace.finish("CANCELLED")
+                        else:
+                            trace.push("WAITING_FOR_INPUT", "等待补充方案所需信息")
+                            trace.finish("WAITING_FOR_INPUT")
+                        await persist_execution_trace(run_id, trace)
                         await mark_run_terminal(
                             run_id,
                             status_value,
@@ -462,11 +500,16 @@ async def process_agent_run(ctx, run_id: str):
         await writer.flush()
         if not terminal_set:
             finished_chunk = {"status": "finished", "request_id": request_id}
+            trace.push("COMPOSING", "正在校验并保存方案草稿")
+            trace.finish("COMPLETED")
+            await persist_execution_trace(run_id, trace)
             await mark_run_terminal(run_id, "completed")
             await _append_end_event(run_id, "completed", thread_id=thread_id, payload={"chunk": finished_chunk})
 
     except asyncio.CancelledError:
         await writer.flush()
+        trace.finish("CANCELLED")
+        await persist_execution_trace(run_id, trace)
         cancel_chunk = {"status": "interrupted", "message": "对话已取消", "request_id": request_id}
         await append_run_event(
             run_id,
@@ -479,6 +522,8 @@ async def process_agent_run(ctx, run_id: str):
         logger.info(f"Run cancelled: {run_id}")
     except Exception as e:
         await writer.flush()
+        trace.finish("FAILED")
+        await persist_execution_trace(run_id, trace)
         if _is_retryable_exception(e):
             job_try = _job_try(ctx)
             logger.warning(f"Run retryable failure {run_id} (try={job_try}): {e}")

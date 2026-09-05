@@ -110,6 +110,7 @@ def _build_run_response(run) -> dict:
         "status": run.status,
         "request_id": run.request_id,
         "stream_url": f"/api/agent/runs/{run.id}/events",
+        "execution_trace": getattr(run, "execution_trace", None) or {},
     }
 
 
@@ -427,6 +428,11 @@ async def create_agent_run_view(
         created_by_run_id=run_created_by_id,
     )
     if created:
+        if run_type == "resume" and scope.parent_run is not None:
+            # A clarification is a new AgentRun, but the product-facing
+            # execution history is one continuous trace.  Copy the parent's
+            # safe snapshot before the worker appends new stages.
+            run.execution_trace = dict(getattr(scope.parent_run, "execution_trace", None) or {})
         await db.commit()
         await enqueue_agent_run(run.id)
 
@@ -690,7 +696,17 @@ async def get_agent_run_view(*, run_id: str, current_uid: str, db: AsyncSession)
     run = await repo.get_run_for_user(run_id, str(current_uid))
     if not run:
         raise HTTPException(status_code=404, detail="运行任务不存在")
-    return {"run": run.to_dict()}
+    data = run.to_dict()
+    # Expose only the persisted text/metadata needed by product adapters to
+    # re-project a resumed solution draft.  Image bytes and tool payloads are
+    # intentionally never included in the run DTO.
+    input_message = None
+    if run.input_message_id:
+        input_message = await db.scalar(select(Message).where(Message.id == run.input_message_id))
+    if input_message:
+        data["input_content"] = input_message.content
+        data["input_metadata"] = input_message.extra_metadata or {}
+    return {"run": data}
 
 
 def _select_output_message(messages: list[Message], *, output_message_id: int | None) -> Message | None:
@@ -727,13 +743,65 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
         messages = list(result.scalars().unique().all())
 
     output_message = _select_output_message(messages, output_message_id=run.output_message_id)
+    # A few older runs were created before the output message was attached to
+    # the same conversation.  Resolve the durable id directly before falling
+    # back to the last assistant message so a valid structured result is not
+    # incorrectly projected as an empty/blocked draft.
+    if run.output_message_id and (
+        output_message is None or not str(output_message.content or "").strip()
+    ):
+        output_message = await db.scalar(
+            select(Message).where(Message.id == run.output_message_id, Message.role == "assistant")
+        )
+    if output_message is not None and not str(output_message.content or "").strip():
+        non_empty = next(
+            (message for message in reversed(messages)
+             if message.role == "assistant" and str(message.content or "").strip()),
+            None,
+        )
+        if non_empty is not None:
+            output_message = non_empty
     output_metadata = (
         output_message.extra_metadata if output_message and isinstance(output_message.extra_metadata, dict) else {}
     )
+    # Some LangChain message variants persist their actual assistant content
+    # in ``extra_metadata.content`` while the normalized ``content`` column is
+    # empty (for example, structured output messages).  Expose that durable
+    # content to callers so product adapters can parse the Blueprint instead
+    # of incorrectly rendering a BLOCKED draft.
+    output_content = output_message.content if output_message else ""
+    if not str(output_content or "").strip():
+        metadata_content = output_metadata.get("content")
+        if metadata_content is not None:
+            output_content = metadata_content
+
+    # Keep the normalized text plus safe LangChain metadata available to the
+    # product projector.  This avoids losing structured_response when the
+    # database ``content`` column is empty or only contains a wrapper.
+    result_output: Any = output_content
+    structured_fields = {
+        key: output_metadata[key]
+        for key in (
+            "output",
+            "result",
+            "payload",
+            "data",
+            "message",
+            "content",
+            "text",
+            "messages",
+            "structured_response",
+            "additional_kwargs",
+            "response_metadata",
+        )
+        if key in output_metadata
+    }
+    if structured_fields and not isinstance(output_content, (dict, list, tuple)):
+        result_output = {"output": output_content, **structured_fields}
 
     payload: dict[str, Any] = {
         "status": run.status,
-        "output": output_message.content if output_message else "",
+        "output": result_output,
         "agent_slug": run.agent_slug,
         "thread_id": run.conversation_thread_id,
         "conversation_id": run.conversation_id,
@@ -744,6 +812,7 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
     }
     if run.error_type or run.error_message:
         payload["error"] = {"type": run.error_type, "message": run.error_message}
+    payload["execution_trace"] = getattr(run, "execution_trace", None) or {}
     return payload
 
 

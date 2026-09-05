@@ -404,6 +404,19 @@ async def _save_ai_message(
     request_id: str | None = None,
 ):
     content = msg_dict.get("content", "")
+    # Structured LangGraph responses are sometimes attached to metadata while
+    # ``content`` is empty.  Persist a JSON-safe copy as the message content so
+    # result projection can recover the Blueprint after the stream completes.
+    if not content:
+        for key in ("structured_response", "output", "result", "payload", "data"):
+            candidate = msg_dict.get(key)
+            if candidate not in (None, "", [], {}):
+                try:
+                    content = json.dumps(candidate, ensure_ascii=False, default=str)
+                except (TypeError, ValueError):
+                    content = ""
+                if content:
+                    break
     tool_calls_data = msg_dict.get("tool_calls") or []
     if isinstance(content, list):
         if not tool_calls_data:
@@ -416,7 +429,10 @@ async def _save_ai_message(
             item.get("text", "") for item in content if isinstance(item, dict) and isinstance(item.get("text"), str)
         )
     elif not isinstance(content, str):
-        content = str(content)
+        try:
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            content = ""
     extra_metadata = dict(msg_dict)
     if trace_info:
         extra_metadata.update(trace_info)
@@ -678,12 +694,20 @@ async def _resolve_agent_runtime(
     if not backend:
         raise ValueError(f"智能体后端 {agent_item.backend_id} 不存在")
 
+    raw_agent_context = (agent_item.config_json or {}).get("context", {})
     agent_config = await normalize_agent_context_config(
-        (agent_item.config_json or {}).get("context", {}),
+        raw_agent_context,
         db=db,
         user=user,
         context_schema=backend.context_schema,
     )
+    # ``max_execution_steps`` is an administrator-owned Agent setting, not a
+    # user runtime override.  Role filtering correctly hides it from ordinary
+    # users, but the trusted value persisted on the Agent must still govern
+    # their runs; otherwise every non-admin run silently falls back to 300.
+    configured_steps = raw_agent_context.get("max_execution_steps") if isinstance(raw_agent_context, dict) else None
+    if isinstance(configured_steps, int) and not isinstance(configured_steps, bool) and 1 <= configured_steps <= 1000:
+        agent_config["max_execution_steps"] = configured_steps
     return agent_item, backend, agent_config
 
 

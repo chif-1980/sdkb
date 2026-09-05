@@ -18,6 +18,7 @@ from .sandbox import ProvisionerSandboxBackend
 from .skills_backend import SelectedSkillsReadonlyBackend
 
 _TOOL_RESULT_EVICTION_EXEMPT_TOOLS = frozenset({"read_file", "open_kb_document"})
+_READ_ONLY_FILESYSTEM_TOOLS = frozenset({"ls", "read_file", "glob", "grep"})
 
 
 def _coerce_glob_result(result) -> GlobResult:
@@ -184,6 +185,7 @@ def create_agent_filesystem_middleware(
     tool_token_limit_before_evict: int | None = None,
     *,
     context=None,
+    read_only: bool = False,
 ) -> FilesystemMiddleware:
     backend = create_agent_composite_backend
     if context is not None:
@@ -196,6 +198,8 @@ def create_agent_filesystem_middleware(
         backend=backend,
         tool_token_limit_before_evict=tool_token_limit_before_evict,
     )
+    if read_only:
+        middleware.tools = [tool for tool in middleware.tools if tool.name in _READ_ONLY_FILESYSTEM_TOOLS]
     middleware._large_tool_results_prefix = VIRTUAL_PATH_LARGE_TOOL_RESULTS
     middleware._conversation_history_prefix = VIRTUAL_PATH_CONVERSATION_HISTORY
     return middleware

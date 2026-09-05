@@ -47,6 +47,17 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
         ),
     ),
     BuiltinSkillSpec(
+        slug="solution-draft",
+        source_dir=_SKILLS_ROOT / "solution-draft",
+        description="基于正式企业知识和当前会话附件，编排检索、核验并生成带引用的可编辑方案草稿。",
+        version="2026.09.04",
+        # ``task`` is supplied by the subagent middleware rather than the
+        # ordinary tool registry, so it must not be declared as a registry
+        # dependency (the skill loader validates registry tools eagerly).
+        tool_dependencies=("ask_user_question", "match_enterprise_capabilities"),
+        skill_dependencies=("knowledge-base",),
+    ),
+    BuiltinSkillSpec(
         slug="mysql-reporter",
         source_dir=_SKILLS_ROOT / "mysql-reporter",
         description="基于 MySQL 数据库生成查询报表和可视化图表，适合分析业务指标、统计趋势，并用 Charts MCP 展示结果。",

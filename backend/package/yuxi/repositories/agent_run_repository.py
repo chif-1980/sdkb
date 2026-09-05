@@ -151,6 +151,7 @@ class AgentRunRepository:
         subagent_thread_relation_id: int | None = None,
         run_type: str = "chat",
         input_message_id: int | None = None,
+        execution_trace: dict | None = None,
     ) -> AgentRun:
         """登记一条 run 记录；输入正文和图片应通过 input_message_id 指向 Message。"""
         run = AgentRun(
@@ -165,9 +166,20 @@ class AgentRunRepository:
             run_type=run_type,
             input_message_id=input_message_id,
             input_payload=input_payload or {},
+            execution_trace=execution_trace or {},
             status="pending",
         )
         self.db.add(run)
+        await self.db.flush()
+        return run
+
+    async def set_execution_trace(self, run_id: str, trace: dict) -> AgentRun | None:
+        """Persist a bounded, already-sanitized execution trace."""
+        run = await self.get_run(run_id)
+        if not run:
+            return None
+        run.execution_trace = trace if isinstance(trace, dict) else {}
+        run.updated_at = utc_now_naive()
         await self.db.flush()
         return run
 

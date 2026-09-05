@@ -18,6 +18,7 @@ def _context(summary_threshold: int = 123) -> SimpleNamespace:
         summary_l2_trigger_ratio=0.75,
         tool_token_limit=3,
         model_retry_times=1,
+        filesystem_read_only=False,
     )
 
 
@@ -50,6 +51,31 @@ async def test_chatbot_summary_trim_limit_matches_summary_threshold(monkeypatch:
     assert captured["summary_kwargs"]["l1_l2_trigger_ratio"] == 0.75
     middleware_names = [type(middleware).__name__ for middleware in middlewares]
     assert middleware_names.index("ModelRetryMiddleware") < middleware_names.index("ImageInputCompatibilityMiddleware")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_chatbot_filesystem_middleware_receives_read_only_solution_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+    _patch_common_graph_deps(monkeypatch, chatbot_graph, captured)
+    async def no_subagent_middleware(_context):
+        return None
+
+    monkeypatch.setattr(chatbot_graph, "create_subagent_task_middleware", no_subagent_middleware)
+
+    def fake_filesystem(*_args, **kwargs):
+        captured["read_only"] = kwargs["read_only"]
+        return object()
+
+    monkeypatch.setattr(chatbot_graph, "create_agent_filesystem_middleware", fake_filesystem)
+    context = _context()
+    context.filesystem_read_only = True
+
+    await chatbot_graph._build_middlewares(context)
+
+    assert captured["read_only"] is True
 
 
 @pytest.mark.unit

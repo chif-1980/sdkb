@@ -72,7 +72,13 @@ class _SearchPathEngine:
 async def _create_legacy_product_tables(connection, locator_type: str):
     for legacy_table_ddl in (
         """
+        CREATE TABLE users (
+            id SERIAL PRIMARY KEY
+        )
+        """,
+        """
         CREATE TABLE product_conversations (
+            conversation_id VARCHAR(26) UNIQUE,
             owner_user_id TEXT NOT NULL,
             status TEXT NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL
@@ -88,7 +94,12 @@ async def _create_legacy_product_tables(connection, locator_type: str):
         CREATE TABLE message_citations (
             message_id TEXT NOT NULL,
             version_id TEXT NOT NULL,
-            locator {locator_type} NOT NULL
+            locator {locator_type} NOT NULL,
+            chunk_id VARCHAR(128),
+            media_type VARCHAR(16),
+            image_url VARCHAR(2048),
+            preview_url VARCHAR(2048),
+            image_alt VARCHAR(512)
         )
         """,
     ):
@@ -170,6 +181,10 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         "product_conversations",
         "product_messages",
         "message_citations",
+        "solution_drafts",
+        "solution_draft_versions",
+        "capability_catalog",
+        "capability_evidence",
     } <= set(BusinessBase.metadata.tables)
 
     expected_indexes = {
@@ -183,13 +198,25 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         ),
         "CREATE INDEX IF NOT EXISTS ix_message_citations_message_id ON message_citations (message_id)",
         "CREATE INDEX IF NOT EXISTS ix_message_citations_version_id ON message_citations (version_id)",
-    }
-    chunk_id_migration = "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS chunk_id VARCHAR(128)"
-    image_migrations = {
-        "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS media_type VARCHAR(16)",
-        "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS image_url VARCHAR(2048)",
-        "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS preview_url VARCHAR(2048)",
-        "ALTER TABLE IF EXISTS message_citations ADD COLUMN IF NOT EXISTS image_alt VARCHAR(512)",
+        "CREATE INDEX IF NOT EXISTS ix_product_messages_solution_draft_id ON product_messages (solution_draft_id)",
+        "CREATE INDEX IF NOT EXISTS ix_product_messages_request_id ON product_messages (request_id)",
+        (
+            "CREATE INDEX IF NOT EXISTS ix_solution_drafts_conversation_updated "
+            "ON solution_drafts (conversation_id, updated_at)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_solution_draft_versions_draft_created "
+            "ON solution_draft_versions (draft_id, created_at)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_capability_catalog_tenant_status "
+            "ON capability_catalog (tenant_key, delivery_status)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_capability_catalog_name ON capability_catalog (name)",
+        (
+            "CREATE INDEX IF NOT EXISTS ix_capability_evidence_capability_status "
+            "ON capability_evidence (capability_id, status)"
+        ),
     }
     statement_counts = Counter(connection.statements)
     for statement in expected_indexes:
@@ -199,10 +226,19 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         statement for statement in connection.statements if "ALTER COLUMN locator TYPE TEXT" in statement
     ]
     assert len(migration_statements) == 2
-    assert statement_counts[chunk_id_migration] == 2
-    assert all(statement_counts[statement] == 2 for statement in image_migrations)
-    assert len(connection.statements) == 2 * (len(expected_indexes) + len(image_migrations) + 2)
-    statements_per_run = len(expected_indexes) + len(image_migrations) + 2
+    table_migrations = [
+        statement for statement in connection.statements
+        if "CREATE TABLE IF NOT EXISTS solution_drafts" in statement
+        or "CREATE TABLE IF NOT EXISTS solution_draft_versions" in statement
+        or "CREATE TABLE IF NOT EXISTS capability_catalog" in statement
+        or "CREATE TABLE IF NOT EXISTS capability_evidence" in statement
+    ]
+    assert len(table_migrations) == 8
+    assert all(statement_counts[statement] == 2 for statement in table_migrations)
+    # One DO block performs additive column/constraint migrations; the other
+    # statements create the draft/capability tables, indexes, and citation columns.
+    statements_per_run = 1 + len(table_migrations) // 2 + len(expected_indexes)
+    assert len(connection.statements) == 2 * statements_per_run
     assert connection.statements[0] == connection.statements[statements_per_run] == migration_statements[0]
     assert all(statement == migration_statements[0] for statement in migration_statements)
     locator_type_check = "data_type IN ('json', 'jsonb')"
@@ -214,6 +250,8 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
     assert first_type_check < exclusive_lock_position < second_type_check
     assert "locator::jsonb #>> '{}'" in migration_statements[0]
     assert "COALESCE(locator::jsonb #>> '{}', 'null')" in migration_statements[0]
+    for column_name in ("chunk_id", "media_type", "image_url", "preview_url", "image_alt"):
+        assert f"ADD COLUMN IF NOT EXISTS {column_name}" in migration_statements[0]
 
     assert set(BusinessBase.metadata.tables["product_messages"].columns.keys()) == {
         "id",
@@ -227,6 +265,9 @@ async def test_product_schema_creation_and_index_ensure_are_idempotent():
         "feedback_rating",
         "feedback_reason_type",
         "feedback_reason_text",
+        "solution_draft_id",
+        "request_id",
+        "skill_id",
         "created_at",
     }
     assert {index.name for index in BusinessBase.metadata.tables["message_citations"].indexes} == {
@@ -321,6 +362,11 @@ async def test_product_schema_is_idempotent_in_real_postgres():
                 "model_version",
                 "prompt_version",
                 "feedback_rating",
+                "feedback_reason_type",
+                "feedback_reason_text",
+                "solution_draft_id",
+                "request_id",
+                "skill_id",
                 "created_at",
             },
             "message_citations": {
@@ -339,6 +385,54 @@ async def test_product_schema_is_idempotent_in_real_postgres():
                 "locator",
                 "excerpt",
                 "source_version_at",
+                "media_type",
+                "image_url",
+                "preview_url",
+                "image_alt",
+                "created_at",
+            },
+            "solution_drafts": {
+                "id",
+                "conversation_id",
+                "source_run_id",
+                "current_version",
+                "status",
+                "title",
+                "customer_context",
+                "executive_summary",
+                "payload",
+                "created_at",
+                "updated_at",
+            },
+            "solution_draft_versions": {
+                "id",
+                "draft_id",
+                "version",
+                "payload",
+                "editor_user_id",
+                "created_at",
+            },
+            "capability_catalog": {
+                "id",
+                "name",
+                "category",
+                "delivery_status",
+                "description",
+                "supported_scopes",
+                "limitations",
+                "owner",
+                "valid_until",
+                "tenant_key",
+                "created_at",
+                "updated_at",
+            },
+            "capability_evidence": {
+                "id",
+                "capability_id",
+                "citation_id",
+                "evidence_type",
+                "status",
+                "valid_at",
                 "created_at",
             },
         }
@@ -363,6 +457,10 @@ async def test_product_schema_is_idempotent_in_real_postgres():
             "product_conversations": {("conversation_id",)},
             "product_messages": {("message_id",)},
             "message_citations": {("citation_id",)},
+            "solution_drafts": {("source_run_id",)},
+            "solution_draft_versions": {("draft_id", "version")},
+            "capability_evidence": {("capability_id", "citation_id")},
+            "capability_catalog": set(),
         }
         assert schema["foreign_keys"] == {
             "feishu_user_bindings": {("user_id",): ("users", ("id",))},
@@ -374,6 +472,13 @@ async def test_product_schema_is_idempotent_in_real_postgres():
             "product_conversations": {("owner_user_id",): ("users", ("id",))},
             "product_messages": {("conversation_id",): ("product_conversations", ("conversation_id",))},
             "message_citations": {("message_id",): ("product_messages", ("message_id",))},
+            "solution_drafts": {("conversation_id",): ("product_conversations", ("conversation_id",))},
+            "solution_draft_versions": {
+                ("draft_id",): ("solution_drafts", ("id",)),
+                ("editor_user_id",): ("users", ("id",)),
+            },
+            "capability_catalog": {},
+            "capability_evidence": {("capability_id",): ("capability_catalog", ("id",))},
         }
         assert "ACTIVE" in schema["checks"]["feishu_user_bindings"]
         assert "REVOKED" in schema["checks"]["feishu_user_bindings"]
@@ -666,6 +771,10 @@ def _inspect_product_schema(connection, schema_name: str) -> dict:
         "product_conversations",
         "product_messages",
         "message_citations",
+        "solution_drafts",
+        "solution_draft_versions",
+        "capability_catalog",
+        "capability_evidence",
     }
     columns = {table_name: inspector.get_columns(table_name, schema=schema_name) for table_name in table_names}
     return {

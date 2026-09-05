@@ -4,7 +4,7 @@
   <p><strong>企业知识治理与可信知识助手平台</strong></p>
   <p>让企业资料从接入、加工、审核到发布形成可追溯闭环，并以可核对的引用支撑每一次回答。</p>
 
-  [![Version](https://img.shields.io/badge/version-v0.2.2-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.2.2)
+  [![Version](https://img.shields.io/badge/version-v0.3.0-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.3.0)
   [![License](https://img.shields.io/badge/license-MIT-475569)](LICENSE)
   [![Docs](https://img.shields.io/badge/docs-在线文档-2563eb)](https://chif-1980.github.io/sdkb/)
 
@@ -72,7 +72,7 @@
 
 ## 当前版本
 
-`v0.2.2` 在治理自动化正式版本基础上，补齐企业知识助手资料检索请求兼容：支持助手传入业务技能标识，移除 `@查资料` 命令后再检索，并返回可核验的正式资料卡片与安全下载入口。此前 `v0.2.1` 的审核操作拆分、自动保存、已处理知识单元锁定、待处理定位与文档页同步高亮、审核队列拼音搜索、扫描与初始化进度保持，以及大屏布局优化继续保留。
+`v0.3.0` 在治理自动化与可信知识问答基础上，新增基于 LangGraph Agent Run 的企业级方案智能体：支持需求分析、企业能力匹配、方案蓝图、证据核验、冲突与待确认项处理，并保留可追溯的执行过程、流式事件和历史恢复能力。此前版本的知识治理、资料检索、引用与权限控制继续保留。
 
 ## 开源说明
 

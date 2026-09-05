@@ -306,6 +306,38 @@ async def test_append_exchange_persists_image_evidence_fields(db_session):
     assert stored[0].image_alt == "系统架构图"
 
 
+async def test_append_exchange_is_idempotent_for_completed_request(db_session):
+    repository = ProductChatRepository(db_session)
+    conversation = await repository.create_conversation(7, "")
+
+    first = await repository.append_exchange(
+        conversation,
+        7,
+        "请生成方案草稿",
+        _answer(),
+        request_id="request-solution-1",
+        skill_id="SOLUTION_DRAFT",
+    )
+    await db_session.commit()
+
+    second = await repository.append_exchange(
+        conversation,
+        7,
+        "请生成方案草稿",
+        _answer(citations=(_citation(excerpt="不同的重试内容"),)),
+        request_id="request-solution-1",
+        skill_id="SOLUTION_DRAFT",
+    )
+
+    assert second[0].message_id == first[0].message_id
+    assert second[1].message_id == first[1].message_id
+    assert [citation.citation_id for citation in second[2]] == [citation.citation_id for citation in first[2]]
+    assert second[1].skill_id == "SOLUTION_DRAFT"
+
+    assert await db_session.scalar(select(func.count()).select_from(ProductMessage)) == 2
+    assert await db_session.scalar(select(func.count()).select_from(MessageCitation)) == 1
+
+
 async def test_append_exchange_rejects_conversation_archived_after_require(db_session):
     repository = ProductChatRepository(db_session)
     conversation = await repository.create_conversation(7, "Owned")

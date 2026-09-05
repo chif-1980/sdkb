@@ -11,6 +11,7 @@ from yuxi.repositories.agent_repository import (
     DEFAULT_AGENT_BACKEND_ID,
     FACT_VERIFIER_AGENT_SLUG,
     RESEARCH_EXPLORER_AGENT_SLUG,
+    SOLUTION_DRAFT_AGENT_SLUG,
     SUB_AGENT_BACKEND_ID,
 )
 
@@ -73,3 +74,24 @@ async def test_ensure_deep_research_agents_is_idempotent(monkeypatch):
 
     assert db.added == []
     db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_solution_draft_agent_uses_a_closed_tool_surface(monkeypatch):
+    db = CollectingDb()
+    repo = AgentRepository(db)
+
+    async def get_by_slug(_slug):
+        return None
+
+    monkeypatch.setattr(repo, "get_by_slug", get_by_slug)
+
+    agent = await repo.ensure_solution_draft_agent(created_by="system")
+
+    assert agent.slug == SOLUTION_DRAFT_AGENT_SLUG
+    context = agent.config_json["context"]
+    assert context["tools"] == ["ask_user_question", "match_enterprise_capabilities"]
+    assert context["skills"] == ["solution-draft", "knowledge-base"]
+    assert context["mcps"] == []
+    assert context["enable_web_search"] is False
+    assert "tavily_search" not in context["tools"]

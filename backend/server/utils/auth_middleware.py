@@ -160,6 +160,24 @@ async def get_product_user(
     return user
 
 
+async def get_agent_authenticated_user(
+    request: Request,
+    authorization: str | None = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Authenticate agent calls with the caller's existing identity.
+
+    Product adapters run server-to-server and forward either the caller's
+    bearer token or the existing enterprise-assistant session cookie.  This
+    keeps Agent Run ownership tied to the real user and avoids a shared
+    administrator credential.
+    """
+    if authorization:
+        user = await get_current_user(authorization=authorization, db=db)
+        return await get_required_user(user)
+    return await get_product_user(request=request, db=db)
+
+
 # 获取管理员用户
 async def get_admin_user(current_user: User = Depends(get_required_user)):
     if current_user.role not in ["admin", "superadmin"]:

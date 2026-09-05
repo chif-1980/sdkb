@@ -408,6 +408,7 @@ async def create_thread_view(
     agent_slug: str,
     title: str | None,
     metadata: dict | None,
+    thread_id: str | None = None,
     db: AsyncSession,
     current_uid: str,
 ) -> dict:
@@ -421,8 +422,23 @@ async def create_thread_view(
     if not agent_item:
         raise HTTPException(status_code=404, detail="智能体不存在")
 
-    thread_id = str(uuid.uuid4())
     conv_repo = ConversationRepository(db)
+    if thread_id:
+        existing = await conv_repo.get_conversation_by_thread_id(thread_id)
+        if existing:
+            if existing.uid != str(current_uid) or existing.agent_id != agent_item.slug or existing.status == "deleted":
+                raise HTTPException(status_code=409, detail="线程编号已被其他会话占用")
+            return {
+                "id": existing.thread_id,
+                "uid": existing.uid,
+                "agent_id": existing.agent_id,
+                "title": existing.title,
+                "created_at": existing.created_at.isoformat(),
+                "updated_at": existing.updated_at.isoformat(),
+                "metadata": existing.extra_metadata or {},
+            }
+    else:
+        thread_id = str(uuid.uuid4())
     thread_metadata = dict(metadata or {})
     thread_metadata["backend_id"] = agent_item.backend_id
     conversation = await conv_repo.create_conversation(

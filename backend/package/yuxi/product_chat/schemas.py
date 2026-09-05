@@ -1,8 +1,10 @@
 """Pydantic contracts for enterprise assistant product chat APIs."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from yuxi.product_chat.solution_draft import DraftRequirement
 
 
 def to_camel(value: str) -> str:
@@ -28,7 +30,18 @@ ProductSkillId = Literal["MATERIAL_SEARCH", "SOLUTION_DRAFT", "MEETING_ANALYSIS"
 class SendMessageRequest(StrictRequest):
     content: str = Field(min_length=1, max_length=20_000)
     mode: Literal["CONCISE", "DETAILED"] = "CONCISE"
+    # The product adapter reuses this id for safe retries.  Keep both the
+    # snake_case and camelCase spellings accepted by older browser clients.
+    request_id: str | None = Field(default=None, alias="requestId", max_length=128)
     skill_id: ProductSkillId | None = Field(default=None, alias="skillId")
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5, alias="attachmentIds")
+
+
+class ResumeRunRequest(StrictRequest):
+    """User-provided answer for a LangGraph ``ask_user_question`` interrupt."""
+
+    answer: Any
+    request_id: str | None = Field(default=None, alias="requestId", max_length=128)
 
 
 class MessageFeedbackRequest(StrictRequest):
@@ -41,6 +54,20 @@ class MessageFeedbackRequest(StrictRequest):
         "OTHER",
     ] | None = Field(default=None, alias="reasonType")
     reason_text: str | None = Field(default=None, max_length=500, alias="reasonText")
+
+
+class SolutionDraftEditRequest(StrictRequest):
+    title: str | None = Field(default=None, max_length=512)
+    customer_context: str | None = Field(default=None, alias="customerContext")
+    executive_summary: str | None = Field(default=None, alias="executiveSummary")
+    requirements: list[DraftRequirement | str] | None = None
+    sections: list[dict] | None = None
+    assumptions: list[str] | None = None
+    open_questions: list[str] | None = Field(default=None, alias="openQuestions")
+    risks: list[str] | None = None
+    conflicts: list[dict] | None = None
+    evidence_gaps: list[str] | None = Field(default=None, alias="evidenceGaps")
+    citations: list[dict] | None = None
 
 
 class ProductUserResponse(ProductResponse):
@@ -102,12 +129,14 @@ class MessageResponse(ProductResponse):
     id: str
     role: Literal["USER", "ASSISTANT"]
     content: str
+    skill_id: ProductSkillId | None = None
     answer_status: Literal["SUPPORTED", "INSUFFICIENT", "CONFLICTING"] | None
     feedback_rating: Literal["LIKE", "DISLIKE"] | None = None
     feedback_reason_type: str | None = None
     feedback_reason_text: str | None = None
     citations: list[CitationResponse]
     materials: list[ProductMaterialResponse] = Field(default_factory=list)
+    solution_draft: dict | None = None
     created_at: str
 
 

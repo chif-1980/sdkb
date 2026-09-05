@@ -56,6 +56,7 @@ async def _build_middlewares(context):
         create_agent_filesystem_middleware(
             getattr(context, "tool_token_limit", DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS) * 1024,
             context=context,
+            read_only=bool(getattr(context, "filesystem_read_only", False)),
         ),
         save_attachments_to_fs,
         SkillsMiddleware(),
