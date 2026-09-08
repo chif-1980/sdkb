@@ -7,6 +7,7 @@ import io
 import json
 import re
 from collections.abc import AsyncIterator
+from traceback import format_tb
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -37,6 +38,7 @@ from yuxi.product_chat.solution_draft_service import (
     extract_solution_result,
     render_solution_draft,
 )
+from yuxi.product_chat.solution_draft import clarification_question_from_open_question
 from yuxi.repositories.agent_repository import AgentRepository, SOLUTION_DRAFT_AGENT_SLUG
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -85,6 +87,39 @@ product_chat = APIRouter(route_class=ProductApiRoute)
 
 _SKILL_MENTION_PATTERN = re.compile(r"(^|\s)@(查资料|做方案|分析会议)(?=\s|$)")
 _MATERIAL_INTENT_PATTERN = re.compile(r"查资料|产品说明|宣传手册|宣传册|解决方案|下载|分发|飞书原文")
+
+
+def _blocked_draft_needs_payload_repair(draft: object, payload: object) -> bool:
+    """Return whether a legacy blocked projection is missing safe data.
+
+    Older solution runs were projected before ``clarificationQuestions`` was
+    derived from ``openQuestions``.  Their quality is still legitimately
+    ``BLOCKED`` (for example, there may be no citations), so using a quality
+    transition as the sole repair signal leaves those drafts permanently
+    without an interactive question card.  Only backfill missing questions
+    (or a genuinely improved non-blocked payload), and never resurrect a
+    batch explicitly marked resolved by a user.
+    """
+    if str(getattr(draft, "status", "") or "").upper() != "BLOCKED":
+        return False
+    candidate_questions = getattr(payload, "clarification_questions", None)
+    if not candidate_questions:
+        return bool(
+            getattr(getattr(payload, "quality", None), "status", None)
+            and str(getattr(payload.quality.status, "value", payload.quality.status)).upper() != "BLOCKED"
+        )
+    persisted = getattr(draft, "payload", None)
+    persisted = persisted if isinstance(persisted, dict) else {}
+    if persisted.get("clarificationQuestionsResolved") is True or persisted.get("clarification_questions_resolved") is True:
+        return False
+    existing_questions = persisted.get("clarificationQuestions")
+    if not isinstance(existing_questions, list) or not existing_questions:
+        existing_questions = persisted.get("clarification_questions")
+    if not isinstance(existing_questions, list) or not existing_questions:
+        return True
+    quality = getattr(payload, "quality", None)
+    quality_status = getattr(getattr(quality, "status", None), "value", getattr(quality, "status", ""))
+    return str(quality_status or "").upper() != "BLOCKED"
 
 # Solution runs are backed by LangGraph events.  The product stream records
 # safe actions in arrival order because an agent may legitimately retrieve,
@@ -272,21 +307,530 @@ async def _create_solution_run(
         )
 
 
-def _resume_answer_text(raw_content: object) -> str | None:
-    """Normalize a persisted resume input into safe, human-readable context."""
+def _resume_answer_text(raw_content: object, question: dict | None = None) -> str | None:
+    """Normalize a persisted resume input into safe, human-readable context.
+
+    Resume input is deliberately stored in its runtime form (option ids are
+    required by LangGraph), but old runs may not have the separate
+    ``resume_display_answer`` metadata.  Always pass those values through the
+    same display normalizer used by the product transcript so replaying an
+    old chain cannot surface ids such as ``confirmed`` to the user.
+    """
     if not isinstance(raw_content, str) or not raw_content.strip():
         return None
     try:
         value = json.loads(raw_content)
     except (TypeError, ValueError):
         value = raw_content
-    if isinstance(value, str):
-        return value.strip() or None
-    try:
-        normalized = json.dumps(value, ensure_ascii=False, indent=2)
-    except (TypeError, ValueError):
-        normalized = str(value)
+    if isinstance(value, dict):
+        # Keep question ids/keys in the model context so a multi-question
+        # continuation remains unambiguous, while translating only the
+        # option values.  The keys never get written to the product
+        # transcript; this representation is for Agent context replay.
+        rendered_items = []
+        for key, item in value.items():
+            if key in {"action", "questionId", "question_id"}:
+                continue
+            rendered = _resume_display_value(item, question)
+            if rendered:
+                rendered_items.append(f"{key}：{rendered}")
+        normalized = "\n".join(rendered_items)
+    else:
+        normalized = _resume_display_value(value, question)
     return normalized.strip() or None
+
+
+def _resume_request_answer(request: ResumeRunRequest) -> str:
+    """Normalize a product clarification answer before adding it to context.
+
+    The browser may submit a string, a selected option list, or a structured
+    value.  ``skip`` is represented explicitly so the agent can distinguish a
+    user who is unsure from a missing answer.
+    """
+    if request.action == "skip":
+        return "（用户暂不确定）"
+    if isinstance(request.answer, str):
+        answer = request.answer.strip()
+    elif isinstance(request.answer, list) and all(isinstance(item, str) for item in request.answer):
+        answer = "、".join(item.strip() for item in request.answer if item.strip())
+    else:
+        try:
+            answer = json.dumps(request.answer, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="answer 格式不受支持") from exc
+        answer = answer.strip()
+    if not answer:
+        raise HTTPException(status_code=422, detail="answer 不能为空")
+    return answer
+
+
+_SKIPPED_RESUME_VALUES = {"（用户暂不确定）", "(用户暂不确定)", "暂不确定", "跳过"}
+
+_LEGACY_RESUME_LABELS = {
+    "confirmed": "已确定",
+    "planning": "已有候选，尚未最终确认",
+    "undecided": "尚未确定",
+    "other": "其他情况",
+    "self_operated": "自营",
+    "platform": "平台入驻 / 多商户",
+    "distribution": "分销",
+    "store_delivery": "门店配送",
+    "user_app": "用户端",
+    "admin": "运营管理端",
+    "catalog": "商品管理与上下架",
+    "transaction": "购物车、下单和支付",
+    "small": "少于 100 个 SKU",
+    "medium": "100–1000 个 SKU",
+    "large": "超过 1000 个 SKU",
+    "erp": "ERP / 业务系统",
+    "inventory": "库存系统",
+    "logistics": "物流 / 配送系统",
+    "service": "客服 / 会员系统",
+    "none": "暂无系统需要对接",
+    "refund": "退款与售后",
+    "coupon": "优惠券 / 促销",
+    "membership": "会员 / 积分",
+    "group_buy": "拼团 / 秒杀",
+    "private_deployment": "私有化部署",
+    "hybrid_deployment": "混合部署",
+    "public_cloud": "公有云部署",
+    "showcase": "展示型小程序（浏览、咨询为主）",
+    "full_commerce": "完整交易小程序（购物车、下单和支付）",
+}
+
+
+def _is_skipped_resume_value(value: object) -> bool:
+    return isinstance(value, str) and value.strip() in _SKIPPED_RESUME_VALUES
+
+
+def _resume_label_lookup(text: str, labels: dict[str, str]) -> str | None:
+    """Look up an option id without making ordinary prose substitutions.
+
+    Option ids are stable machine values and are commonly emitted in a
+    different case by older clients.  Matching only the complete scalar (or a
+    complete comma-separated part) keeps text such as ``please use admin for
+    this area`` untouched while still rendering ``CONFIRMED`` as its label.
+    """
+    if text in labels:
+        return labels[text]
+    folded = text.casefold()
+    for option_id, label in labels.items():
+        if option_id.casefold() == folded:
+            return label
+    for option_id, label in _LEGACY_RESUME_LABELS.items():
+        if option_id.casefold() == folded:
+            return label
+    return None
+
+
+def _resume_answer_entries(request: ResumeRunRequest) -> list[dict]:
+    """Normalize scalar, question-id and batch resume payloads."""
+    raw = request.answer
+    if isinstance(raw, dict) and isinstance(raw.get("questionId"), str) and (
+        "answer" in raw or "value" in raw
+    ):
+        value = raw.get("value", raw.get("answer"))
+        return [{
+            "question_id": raw["questionId"],
+            "value": value,
+            "action": "skip" if raw.get("action") == "skip" or _is_skipped_resume_value(value) else request.action,
+        }]
+    if isinstance(raw, dict) and not any(key in raw for key in ("value", "answer", "questionId")):
+        return [
+            {
+                "question_id": question_id,
+                "value": value.get("value", value.get("answer")) if isinstance(value, dict) else value,
+                "action": (
+                    "skip"
+                    if isinstance(value, dict) and value.get("action") == "skip"
+                    or _is_skipped_resume_value(
+                        value.get("value", value.get("answer")) if isinstance(value, dict) else value
+                    )
+                    else request.action
+                ),
+            }
+            for question_id, value in raw.items()
+        ]
+    return [{
+        "question_id": request.question_id,
+        "value": raw,
+        "action": "skip" if request.action == "skip" or _is_skipped_resume_value(raw) else request.action,
+    }]
+
+
+def _resume_display_value(value: object, question: dict | None = None) -> str:
+    """Render a resume value for the product transcript.
+
+    LangGraph receives option ids so the graph can make a deterministic
+    decision.  Those ids are implementation details, though, and must not be
+    written back to the user-facing conversation.  Keep free-form text and
+    ``其他：…`` answers intact while translating known option ids to labels.
+    """
+    if _is_skipped_resume_value(value):
+        return "暂不确定"
+    options = question.get("options") if isinstance(question, dict) else None
+    labels: dict[str, str] = {}
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            option_id = str(
+                option.get("id")
+                or option.get("value")
+                or option.get("key")
+                or option.get("text")
+                or ""
+            ).strip()
+            label = str(option.get("label") or option.get("text") or option.get("value") or option_id).strip()
+            if option_id and label:
+                labels[option_id] = label
+    if isinstance(value, list):
+        return "、".join(
+            rendered
+            for item in value
+            if (rendered := _resume_display_value(item, question))
+        )
+    if isinstance(value, dict):
+        # Batch answers and older adapters may wrap a value as
+        # ``{value, action}``.  Do not render the transport-only ``action``
+        # token as if it were a user answer.
+        if "value" in value or "answer" in value:
+            if value.get("action") == "skip":
+                return "暂不确定"
+            return _resume_display_value(value.get("value", value.get("answer")), question)
+        return "、".join(
+            rendered
+            for key, item in value.items()
+            if key not in {"action", "questionId", "question_id"}
+            and (rendered := _resume_display_value(item, question))
+        )
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.startswith("其他："):
+        return text
+    # Multi-select answers occasionally arrive as a comma-separated scalar.
+    parts = [part.strip() for part in re.split(r"[、,，;；]", text) if part.strip()]
+    if len(parts) > 1:
+        translated = [_resume_label_lookup(part, labels) for part in parts]
+        if all(translated):
+            return "、".join(translated)  # type: ignore[arg-type]
+    return _resume_label_lookup(text, labels) or text
+
+
+def _resume_display_answer(request: ResumeRunRequest, questions: list[dict]) -> str:
+    """Return a human-readable transcript value without changing runtime ids."""
+    entries = _resume_answer_entries(request)
+    by_id = {
+        str(question.get("questionId") or question.get("question_id") or question.get("id") or "").strip(): question
+        for question in questions
+        if isinstance(question, dict)
+    }
+    rendered: list[str] = []
+    for entry in entries:
+        question_id = str(entry.get("question_id") or "").strip()
+        value = "（用户暂不确定）" if entry.get("action") == "skip" else entry.get("value")
+        question = by_id.get(question_id)
+        # A scalar answer from a one-question legacy interrupt has no
+        # question id in the request body.  Use its sole question's options
+        # before falling back to the legacy id map.
+        if question is None and not question_id and len(entries) == 1 and len(questions) == 1:
+            question = questions[0]
+        display = _resume_display_value(value, question)
+        if not display:
+            continue
+        question_text = str(question.get("question") or "").strip() if isinstance(question, dict) else ""
+        rendered.append(f"{question_text}：{display}" if question_text and len(entries) > 1 else display)
+    if rendered:
+        return "\n".join(rendered)
+    # Never fall back to the runtime serializer here: it would put option ids
+    # directly into the product transcript when question metadata is absent.
+    raw_value = "（用户暂不确定）" if request.action == "skip" else request.answer
+    return _resume_display_value(raw_value) or ""
+
+
+def _resume_value_present(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_resume_value_present(item) for item in value)
+    if isinstance(value, dict):
+        return bool(value)
+    return value is not None
+
+
+def _validated_resume_answer(
+    request: ResumeRunRequest,
+    questions: list[dict],
+    *,
+    run_id: str | None = None,
+) -> object:
+    """Require one explicit answer/skip decision for every interrupt item."""
+    if not questions:
+        return _resume_request_answer(request) if request.action == "skip" else request.answer
+
+    normalized_questions = []
+    seen: set[str] = set()
+    for index, question in enumerate(questions):
+        if not isinstance(question, dict):
+            continue
+        question_id = str(
+            question.get("questionId")
+            or question.get("question_id")
+            or question.get("id")
+            or f"q-{index + 1}"
+        ).strip()
+        if not question_id or question_id in seen:
+            continue
+        seen.add(question_id)
+        normalized_questions.append({
+            "id": question_id,
+            "allow_skip": question.get(
+                "allowSkip",
+                question.get("allow_skip", question.get("skippable", True)),
+            )
+            is not False,
+        })
+    if not normalized_questions:
+        return _resume_request_answer(request) if request.action == "skip" else request.answer
+
+    by_id = {question["id"]: question for question in normalized_questions}
+    entries = _resume_answer_entries(request)
+    resolved: dict[str, dict] = {}
+    invalid: list[str] = []
+    not_skippable: list[str] = []
+    first_id = normalized_questions[0]["id"]
+    for entry in entries:
+        question_id = str(entry.get("question_id") or (first_id if len(entries) == 1 else "")).strip()
+        if question_id not in by_id:
+            invalid.append(question_id)
+            continue
+        action = "skip" if entry.get("action") == "skip" or _is_skipped_resume_value(entry.get("value")) else "answer"
+        if action == "skip" and by_id[question_id]["allow_skip"] is False:
+            not_skippable.append(question_id)
+        if action == "answer" and not _resume_value_present(entry.get("value")):
+            continue
+        resolved[question_id] = {"value": entry.get("value"), "action": action}
+
+    if invalid:
+        detail = {
+            "code": "QUESTION_NOT_CURRENT",
+            "message": "待确认问题已变化，请刷新后重试",
+            "questionIds": invalid,
+        }
+        if run_id:
+            detail["runId"] = run_id
+        raise HTTPException(
+            status_code=400,
+            detail=detail,
+        )
+    if not_skippable:
+        detail = {
+            "code": "QUESTION_NOT_SKIPPABLE",
+            "message": "当前问题不允许跳过",
+            "questionIds": not_skippable,
+        }
+        if run_id:
+            detail["runId"] = run_id
+        raise HTTPException(
+            status_code=400,
+            detail=detail,
+        )
+    missing = [question["id"] for question in normalized_questions if question["id"] not in resolved]
+    if missing:
+        detail = {
+            "code": "QUESTIONS_INCOMPLETE",
+            "message": "请先完成全部待确认问题，再继续生成方案",
+            "missingQuestionIds": missing,
+        }
+        if run_id:
+            detail["runId"] = run_id
+        raise HTTPException(
+            status_code=400,
+            detail=detail,
+        )
+
+    values = {
+        question_id: "（用户暂不确定）" if entry["action"] == "skip" else entry["value"]
+        for question_id, entry in resolved.items()
+    }
+    if len(values) == 1:
+        return next(iter(values.values()))
+    return values
+
+
+def _normalize_interrupt_question_batch(value: object) -> list[dict]:
+    """Extract a deterministic, de-duplicated question batch from an interrupt.
+
+    Older adapters persisted a single question at the top level while newer
+    LangGraph events carry ``questions``.  Keeping the normalization here
+    means resume validation does not accidentally treat the first item as the
+    whole batch.  The helper deliberately keeps only safe question metadata;
+    raw tool payloads must never reach the product API.
+    """
+    if not isinstance(value, dict):
+        return []
+    raw_questions = value.get("questions")
+    if not isinstance(raw_questions, list):
+        raw_questions = [value] if any(key in value for key in ("question", "prompt", "text")) else []
+
+    normalized: list[dict] = []
+    seen_ids: set[str] = set()
+    seen_texts: set[str] = set()
+    for index, raw in enumerate(raw_questions):
+        if not isinstance(raw, dict):
+            continue
+        question = str(raw.get("question") or raw.get("prompt") or raw.get("text") or "").strip()
+        if not question:
+            continue
+        question_id = str(
+            raw.get("questionId")
+            or raw.get("question_id")
+            or raw.get("id")
+            or f"q-{index + 1}"
+        ).strip()
+        if not question_id:
+            question_id = f"q-{index + 1}"
+        text_key = re.sub(r"\s+", " ", question).strip().casefold()
+        id_key = question_id.casefold()
+        if id_key in seen_ids or text_key in seen_texts:
+            continue
+        seen_ids.add(id_key)
+        seen_texts.add(text_key)
+        # Preserve the runtime's safe presentation fields, while normalizing
+        # the aliases consumed by _validated_resume_answer().
+        item = dict(raw)
+        item["question"] = question
+        item["questionId"] = question_id
+        item.setdefault("id", question_id)
+        normalized.append(item)
+
+    total = len(normalized)
+    for index, item in enumerate(normalized, start=1):
+        # Runtime-provided positions are not trusted for validation/UI order;
+        # the event's order is the only stable order across legacy payloads.
+        item["position"] = index
+        item["total"] = total
+    return normalized
+
+
+def _draft_questions_for_resume(draft: object) -> list[dict]:
+    """Read the persisted clarification batch used by a legacy draft run.
+
+    Before durable LangGraph interrupts were exposed, a completed run could
+    still be projected as a ``BLOCKED`` solution draft containing the
+    questions that the user needed to answer.  The compatibility resume path
+    has no checkpoint interrupt to inspect, so the draft payload is the
+    authoritative snapshot.  Keep this conversion deliberately narrow and
+    feed it through the same normalizer as runtime interrupt events.
+    """
+    payload = draft.get("payload") if isinstance(draft, dict) else getattr(draft, "payload", None)
+    if not isinstance(payload, dict):
+        return []
+    raw_questions = payload.get("clarificationQuestions")
+    if not isinstance(raw_questions, list):
+        raw_questions = payload.get("clarification_questions")
+    # Legacy projections persisted only the descriptive openQuestions list.
+    # Derive the same safe question metadata used by the Blueprint parser so
+    # completed-run resume still validates a full batch instead of accepting a
+    # scalar answer and silently dropping the remaining questions.
+    if not isinstance(raw_questions, list) or not raw_questions:
+        raw_open_questions = payload.get("openQuestions")
+        if not isinstance(raw_open_questions, list):
+            raw_open_questions = payload.get("open_questions")
+        if isinstance(raw_open_questions, list):
+            raw_questions = [
+                question
+                for index, item in enumerate(raw_open_questions, start=1)
+                if (question := clarification_question_from_open_question(item, index)) is not None
+            ]
+    if not isinstance(raw_questions, list) or not raw_questions:
+        return []
+    return _normalize_interrupt_question_batch({"questions": raw_questions})
+
+
+def _resume_context_answer(request: ResumeRunRequest, questions: list[dict]) -> str:
+    """Render answers with question text for a fresh compatibility run.
+
+    A completed legacy run is continued by starting a new chat run rather
+    than resuming a LangGraph checkpoint.  Including the question text in the
+    model input makes a batch answer unambiguous and tells the Agent which
+    conditions have already been settled, reducing repeated clarification
+    questions.  This is model context only; option ids are translated to
+    their user-facing labels and never exposed here.
+    """
+    entries = _resume_answer_entries(request)
+    by_id = {
+        str(
+            question.get("questionId")
+            or question.get("question_id")
+            or question.get("id")
+            or ""
+        )
+        .strip()
+        .casefold(): question
+        for question in questions
+        if isinstance(question, dict)
+    }
+    rendered: list[str] = []
+    for entry in entries:
+        question_id = str(entry.get("question_id") or "").strip()
+        question = by_id.get(question_id.casefold()) if question_id else None
+        if question is None and len(entries) == 1 and len(questions) == 1:
+            question = questions[0]
+        value = "（用户暂不确定）" if entry.get("action") == "skip" else entry.get("value")
+        display = _resume_display_value(value, question)
+        if not display:
+            continue
+        question_text = str(question.get("question") or "").strip() if isinstance(question, dict) else ""
+        rendered.append(f"{question_text}：{display}" if question_text else display)
+    return "\n".join(rendered).strip()
+
+
+async def _interrupt_questions_for_run(run_id: str, current_user: User, parent_data: dict) -> list[dict]:
+    """Replay persisted events and recover the latest complete question batch.
+
+    A run can contain a direct interrupt snapshot plus one or more replayed
+    interrupt events (for example after a worker retry).  Returning on the
+    first item made a stale single-question snapshot hide the newer batch and
+    caused already answered questions to reappear.  Prefer the most recent
+    event batch, but retain the largest batch when a retry emitted a truncated
+    duplicate.  Exact duplicate ids/text are removed by the normalizer.
+    """
+    direct = parent_data.get("interrupt") if isinstance(parent_data, dict) else None
+    direct_batch = _normalize_interrupt_question_batch(direct)
+    best_batch = direct_batch
+    best_source = 0  # direct snapshot is a fallback; event replay wins ties.
+    best_order = 0
+
+    event_order = 0
+    async for raw_event in stream_agent_run_events(
+        run_id=run_id,
+        after_seq="0-0",
+        current_uid=str(current_user.uid),
+        verbose=False,
+    ):
+        event_order += 1
+        progress = _agent_progress(raw_event)
+        interrupt = progress.get("interrupt") if isinstance(progress, dict) else None
+        candidate = _normalize_interrupt_question_batch(interrupt)
+        if not candidate:
+            continue
+        # Events are authoritative over a stale DTO snapshot.  Within the
+        # replay, prefer the latest batch; if a retry emitted a shorter
+        # truncated copy, keep the larger complete batch instead.
+        if (
+            not best_batch
+            or len(candidate) > len(best_batch)
+            or (len(candidate) == len(best_batch) and (best_source == 0 or event_order >= best_order))
+        ):
+            best_batch = candidate
+            best_source = 1
+            best_order = event_order
+
+    return best_batch
 
 
 async def _solution_context_for_run(
@@ -339,11 +883,16 @@ async def _solution_context_for_run(
 
     # Runs are collected newest -> oldest.  Present answers in their original
     # order so a second clarification cannot appear before the first one.
-    answers = [
-        answer
-        for run in reversed(runs[:-1])
-        if (answer := _resume_answer_text(run.get("input_content")))
-    ]
+    answers: list[str] = []
+    for run in reversed(runs[:-1]):
+        input_metadata = run.get("input_metadata")
+        input_metadata = input_metadata if isinstance(input_metadata, dict) else {}
+        display_answer = input_metadata.get("resume_display_answer")
+        if isinstance(display_answer, str) and display_answer.strip():
+            answers.append(display_answer.strip())
+            continue
+        if answer := _resume_answer_text(run.get("input_content")):
+            answers.append(answer)
     content = root_input
     if answers:
         content = f"{content}\n\n补充信息：\n" + "\n".join(answers)
@@ -405,13 +954,19 @@ async def _project_solution_run(
         # diagnostic can be shown to the user.
         from yuxi.product_chat.solution_draft import blocked_solution_draft
 
-        payload = blocked_solution_draft(extraction.reason or "方案结构化结果无法校验")
+        payload = blocked_solution_draft(
+            extraction.reason or "方案结构化结果无法校验",
+            request.content,
+        )
     payload.execution_trace = result.get("execution_trace") if isinstance(result.get("execution_trace"), dict) else {}
     run_status = str(result.get("status") or "").strip().lower()
     if run_status not in {"completed", "succeeded", "success"}:
         from yuxi.product_chat.solution_draft import blocked_solution_draft
 
-        payload = blocked_solution_draft(f"方案运行未完成：{result.get('status') or 'failed'}")
+        payload = blocked_solution_draft(
+            f"方案运行未完成：{result.get('status') or 'failed'}",
+            request.content,
+        )
         payload.execution_trace = (
             result.get("execution_trace")
             if isinstance(result.get("execution_trace"), dict)
@@ -444,11 +999,7 @@ async def _project_solution_run(
             # A retry/reconnect may revisit a draft projected before the
             # structured-output compatibility fix.  Keep the same exchange
             # and run id, but append a corrected immutable draft version.
-            if (
-                str(draft.status or "").upper() == "BLOCKED"
-                and payload.quality
-                and payload.quality.status.value != "BLOCKED"
-            ):
+            if _blocked_draft_needs_payload_repair(draft, payload):
                 draft = await draft_repository.refresh_blocked_from_payload(
                     draft_id=draft.id,
                     user_id=current_user.id,
@@ -472,10 +1023,18 @@ async def _project_solution_run(
                     ),
                 ),
             )
+        result_metadata = (
+            result.get("input_metadata") if isinstance(result.get("input_metadata"), dict) else {}
+        )
+        display_content = (
+            result_metadata.get("resume_display_answer")
+            if isinstance(result_metadata.get("resume_display_answer"), str)
+            else None
+        )
         user_message, assistant_message, assistant_citations = await chat_repository.append_exchange(
             conversation,
             current_user.id,
-            request.content,
+            display_content or request.content,
             answer,
             solution_draft_id=draft.id,
             # ``_create_solution_run`` generates a request id for legacy
@@ -517,19 +1076,104 @@ def _agent_progress(raw_event: str) -> dict | None:
         envelope = data if isinstance(data, dict) else {}
         payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else envelope
         chunk = payload.get("chunk") if isinstance(payload.get("chunk"), dict) else payload
+        # A few older workers emitted a single question directly on the
+        # interrupt chunk, while current workers always use ``questions``.
+        # Normalize both shapes here so a legacy run still exposes its
+        # options and question id instead of falling back to a generic prompt.
         questions = chunk.get("questions") if isinstance(chunk, dict) else []
-        question = next(
-            (
-                item.get("question")
-                for item in questions
-                if isinstance(item, dict) and isinstance(item.get("question"), str) and item.get("question", "").strip()
+        if not isinstance(questions, list) and isinstance(chunk, dict):
+            raw_single = questions if isinstance(questions, dict) else chunk
+            questions = [raw_single] if any(
+                key in raw_single for key in ("question", "prompt", "text")
+            ) else []
+        normalized_questions = []
+        if isinstance(questions, list):
+            for index, item in enumerate(questions):
+                if not isinstance(item, dict):
+                    continue
+                question = str(item.get("question") or item.get("prompt") or item.get("text") or "").strip()
+                if not question:
+                    continue
+                question_id = str(
+                    item.get("question_id") or item.get("questionId") or item.get("id") or f"q-{index + 1}"
+                ).strip()
+                options = item.get("options") or item.get("choices")
+                normalized_options = []
+                if isinstance(options, list):
+                    for option in options:
+                        if isinstance(option, dict):
+                            label = str(
+                                option.get("label")
+                                or option.get("text")
+                                or option.get("name")
+                                or option.get("value")
+                                or option.get("id")
+                                or ""
+                            ).strip()
+                            value = str(
+                                option.get("id")
+                                or option.get("value")
+                                or option.get("key")
+                                or option.get("label")
+                                or option.get("text")
+                                or ""
+                            ).strip()
+                        else:
+                            label = str(option).strip()
+                            value = label
+                        if label and value:
+                            normalized_options.append({"id": value, "label": label})
+                normalized_questions.append({
+                    "id": question_id,
+                    "questionId": question_id,
+                    "question": question,
+                    "type": (
+                        "MULTIPLE_CHOICE"
+                        if item.get("multi_select", item.get("multiSelect", False))
+                        else ("SINGLE_CHOICE" if normalized_options else "TEXT")
+                    ),
+                    **({"options": normalized_options} if normalized_options else {}),
+                    "required": item.get("required", True) is not False,
+                    # ``allow_other`` controls whether the user may enter a
+                    # free-form "other" value; it must not accidentally
+                    # disable the independent skip affordance.  Older
+                    # payloads used ``allow_skip``/``skippable`` while newer
+                    # ones may use camelCase, so accept all three spellings.
+                    "allowSkip": item.get(
+                        "allow_skip",
+                        item.get("allowSkip", item.get("skippable", True)),
+                    ) is not False,
+                    "allowOther": item.get(
+                        "allow_other",
+                        item.get("allowOther", True),
+                    ) is not False,
+                    "position": index + 1,
+                    "total": len(questions),
+                })
+        first = normalized_questions[0] if normalized_questions else None
+        interrupt = {
+            "question": (
+                first["question"]
+                if first
+                else (chunk.get("message") if isinstance(chunk, dict) else None) or "请补充所需信息"
             ),
-            None,
-        ) if isinstance(questions, list) else None
+            **(
+                {
+                    "questionId": first["questionId"],
+                    "type": first["type"],
+                    "options": first.get("options", []),
+                    "required": first["required"],
+                    "allowSkip": first["allowSkip"],
+                    "position": first["position"],
+                    "total": first["total"],
+                }
+                if first
+                else {}
+            ),
+            **({"questions": normalized_questions} if normalized_questions else {}),
+        }
         return {
-            "interrupt": question
-            or (chunk.get("message") if isinstance(chunk, dict) else None)
-            or "请补充所需信息"
+            "interrupt": interrupt,
         }
     if event_name == "end":
         envelope = data if isinstance(data, dict) else {}
@@ -787,18 +1431,37 @@ async def get_conversation(
                         # is safe because only completed runs can be promoted
                         # and the repository appends a new immutable version.
                         if str(draft.status or "").upper() == "BLOCKED" and draft.source_run_id:
-                            run_result = await get_agent_run_result(
-                                run_id=draft.source_run_id,
-                                current_uid=str(current_user.uid),
-                                db=db,
-                            )
-                            if str(run_result.get("status") or "").strip().lower() in {
+                            # Historical drafts may outlive their AgentRun (or
+                            # the run service may be temporarily unavailable).
+                            # A best-effort repair must never turn a normal
+                            # conversation load into a 5xx response.  Keep the
+                            # persisted draft and its actionable requirements
+                            # when the source run cannot be read.
+                            try:
+                                run_result = await get_agent_run_result(
+                                    run_id=draft.source_run_id,
+                                    current_uid=str(current_user.uid),
+                                    db=db,
+                                )
+                            except Exception as exc:  # pragma: no cover - backend/service dependent
+                                logger.warning(
+                                    "跳过历史方案草稿修复：source_run_id=%s error=%s",
+                                    draft.source_run_id,
+                                    exc,
+                                )
+                                run_result = None
+                            if isinstance(run_result, dict) and str(run_result.get("status") or "").strip().lower() in {
                                 "completed",
                                 "succeeded",
                                 "success",
                             }:
-                                candidate = extract_solution_payload(run_result)
-                                if candidate.quality and candidate.quality.status.value != "BLOCKED":
+                                extraction = extract_solution_result(run_result)
+                                candidate = extraction.payload
+                                if (
+                                    extraction.status is SolutionExtractionStatus.VALID
+                                    and candidate is not None
+                                    and _blocked_draft_needs_payload_repair(draft, candidate)
+                                ):
                                     draft = await draft_repository.refresh_blocked_from_payload(
                                         draft_id=draft.id,
                                         user_id=current_user.id,
@@ -954,7 +1617,7 @@ async def stream_message(
             ):
                 yield _sse_event(event_name, payload)
             try:
-                interrupted_question: str | None = None
+                interrupted_question: dict | None = None
                 terminal_status = ""
                 stream_state: dict[str, object] = {}
                 async for raw_event in stream_agent_run_events(
@@ -970,7 +1633,8 @@ async def stream_message(
                         yield _sse_event("error", {"code": "AGENT_RUN_FAILED", "message": progress["error"]})
                         return
                     if progress.get("interrupt"):
-                        interrupted_question = str(progress["interrupt"])
+                        value = progress["interrupt"]
+                        interrupted_question = value if isinstance(value, dict) else {"question": str(value)}
                     if progress.get("terminalStatus"):
                         terminal_status = str(progress["terminalStatus"])
                     raw_delta = progress.get("delta")
@@ -989,7 +1653,7 @@ async def stream_message(
                         "interrupt",
                         {
                             "runId": run["run_id"],
-                            "question": interrupted_question or "请补充所需信息",
+                            **(interrupted_question or {"question": "请补充所需信息"}),
                             "status": "INTERRUPTED",
                         },
                     )
@@ -1122,6 +1786,28 @@ async def stream_message(
     )
 
 
+@product_chat.get("/chat/conversations/{conversation_id}/active-run")
+async def get_active_product_chat_run(
+    conversation_id: str,
+    current_user: User = Depends(get_product_user),
+) -> dict:
+    async with pg_manager.get_async_session_context() as db:
+        try:
+            await ProductChatRepository(db).require_conversation(conversation_id, current_user.id)
+        except ProductChatNotFoundError:
+            raise _not_found() from None
+        run = await AgentRunRepository(db).get_latest_run_by_thread_for_user(
+            f"product-{conversation_id}", str(current_user.uid),
+        )
+        if (
+            not run or run.agent_slug != SOLUTION_DRAFT_AGENT_SLUG
+            or run.status not in {"pending", "running", "cancel_requested", "interrupted"}
+        ):
+            return {"run": None}
+        run_id = run.id
+    return await get_product_chat_run(run_id, current_user)
+
+
 @product_chat.get("/chat/runs/{run_id}")
 async def get_product_chat_run(
     run_id: str,
@@ -1137,6 +1823,9 @@ async def get_product_chat_run(
                     "threadId": run.get("thread_id") or run.get("conversation_thread_id"),
                     "status": run.get("status"),
                     "requestId": run.get("request_id"),
+                    "inputContent": run.get("input_content") or "",
+                    "executionTrace": run.get("execution_trace") or {},
+                    "interrupt": run.get("interrupt"),
                     "streamUrl": f"/api/chat/runs/{run_id}/events",
                 }
             }
@@ -1166,8 +1855,95 @@ async def resume_product_chat_run(
         parent = await AgentRunRepository(db).get_run_for_user(run_id, str(current_user.uid))
         if not parent:
             raise HTTPException(status_code=404, detail="运行任务不存在")
-        if parent.status != "interrupted":
-            raise HTTPException(status_code=409, detail="只有 interrupted run 可以恢复")
+        parent_status = str(parent.status or "").strip().lower()
+        if parent_status != "interrupted":
+            # Older solution runs could finish with a BLOCKED draft and still
+            # expose a deterministic clarification question.  They cannot be
+            # resumed through LangGraph's checkpoint API, so continue the
+            # original request as a new chat run on the same stable thread.
+            # Keep this compatibility path narrow: arbitrary completed runs
+            # and non-solution agents must retain the normal 409 contract.
+            if parent_status not in {"completed", "succeeded", "success"}:
+                raise HTTPException(status_code=409, detail="只有 interrupted run 可以恢复")
+            parent_view = await get_agent_run_view(
+                run_id=run_id,
+                current_uid=str(current_user.uid),
+                db=db,
+            )
+            parent_data = parent_view.get("run") or {}
+            metadata = parent_data.get("input_metadata") if isinstance(parent_data, dict) else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            invocation = metadata.get("agent_invocation_meta")
+            invocation_meta = invocation if isinstance(invocation, dict) else {}
+            agent_slug = str(parent_data.get("agent_slug") or parent.agent_slug or "")
+            skill_id = str(invocation_meta.get("skill_id") or "")
+            if agent_slug != SOLUTION_DRAFT_AGENT_SLUG and skill_id != "SOLUTION_DRAFT":
+                raise HTTPException(status_code=409, detail="只有方案草稿运行可以继续确认")
+
+            # Completed compatibility runs do not have a LangGraph checkpoint
+            # interrupt to replay. Recover the complete question batch from
+            # the immutable draft projection before accepting an answer;
+            # otherwise a scalar answer could silently advance a multi-question
+            # batch and the Agent would ask the first question again.
+            completed_draft = await SolutionDraftRepository(db).get_by_source_run(run_id)
+            completed_questions = _draft_questions_for_resume(completed_draft)
+            if not completed_questions and isinstance(parent_data.get("interrupt"), dict):
+                completed_questions = _normalize_interrupt_question_batch(parent_data["interrupt"])
+            if completed_questions:
+                # Keep the completed-run fallback consistent with a true
+                # interrupted LangGraph resume: every current question needs
+                # an explicit answer or skip decision before we continue.
+                _validated_resume_answer(request, completed_questions, run_id=run_id)
+
+            # Recover the root request plus any answers already collected in a
+            # previous resume chain, then append this answer in order.  The
+            # new request id prevents the old completed run's idempotency key
+            # from being reused.
+            conversation_id, solution_request = await _solution_context_for_run(
+                run_id=run_id,
+                current_user=current_user,
+            )
+            # This compatibility branch continues an already-completed run
+            # as a fresh chat run (there is no LangGraph interrupt to resume).
+            # The runtime answer still needs the submitted option id when a
+            # true resume is possible, but this new chat input is also used as
+            # the user-facing history message.  Render it through the label
+            # normalizer first so legacy values such as ``confirmed`` never
+            # leak into the transcript.
+            answer = _resume_context_answer(request, completed_questions)
+            if not answer:
+                answer = _resume_display_answer(request, completed_questions)
+            if not answer:
+                answer = _resume_request_answer(request)
+            # Keep the canonical ``补充信息：`` marker so the product
+            # projection can filter questions already answered in this
+            # compatibility continuation.  The extra note is model context,
+            # not a second transcript protocol.
+            supplement_note = "以下信息已确认，请勿重复询问：\n" if completed_questions else ""
+            content = f"{solution_request.content}\n\n补充信息：\n{supplement_note}{answer}"
+            continued_request = SendMessageRequest.model_validate(
+                {
+                    "content": content,
+                    "skillId": "SOLUTION_DRAFT",
+                    "attachmentIds": solution_request.attachment_ids,
+                    "requestId": request.request_id or str(uuid4()),
+                }
+            )
+            run = await _create_solution_run(
+                conversation_id=conversation_id,
+                request=continued_request,
+                current_user=current_user,
+            )
+            return {
+                "run": {
+                    "runId": run["run_id"],
+                    "threadId": run["thread_id"],
+                    "status": run["status"],
+                    "requestId": run["request_id"],
+                    "streamUrl": f"/api/chat/runs/{run['run_id']}/events",
+                    "resumedFromRunId": run_id,
+                }
+            }
         parent_view = await get_agent_run_view(
             run_id=run_id,
             current_uid=str(current_user.uid),
@@ -1178,6 +1954,16 @@ async def resume_product_chat_run(
         parent_metadata = parent_metadata if isinstance(parent_metadata, dict) else {}
         invocation = parent_metadata.get("agent_invocation_meta")
         invocation_meta = invocation if isinstance(invocation, dict) else {}
+        # Validate the complete interrupt batch before creating a resume run.
+        # This keeps a partial answer from advancing LangGraph and makes the
+        # product contract deterministic across browser refreshes/retries.
+        interrupt_questions = await _interrupt_questions_for_run(
+            run_id,
+            current_user,
+            parent_data,
+        )
+        resume_answer = _validated_resume_answer(request, interrupt_questions, run_id=run_id)
+        resume_display_answer = _resume_display_answer(request, interrupt_questions)
         run = await create_agent_run_view(
             input_message=None,
             agent_slug=parent.agent_slug,
@@ -1186,11 +1972,12 @@ async def resume_product_chat_run(
                 "source": "product_chat_solution_draft_resume",
                 "attachment_file_ids": parent_metadata.get("attachment_file_ids") or [],
                 "agent_invocation_meta": invocation_meta,
+                **({"resume_display_answer": resume_display_answer} if resume_display_answer else {}),
                 **({"request_id": request.request_id} if request.request_id else {}),
             },
             current_uid=str(current_user.uid),
             db=db,
-            resume=request.answer,
+            resume=resume_answer,
             created_by_run_id=run_id,
         )
     return {
@@ -1221,8 +2008,25 @@ async def stream_product_chat_run_events(
             progress_state,
         ):
             yield _sse_event(event_name, payload)
-        interrupted_question: str | None = None
+        interrupted_question: dict | None = None
         terminal_status = ""
+        # The Redis stream is a live transport, not the durable source of
+        # truth.  Seed the terminal state and clarification batch from the run
+        # snapshot so reconnecting after stream expiry still renders the same
+        # questions and validates the complete batch on resume.
+        async with pg_manager.get_async_session_context() as db:
+            initial_view = await get_agent_run_view(
+                run_id=run_id,
+                current_uid=str(current_user.uid),
+                db=db,
+            )
+        initial_run = initial_view.get("run") or {}
+        initial_status = str(initial_run.get("status") or "").strip().lower()
+        persisted_interrupt = initial_run.get("interrupt")
+        if initial_status == "interrupted":
+            terminal_status = "interrupted"
+        if isinstance(persisted_interrupt, dict):
+            interrupted_question = persisted_interrupt
         stream_state: dict[str, object] = {}
         async for raw_event in stream_agent_run_events(
             run_id=run_id,
@@ -1233,7 +2037,8 @@ async def stream_product_chat_run_events(
             progress = _agent_progress(raw_event)
             if progress and not progress.get("error"):
                 if progress.get("interrupt"):
-                    interrupted_question = str(progress["interrupt"])
+                    value = progress["interrupt"]
+                    interrupted_question = value if isinstance(value, dict) else {"question": str(value)}
                 if progress.get("terminalStatus"):
                     terminal_status = str(progress["terminalStatus"])
                 raw_delta = progress.get("delta")
@@ -1255,7 +2060,7 @@ async def stream_product_chat_run_events(
                 "interrupt",
                 {
                     "runId": run_id,
-                    "question": interrupted_question or "请补充所需信息",
+                    **(interrupted_question or {"question": "请补充所需信息"}),
                     "status": "INTERRUPTED",
                 },
             )
@@ -1289,15 +2094,18 @@ async def stream_product_chat_run_events(
             yield _sse_event("complete", response.model_dump(mode="json", by_alias=True))
         except Exception as exc:
             logger.error(
-                "product_solution_draft_run_projection_failed run_id={} error_type={}",
+                "product_solution_draft_run_projection_failed run_id={} error_type={} traceback={}",
                 run_id,
                 type(exc).__name__,
+                "".join(format_tb(exc.__traceback__)),
             )
             yield _sse_event(
                 "error",
                 {
                     "code": "AGENT_RUN_PROJECTION_FAILED",
                     "message": "方案草稿保存失败，请重试",
+                    "runId": run_id,
+                    "retryable": True,
                 },
             )
     return StreamingResponse(

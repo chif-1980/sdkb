@@ -42,6 +42,12 @@ class ResumeRunRequest(StrictRequest):
 
     answer: Any
     request_id: str | None = Field(default=None, alias="requestId", max_length=128)
+    # Product clients may include the currently displayed question and the
+    # user's intent.  The runtime only needs ``answer``; accepting these
+    # fields at the Yuxi boundary keeps the product-facing contract forward
+    # compatible while preserving strict validation for unknown fields.
+    question_id: str | None = Field(default=None, alias="questionId", max_length=128)
+    action: Literal["answer", "skip"] = "answer"
 
 
 class MessageFeedbackRequest(StrictRequest):

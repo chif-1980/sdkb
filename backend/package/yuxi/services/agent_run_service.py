@@ -475,6 +475,12 @@ def _prepare_run_input_message(
 
     metadata["resume"] = resume
     metadata["source"] = "ask_user_question_resume"
+    # Product adapters may provide a human-readable rendering of the selected
+    # option(s).  Keep it alongside the runtime resume value (which must stay
+    # as ids/map keys for LangGraph) so historical conversation projection can
+    # avoid leaking implementation ids such as ``confirmed``.
+    if isinstance(meta.get("resume_display_answer"), str) and meta["resume_display_answer"].strip():
+        metadata["resume_display_answer"] = meta["resume_display_answer"].strip()
     return build_resume_input_message(resume).with_metadata(metadata)
 
 
@@ -706,6 +712,12 @@ async def get_agent_run_view(*, run_id: str, current_uid: str, db: AsyncSession)
     if input_message:
         data["input_content"] = input_message.content
         data["input_metadata"] = input_message.extra_metadata or {}
+    input_payload = getattr(run, "input_payload", None)
+    interrupt_snapshot = input_payload.get("interrupt_snapshot") if isinstance(input_payload, dict) else None
+    if isinstance(interrupt_snapshot, dict) and interrupt_snapshot.get("questions"):
+        # Product adapters use this durable, presentation-safe snapshot when
+        # the Redis event backlog has expired or is temporarily unavailable.
+        data["interrupt"] = interrupt_snapshot
     return {"run": data}
 
 
@@ -764,6 +776,20 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
     output_metadata = (
         output_message.extra_metadata if output_message and isinstance(output_message.extra_metadata, dict) else {}
     )
+    input_message = None
+    # ``AgentRun`` rows created by older callers/tests may not expose the
+    # newer input-message relation attribute.  Treat a missing attribute as
+    # an absent relation so result loading remains backwards compatible.
+    input_message_id = getattr(run, "input_message_id", None)
+    if input_message_id:
+        input_message = next(
+            (message for message in messages if message.id == input_message_id),
+            None,
+        )
+        if input_message is None:
+            input_message = await db.scalar(
+                select(Message).where(Message.id == input_message_id)
+            )
     # Some LangChain message variants persist their actual assistant content
     # in ``extra_metadata.content`` while the normalized ``content`` column is
     # empty (for example, structured output messages).  Expose that durable
@@ -809,6 +835,15 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
         "request_id": run.request_id,
         "final_message_id": output_message.id if output_message else None,
         "langfuse_trace_id": output_metadata.get("langfuse_trace_id"),
+        # Safe input metadata is useful to product adapters when projecting a
+        # resumed run.  It contains no attachment bytes or tool arguments.
+        "run_type": getattr(run, "run_type", "chat"),
+        "input_content": input_message.content if input_message else "",
+        "input_metadata": (
+            input_message.extra_metadata
+            if input_message and isinstance(input_message.extra_metadata, dict)
+            else {}
+        ),
     }
     if run.error_type or run.error_message:
         payload["error"] = {"type": run.error_type, "message": run.error_message}

@@ -183,6 +183,19 @@ class AgentRunRepository:
         await self.db.flush()
         return run
 
+    async def set_interrupt_snapshot(self, run_id: str, snapshot: dict) -> AgentRun | None:
+        """Persist a safe clarification snapshot without adding run state."""
+        run = await self.get_run(run_id)
+        if not run:
+            return None
+        payload = dict(run.input_payload) if isinstance(run.input_payload, dict) else {}
+        payload["interrupt_snapshot"] = snapshot if isinstance(snapshot, dict) else {}
+        # Assign a new mapping so SQLAlchemy reliably detects the JSON change.
+        run.input_payload = payload
+        run.updated_at = utc_now_naive()
+        await self.db.flush()
+        return run
+
     async def set_output_message(self, run_id: str, message_id: int) -> AgentRun | None:
         run = await self.get_run(run_id)
         if not run:

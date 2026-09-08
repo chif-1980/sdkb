@@ -26,12 +26,16 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Message, User
 from yuxi.storage.redis import get_arq_redis_settings
 from yuxi.utils.logging_config import logger
+from yuxi.utils.question_utils import normalize_questions
 from yuxi.utils.thread_utils import extract_thread_id
 
 LOADING_FLUSH_INTERVAL_MS = 100
 LOADING_FLUSH_MAX_CHARS = 512
 RUN_CANCEL_POLL_SECONDS = 0.2
 SUPPORTED_RUN_TYPES = {"chat", "resume", "subagent"}
+MAX_INTERRUPT_QUESTIONS = 5
+MAX_INTERRUPT_OPTIONS = 12
+MAX_INTERRUPT_TEXT_CHARS = 1000
 
 
 class RetryableRunError(Exception):
@@ -165,6 +169,58 @@ async def persist_execution_trace(run_id: str, accumulator: ProgressAccumulator)
         await AgentRunRepository(db).set_execution_trace(run_id, accumulator.snapshot())
         await db.commit()
     accumulator.dirty = False
+
+
+def _safe_interrupt_snapshot(chunk: object) -> dict:
+    """Keep only bounded, user-facing clarification fields."""
+    if not isinstance(chunk, dict):
+        return {}
+    raw_questions = chunk.get("questions")
+    normalized = normalize_questions(raw_questions)[:MAX_INTERRUPT_QUESTIONS]
+    if not normalized:
+        return {}
+
+    source_questions = raw_questions if isinstance(raw_questions, list) else []
+    source_by_id = {
+        str(source.get("question_id") or source.get("questionId") or f"q-{index + 1}").strip(): source
+        for index, source in enumerate(source_questions)
+        if isinstance(source, dict)
+    }
+    questions: list[dict] = []
+    for index, question in enumerate(normalized):
+        question_id = str(question.get("question_id") or f"q-{index + 1}")[:128]
+        source = source_by_id.get(question_id, {})
+        safe_question = {
+            "question_id": question_id,
+            "question": str(question.get("question") or "")[:MAX_INTERRUPT_TEXT_CHARS],
+            "options": [
+                {
+                    "value": str(option.get("value") or "")[:256],
+                    "label": str(option.get("label") or "")[:256],
+                }
+                for option in (question.get("options") or [])[:MAX_INTERRUPT_OPTIONS]
+                if isinstance(option, dict) and (option.get("value") or option.get("label"))
+            ],
+            "multi_select": bool(question.get("multi_select", False)),
+            "allow_other": bool(question.get("allow_other", True)),
+            "allow_skip": source.get("allow_skip", source.get("allowSkip", True)) is not False,
+        }
+        if isinstance(question.get("operation"), str) and question["operation"].strip():
+            safe_question["operation"] = question["operation"].strip()[:128]
+        questions.append(safe_question)
+    return {"questions": questions, "source": "ask_user_question"}
+
+
+async def persist_interrupt_snapshot(run_id: str, chunk: object) -> None:
+    """Persist the current clarification batch for replay-independent resume."""
+    snapshot = _safe_interrupt_snapshot(chunk)
+    if not snapshot:
+        return
+    async with pg_manager.get_async_session_context() as db:
+        if not hasattr(db, "execute"):
+            return
+        await AgentRunRepository(db).set_interrupt_snapshot(run_id, snapshot)
+        await db.commit()
 
 
 async def _load_user(uid: str):
@@ -462,6 +518,7 @@ async def process_agent_run(ctx, run_id: str):
                         await _append_end_event(run_id, "failed", thread_id=thread_id, payload={"chunk": chunk})
                         terminal_set = True
                     elif status == "interrupted":
+                        await persist_interrupt_snapshot(run_id, chunk)
                         status_value = "cancelled" if await _is_cancel_requested(run_id) else "interrupted"
                         if status_value == "cancelled":
                             trace.finish("CANCELLED")
@@ -478,6 +535,7 @@ async def process_agent_run(ctx, run_id: str):
                         await _append_end_event(run_id, status_value, thread_id=thread_id, payload={"chunk": chunk})
                         terminal_set = True
                     elif status in {"ask_user_question_required", "human_approval_required"}:
+                        await persist_interrupt_snapshot(run_id, chunk)
                         questions = chunk.get("questions") if isinstance(chunk, dict) else None
                         first_question = ""
                         if isinstance(questions, list) and questions:

@@ -16,6 +16,7 @@ from yuxi.product_chat.schemas import (
     MessageFeedbackResponse,
     MessageResponse,
     ProductUserResponse,
+    ResumeRunRequest,
     SendMessageRequest,
     SessionResponse,
 )
@@ -259,6 +260,21 @@ def test_product_request_schemas_reject_extra_fields_and_enforce_message_length(
     assert MessageFeedbackRequest(rating=None).rating is None
     with pytest.raises(ValidationError):
         MessageFeedbackRequest(rating="OTHER")
+
+    # The browser includes product-facing context when continuing a
+    # clarification.  Yuxi only consumes ``answer``, but the fields must be
+    # accepted at this strict API boundary so the request is not rejected as
+    # an invalid parameter before LangGraph receives it.
+    resume = ResumeRunRequest.model_validate({
+        "answer": "客户是轨道交通集团",
+        "questionId": "SOLUTION_CONTEXT",
+        "action": "answer",
+        "requestId": "resume-1",
+    })
+    assert resume.answer == "客户是轨道交通集团"
+    assert resume.question_id == "SOLUTION_CONTEXT"
+    assert resume.action == "answer"
+    assert resume.model_dump(by_alias=True)["questionId"] == "SOLUTION_CONTEXT"
 
 
 def test_product_response_contract_uses_literals_and_string_timestamps():

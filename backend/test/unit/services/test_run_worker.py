@@ -419,6 +419,84 @@ def test_chunk_thread_id_uses_fallback_for_unstable_nested_metadata():
     )
 
 
+def test_safe_interrupt_snapshot_keeps_only_bounded_presentation_fields():
+    snapshot = run_worker._safe_interrupt_snapshot(
+        {
+            "questions": [
+                {
+                    "question_id": "INVALID",
+                    "options": [],
+                    "allow_skip": True,
+                },
+                {
+                    "question_id": "SCOPE",
+                    "question": "首期范围？",
+                    "options": [{"value": "mvp", "label": "先做 MVP"}],
+                    "multi_select": False,
+                    "allow_other": True,
+                    "allow_skip": False,
+                    "tool_args": {"secret": "must-not-persist"},
+                }
+            ],
+            "internal_path": "/private/path",
+        }
+    )
+
+    assert snapshot == {
+        "questions": [
+            {
+                "question_id": "SCOPE",
+                "question": "首期范围？",
+                "options": [{"value": "mvp", "label": "先做 MVP"}],
+                "multi_select": False,
+                "allow_other": True,
+                "allow_skip": False,
+            }
+        ],
+        "source": "ask_user_question",
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_agent_run_persists_interrupt_snapshot_before_terminal(monkeypatch: pytest.MonkeyPatch):
+    run_obj = _build_run()
+    _patch_common(monkeypatch, run_obj)
+    snapshots: list[tuple[str, dict]] = []
+    terminal_statuses: list[str] = []
+
+    async def fake_persist_interrupt(run_id: str, chunk: dict):
+        snapshots.append((run_id, chunk))
+
+    async def fake_mark_terminal(run_id: str, status: str, error_type=None, error_message=None):
+        del run_id, error_type, error_message
+        terminal_statuses.append(status)
+
+    async def fake_append_event(*args, **kwargs):
+        del args, kwargs
+
+    def fake_stream_agent_chat(**kwargs):
+        del kwargs
+        return _BytesAsyncIter(
+            [
+                b'{"status":"ask_user_question_required","questions":'
+                b'[{"question_id":"SCOPE","question":"scope?",'
+                b'"options":[{"value":"mvp","label":"MVP"}]}]}\n'
+            ]
+        )
+
+    monkeypatch.setattr(run_worker, "persist_interrupt_snapshot", fake_persist_interrupt)
+    monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
+    monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
+    monkeypatch.setattr(run_worker, "stream_agent_chat", fake_stream_agent_chat)
+
+    await run_worker.process_agent_run({"job_try": 1}, "run-1")
+
+    assert len(snapshots) == 1
+    assert snapshots[0][0] == "run-1"
+    assert snapshots[0][1]["questions"][0]["question_id"] == "SCOPE"
+    assert terminal_statuses == ["interrupted"]
+
+
 @pytest.mark.asyncio
 async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.MonkeyPatch):
     calls: list[str] = []

@@ -1543,3 +1543,43 @@ def test_compact_stream_chunk_retains_compression_field():
 
     assert compact["status"] == "context_compression"
     assert compact["compression"] == {"type": "yuxi.context_compression", "status": "started"}
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_view_exposes_persisted_interrupt_snapshot(monkeypatch: pytest.MonkeyPatch):
+    snapshot = {
+        "questions": [
+            {"question_id": "SCOPE", "question": "首期范围？"},
+            {"question_id": "DEPLOYMENT", "question": "部署方式？"},
+        ],
+        "source": "ask_user_question",
+    }
+    run = SimpleNamespace(
+        id="run-1",
+        input_message_id=None,
+        input_payload={"model_spec": "provider:model", "interrupt_snapshot": snapshot},
+        to_dict=lambda: {
+            "id": "run-1",
+            "status": "interrupted",
+            "input_payload": {"model_spec": "provider:model", "interrupt_snapshot": snapshot},
+        },
+    )
+
+    class FakeRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_run_for_user(self, run_id, uid):
+            assert run_id == "run-1"
+            assert uid == "user-1"
+            return run
+
+    monkeypatch.setattr(agent_run_service, "AgentRunRepository", FakeRepository)
+
+    result = await agent_run_service.get_agent_run_view(
+        run_id="run-1",
+        current_uid="user-1",
+        db=object(),
+    )
+
+    assert result["run"]["interrupt"] == snapshot

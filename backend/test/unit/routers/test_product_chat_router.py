@@ -60,6 +60,367 @@ async def test_solution_context_replays_multi_step_resume_chain(monkeypatch):
     assert request.content == "设计智慧运维方案\n\n补充信息：\n客户是轨交集团\n预算为 30 万"
 
 
+@pytest.mark.asyncio
+async def test_solution_context_humanizes_legacy_resume_option_ids(monkeypatch):
+    """Old resume rows without display metadata must not leak option ids."""
+    runs = {
+        "RUN-1": {
+            "run_type": "resume",
+            "created_by_run_id": "RUN-0",
+            "input_content": '"CONFIRMED"',
+        },
+        "RUN-0": {
+            "run_type": "chat",
+            "conversation_thread_id": "product-CONV-1",
+            "request_id": "REQ-1",
+            "input_content": "设计投标方案",
+            "input_metadata": {
+                "agent_invocation_meta": {
+                    "product_conversation_id": "CONV-1",
+                },
+            },
+        },
+    }
+
+    async def fake_get_agent_run_view(*, run_id, current_uid, db):
+        return {"run": runs[run_id]}
+
+    monkeypatch.setattr(product_chat_router.pg_manager, "get_async_session_context", lambda: _SessionContext())
+    monkeypatch.setattr(product_chat_router, "get_agent_run_view", fake_get_agent_run_view)
+
+    _conversation_id, request = await product_chat_router._solution_context_for_run(
+        run_id="RUN-1",
+        current_user=SimpleNamespace(uid="USER-1"),
+    )
+
+    assert request.content == "设计投标方案\n\n补充信息：\n已确定"
+
+
+def test_resume_display_answer_humanizes_case_variants_without_rewriting_prose():
+    confirmed = product_chat_router.ResumeRunRequest.model_validate(
+        {"answer": "CONFIRMED", "questionId": "SCOPE"}
+    )
+    assert product_chat_router._resume_display_answer(confirmed, []) == "已确定"
+
+    prose = product_chat_router.ResumeRunRequest.model_validate(
+        {"answer": "please use admin for this area", "questionId": "SCOPE"}
+    )
+    assert product_chat_router._resume_display_answer(prose, []) == "please use admin for this area"
+
+    replayed = product_chat_router._resume_answer_text('{"SCOPE":"CONFIRMED","DEPLOYMENT":"PRIVATE"}')
+    assert replayed == "SCOPE：已确定\nDEPLOYMENT：PRIVATE"
+
+
+def test_legacy_draft_open_questions_are_replayed_as_a_question_batch():
+    questions = product_chat_router._draft_questions_for_resume(SimpleNamespace(
+        payload={
+            "openQuestions": [
+                "本次是展示型小程序，还是必须支持完整线上销售？",
+                {"id": "DEPLOYMENT", "question": "方案采用哪种部署方式？"},
+            ]
+        }
+    ))
+
+    assert [item["questionId"] for item in questions] == ["OPEN_QUESTION_1", "DEPLOYMENT"]
+    assert questions[0]["options"]
+    assert questions[1]["options"]
+    assert [item["position"] for item in questions] == [1, 2]
+
+
+def test_blocked_legacy_draft_is_repaired_when_parser_derives_questions():
+    """A blocked quality state must not hide a newly recoverable question batch."""
+    draft = SimpleNamespace(
+        status="BLOCKED",
+        payload={"openQuestions": ["商城经营模式是什么？"]},
+    )
+    payload = product_chat_router.extract_solution_payload({
+        "title": "商城方案",
+        "executive_summary": "方案摘要",
+        "sections": [],
+        "open_questions": ["商城经营模式是什么？"],
+    })
+
+    assert payload.clarification_questions
+    assert product_chat_router._blocked_draft_needs_payload_repair(draft, payload)
+
+
+def test_blocked_draft_repair_does_not_resurrect_resolved_questions():
+    draft = SimpleNamespace(
+        status="BLOCKED",
+        payload={
+            "clarificationQuestionsResolved": True,
+            "openQuestions": ["商城经营模式是什么？"],
+        },
+    )
+    payload = product_chat_router.extract_solution_payload({
+        "open_questions": ["商城经营模式是什么？"],
+    })
+
+    assert payload.clarification_questions
+    assert not product_chat_router._blocked_draft_needs_payload_repair(draft, payload)
+
+
+@pytest.mark.asyncio
+async def test_completed_solution_run_continues_as_new_run(monkeypatch):
+    class FakeDb:
+        async def scalar(self, _query):
+            return None
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return FakeDb()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeRunRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_run_for_user(self, run_id, uid):
+            assert run_id == "RUN-BLOCKED"
+            assert uid == "USER-1"
+            return SimpleNamespace(status="completed", agent_slug="solution-draft")
+
+    async def fake_get_agent_run_view(*, run_id, current_uid, db):
+        return {
+            "run": {
+                "agent_slug": "solution-draft",
+                "input_metadata": {
+                    "agent_invocation_meta": {"skill_id": "SOLUTION_DRAFT"},
+                },
+            }
+        }
+
+    async def fake_solution_context_for_run(*, run_id, current_user):
+        return "CONV-1", product_chat_router.SendMessageRequest.model_validate(
+            {
+                "content": "设计投标方案",
+                "skillId": "SOLUTION_DRAFT",
+                "attachmentIds": ["ATT-1"],
+                "requestId": "old-request",
+            }
+        )
+
+    captured: dict[str, object] = {}
+
+    async def fake_create_solution_run(*, conversation_id, request, current_user):
+        captured.update(conversation_id=conversation_id, request=request)
+        return {
+            "run_id": "RUN-CONTINUED",
+            "thread_id": "product-CONV-1",
+            "status": "pending",
+            "request_id": request.request_id,
+        }
+
+    monkeypatch.setattr(product_chat_router.pg_manager, "get_async_session_context", lambda: FakeSessionContext())
+    monkeypatch.setattr(product_chat_router, "AgentRunRepository", FakeRunRepository)
+    monkeypatch.setattr(product_chat_router, "get_agent_run_view", fake_get_agent_run_view)
+    monkeypatch.setattr(product_chat_router, "_solution_context_for_run", fake_solution_context_for_run)
+    monkeypatch.setattr(product_chat_router, "_create_solution_run", fake_create_solution_run)
+
+    response = await product_chat_router.resume_product_chat_run(
+        "RUN-BLOCKED",
+        product_chat_router.ResumeRunRequest.model_validate(
+            {
+                "answer": "confirmed",
+                "questionId": "SOLUTION_CONTEXT",
+                "requestId": "resume-1",
+            }
+        ),
+        SimpleNamespace(uid="USER-1"),
+    )
+
+    continued = captured["request"]
+    assert response["run"]["runId"] == "RUN-CONTINUED"
+    assert response["run"]["resumedFromRunId"] == "RUN-BLOCKED"
+    assert continued.content == "设计投标方案\n\n补充信息：\n已确定"
+    assert continued.request_id == "resume-1"
+    assert continued.attachment_ids == ["ATT-1"]
+
+
+@pytest.mark.asyncio
+async def test_completed_solution_run_requires_the_whole_persisted_question_batch(monkeypatch):
+    questions = [
+        {
+            "id": "SCOPE",
+            "question": "本次必须支持完整线上销售吗？",
+            "type": "SINGLE_CHOICE",
+            "options": [{"id": "full", "label": "完整线上销售"}],
+            "allowSkip": True,
+        },
+        {
+            "id": "ADMIN",
+            "question": "是否需要配套运营管理端？",
+            "type": "SINGLE_CHOICE",
+            "options": [{"id": "admin", "label": "需要运营管理端"}],
+            "allowSkip": True,
+        },
+    ]
+
+    class FakeDb:
+        async def scalar(self, _query):
+            return SimpleNamespace(payload={"clarificationQuestions": questions})
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return FakeDb()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeRunRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_run_for_user(self, run_id, uid):
+            return SimpleNamespace(status="completed", agent_slug="solution-draft")
+
+    async def fake_get_agent_run_view(**_kwargs):
+        return {
+            "run": {
+                "agent_slug": "solution-draft",
+                "input_metadata": {
+                    "agent_invocation_meta": {"skill_id": "SOLUTION_DRAFT"},
+                },
+            }
+        }
+
+    async def must_not_continue(**_kwargs):
+        raise AssertionError("partial answers must not create a new solution run")
+
+    monkeypatch.setattr(product_chat_router.pg_manager, "get_async_session_context", lambda: FakeSessionContext())
+    monkeypatch.setattr(product_chat_router, "AgentRunRepository", FakeRunRepository)
+    monkeypatch.setattr(product_chat_router, "get_agent_run_view", fake_get_agent_run_view)
+    monkeypatch.setattr(product_chat_router, "_solution_context_for_run", must_not_continue)
+
+    with pytest.raises(product_chat_router.HTTPException) as exc_info:
+        await product_chat_router.resume_product_chat_run(
+            "RUN-BLOCKED",
+            product_chat_router.ResumeRunRequest.model_validate({
+                "answer": {"SCOPE": "full"},
+                "requestId": "resume-partial",
+            }),
+            SimpleNamespace(uid="USER-1"),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == {
+        "code": "QUESTIONS_INCOMPLETE",
+        "message": "请先完成全部待确认问题，再继续生成方案",
+        "missingQuestionIds": ["ADMIN"],
+        "runId": "RUN-BLOCKED",
+    }
+
+
+@pytest.mark.asyncio
+async def test_completed_solution_run_continues_once_after_a_complete_question_batch(monkeypatch):
+    questions = [
+        {
+            "id": "SCOPE",
+            "question": "本次必须支持完整线上销售吗？",
+            "type": "SINGLE_CHOICE",
+            "options": [{"id": "full", "label": "完整线上销售"}],
+            "allowSkip": True,
+        },
+        {
+            "id": "ADMIN",
+            "question": "是否需要配套运营管理端？",
+            "type": "SINGLE_CHOICE",
+            "options": [{"id": "admin", "label": "需要运营管理端"}],
+            "allowSkip": True,
+        },
+    ]
+
+    class FakeDb:
+        async def scalar(self, _query):
+            return SimpleNamespace(payload={"clarificationQuestions": questions})
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return FakeDb()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeRunRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_run_for_user(self, run_id, uid):
+            return SimpleNamespace(status="completed", agent_slug="solution-draft")
+
+    async def fake_get_agent_run_view(**_kwargs):
+        return {
+            "run": {
+                "agent_slug": "solution-draft",
+                "input_metadata": {
+                    "agent_invocation_meta": {"skill_id": "SOLUTION_DRAFT"},
+                },
+            }
+        }
+
+    async def fake_solution_context_for_run(**_kwargs):
+        return "CONV-1", product_chat_router.SendMessageRequest.model_validate({
+            "content": "设计微信商城方案",
+            "skillId": "SOLUTION_DRAFT",
+            "attachmentIds": [],
+        })
+
+    captured: dict[str, object] = {}
+
+    async def fake_create_solution_run(*, conversation_id, request, current_user):
+        captured.update(conversation_id=conversation_id, request=request)
+        return {
+            "run_id": "RUN-CONTINUED",
+            "thread_id": "product-CONV-1",
+            "status": "pending",
+            "request_id": request.request_id,
+        }
+
+    monkeypatch.setattr(product_chat_router.pg_manager, "get_async_session_context", lambda: FakeSessionContext())
+    monkeypatch.setattr(product_chat_router, "AgentRunRepository", FakeRunRepository)
+    monkeypatch.setattr(product_chat_router, "get_agent_run_view", fake_get_agent_run_view)
+    monkeypatch.setattr(product_chat_router, "_solution_context_for_run", fake_solution_context_for_run)
+    monkeypatch.setattr(product_chat_router, "_create_solution_run", fake_create_solution_run)
+
+    response = await product_chat_router.resume_product_chat_run(
+        "RUN-BLOCKED",
+        product_chat_router.ResumeRunRequest.model_validate({
+            "answer": {
+                "SCOPE": "full",
+                "ADMIN": {"value": "admin", "action": "answer"},
+            },
+            "requestId": "resume-complete",
+        }),
+        SimpleNamespace(uid="USER-1"),
+    )
+
+    continued = captured["request"]
+    assert response["run"]["runId"] == "RUN-CONTINUED"
+    assert continued.content == (
+        "设计微信商城方案\n\n"
+        "补充信息：\n"
+        "以下信息已确认，请勿重复询问：\n"
+        "本次必须支持完整线上销售吗？：完整线上销售\n"
+        "是否需要配套运营管理端？：需要运营管理端"
+    )
+    assert "\nconfirmed" not in continued.content
+    assert continued.request_id == "resume-complete"
+
+
+def test_resume_request_answer_represents_skip_and_structured_values():
+    skip = product_chat_router.ResumeRunRequest.model_validate(
+        {"answer": "", "questionId": "SOLUTION_CONTEXT", "action": "skip"}
+    )
+    assert product_chat_router._resume_request_answer(skip) == "（用户暂不确定）"
+
+    structured = product_chat_router.ResumeRunRequest.model_validate(
+        {"answer": ["轨交", "私有化部署"], "questionId": "SOLUTION_CONTEXT"}
+    )
+    assert product_chat_router._resume_request_answer(structured) == "轨交、私有化部署"
+
+
 def test_solution_progress_events_follow_agent_order_and_do_not_pollute_answer_body():
     state: dict[str, object] = {}
 
@@ -131,6 +492,286 @@ def test_agent_progress_uses_runtime_actions_instead_of_prompt_keywords():
         "stage": "RETRIEVING",
         "message": "正在检索正式知识",
         "delta": "",
+    }
+
+
+def test_agent_progress_preserves_all_interrupt_questions_for_batch_resume():
+    raw = {
+        "payload": {
+            "chunk": {
+                "questions": [
+                    {
+                        "question_id": "SCOPE",
+                        "question": "首期范围？",
+                        "options": [{"value": "MVP", "label": "MVP"}],
+                    },
+                    {
+                        "question_id": "DEPLOYMENT",
+                        "question": "部署方式？",
+                        "options": [{"value": "PRIVATE", "label": "私有化"}],
+                    },
+                ]
+            }
+        }
+    }
+    progress = product_chat_router._agent_progress(
+        f"event: interrupt\ndata: {json.dumps(raw, ensure_ascii=False)}\n\n"
+    )
+    assert progress is not None
+    interrupt = progress["interrupt"]
+    assert interrupt["questionId"] == "SCOPE"
+    assert interrupt["total"] == 2
+    assert [item["questionId"] for item in interrupt["questions"]] == ["SCOPE", "DEPLOYMENT"]
+
+
+def test_agent_progress_parses_real_run_event_envelope_for_interrupt_batch():
+    """Redis/SSE interrupt events are wrapped as envelope -> payload -> chunk."""
+    raw = {
+        "schema_version": 1,
+        "run_id": "RUN-INTERRUPTED",
+        "event": "interrupt",
+        "payload": {
+            "reason": "ask_user_question_required",
+            "chunk": {
+                "status": "ask_user_question_required",
+                "questions": [
+                    {
+                        "question_id": "SCOPE",
+                        "question": "首期范围？",
+                        "options": [
+                            {"value": "mvp", "label": "先做 MVP"},
+                            {"value": "full", "label": "完整建设"},
+                        ],
+                        "allow_other": True,
+                    },
+                    {
+                        "question_id": "DEPLOYMENT",
+                        "question": "部署方式？",
+                        "options": [{"value": "private", "label": "私有化部署"}],
+                        "allow_skip": False,
+                    },
+                ],
+            },
+        },
+    }
+
+    progress = product_chat_router._agent_progress(
+        f"event: interrupt\ndata: {json.dumps(raw, ensure_ascii=False)}\n\n"
+    )
+
+    assert progress is not None
+    interrupt = progress["interrupt"]
+    assert interrupt["questionId"] == "SCOPE"
+    assert interrupt["questions"][0]["options"] == [
+        {"id": "mvp", "label": "先做 MVP"},
+        {"id": "full", "label": "完整建设"},
+    ]
+    assert interrupt["questions"][1]["allowSkip"] is False
+
+
+def test_agent_progress_maps_allow_skip_independently_from_allow_other():
+    raw = {
+        "payload": {
+            "chunk": {
+                "questions": [
+                    {
+                        "question_id": "REQUIRED",
+                        "question": "必答问题",
+                        "options": ["A"],
+                        "allow_other": False,
+                        "allow_skip": True,
+                    },
+                    {
+                        "question_id": "NO_SKIP",
+                        "question": "不可跳过问题",
+                        "options": ["B"],
+                        "allow_other": True,
+                        "allow_skip": False,
+                    },
+                ]
+            }
+        }
+    }
+    progress = product_chat_router._agent_progress(
+        f"event: interrupt\ndata: {json.dumps(raw, ensure_ascii=False)}\n\n"
+    )
+    assert progress is not None
+    questions = progress["interrupt"]["questions"]
+    assert questions[0]["allowSkip"] is True
+    assert questions[1]["allowSkip"] is False
+
+
+@pytest.mark.asyncio
+async def test_interrupt_questions_prefers_latest_complete_batch_over_stale_snapshot(monkeypatch):
+    """A replayed retry must not resurrect the first/stale question only."""
+    events = [
+        'event: interrupt\ndata: ' + json.dumps({
+            "payload": {"chunk": {"questions": [
+                {"question_id": "SCOPE", "question": "首期范围？"},
+                {"question_id": "DEPLOYMENT", "question": "部署方式？"},
+            ]}},
+        }, ensure_ascii=False) + '\n\n',
+        # A later retry may contain a truncated single-question copy.  Keep
+        # the complete two-question batch instead of replacing it.
+        'event: interrupt\ndata: ' + json.dumps({
+            "payload": {"chunk": {"questions": [
+                {"question_id": "SCOPE", "question": "首期范围？"},
+            ]}},
+        }, ensure_ascii=False) + '\n\n',
+        # A same-size later batch is the authoritative current snapshot.
+        'event: interrupt\ndata: ' + json.dumps({
+            "payload": {"chunk": {"questions": [
+                {"question_id": "SCOPE", "question": "首期范围（请确认）？"},
+                {"question_id": "DEPLOYMENT", "question": "部署方式？"},
+            ]}},
+        }, ensure_ascii=False) + '\n\n',
+    ]
+
+    async def fake_stream_agent_run_events(**kwargs):
+        for event in events:
+            yield event
+
+    monkeypatch.setattr(product_chat_router, "stream_agent_run_events", fake_stream_agent_run_events)
+
+    questions = await product_chat_router._interrupt_questions_for_run(
+        "RUN-INTERRUPTED",
+        SimpleNamespace(uid="USER-1"),
+        {
+            # The persisted DTO can still contain the old first question.
+            "interrupt": {"questionId": "SCOPE", "question": "首期范围？"},
+        },
+    )
+
+    assert [item["questionId"] for item in questions] == ["SCOPE", "DEPLOYMENT"]
+    assert questions[0]["question"] == "首期范围（请确认）？"
+    assert [item["position"] for item in questions] == [1, 2]
+    assert [item["total"] for item in questions] == [2, 2]
+
+
+@pytest.mark.asyncio
+async def test_interrupt_questions_deduplicates_same_question_id_and_text(monkeypatch):
+    async def fake_stream_agent_run_events(**kwargs):
+        yield (
+            'event: interrupt\ndata: '
+            + json.dumps({
+                "payload": {"chunk": {"questions": [
+                    {"question_id": "SCOPE", "question": "首期范围？"},
+                    {"question_id": "SCOPE", "question": "首期范围？"},
+                    {"question_id": "DEPLOYMENT", "question": "部署方式？"},
+                ]}},
+            }, ensure_ascii=False)
+            + '\n\n'
+        )
+
+    monkeypatch.setattr(product_chat_router, "stream_agent_run_events", fake_stream_agent_run_events)
+
+    questions = await product_chat_router._interrupt_questions_for_run(
+        "RUN-INTERRUPTED",
+        SimpleNamespace(uid="USER-1"),
+        {},
+    )
+
+    assert [item["questionId"] for item in questions] == ["SCOPE", "DEPLOYMENT"]
+
+
+@pytest.mark.asyncio
+async def test_interrupt_questions_falls_back_to_persisted_snapshot_when_redis_is_empty(monkeypatch):
+    async def empty_stream(**kwargs):
+        del kwargs
+        if False:
+            yield ""
+
+    monkeypatch.setattr(product_chat_router, "stream_agent_run_events", empty_stream)
+
+    questions = await product_chat_router._interrupt_questions_for_run(
+        "RUN-INTERRUPTED",
+        SimpleNamespace(uid="USER-1"),
+        {
+            "interrupt": {
+                "source": "ask_user_question",
+                "questions": [
+                    {"question_id": "SCOPE", "question": "首期范围？"},
+                    {"question_id": "DEPLOYMENT", "question": "部署方式？"},
+                ],
+            }
+        },
+    )
+
+    assert [item["questionId"] for item in questions] == ["SCOPE", "DEPLOYMENT"]
+    partial = product_chat_router.ResumeRunRequest.model_validate({"answer": {"SCOPE": "MVP"}})
+    with pytest.raises(product_chat_router.HTTPException) as exc_info:
+        product_chat_router._validated_resume_answer(partial, questions, run_id="RUN-INTERRUPTED")
+    assert exc_info.value.detail["code"] == "QUESTIONS_INCOMPLETE"
+    assert exc_info.value.detail["missingQuestionIds"] == ["DEPLOYMENT"]
+
+
+@pytest.mark.asyncio
+async def test_product_run_dto_and_sse_restore_persisted_interrupt_when_redis_is_empty(monkeypatch):
+    snapshot = {
+        "source": "ask_user_question",
+        "questions": [
+            {"question_id": "SCOPE", "question": "首期范围？"},
+            {"question_id": "DEPLOYMENT", "question": "部署方式？"},
+        ],
+    }
+
+    async def fake_get_agent_run_view(**kwargs):
+        assert kwargs["run_id"] == "RUN-INTERRUPTED"
+        return {
+            "run": {
+                "id": "RUN-INTERRUPTED",
+                "conversation_thread_id": "product-CONV-1",
+                "status": "interrupted",
+                "request_id": "REQ-1",
+                "execution_trace": {},
+                "interrupt": snapshot,
+            }
+        }
+
+    async def empty_stream(**kwargs):
+        del kwargs
+        if False:
+            yield ""
+
+    monkeypatch.setattr(product_chat_router.pg_manager, "get_async_session_context", lambda: _SessionContext())
+    monkeypatch.setattr(product_chat_router, "get_agent_run_view", fake_get_agent_run_view)
+    monkeypatch.setattr(product_chat_router, "stream_agent_run_events", empty_stream)
+
+    current_user = SimpleNamespace(uid="USER-1")
+    dto = await product_chat_router.get_product_chat_run("RUN-INTERRUPTED", current_user)
+    assert dto["run"]["interrupt"] == snapshot
+
+    response = await product_chat_router.stream_product_chat_run_events("RUN-INTERRUPTED", current_user)
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+    body = "".join(chunks)
+
+    assert "event: interrupt" in body
+    assert '"question_id": "SCOPE"' in body
+    assert '"question_id": "DEPLOYMENT"' in body
+    assert "event: draft" not in body
+
+
+def test_validated_resume_answer_requires_all_interrupt_questions():
+    questions = [
+        {"questionId": "SCOPE", "allowSkip": True},
+        {"questionId": "DEPLOYMENT", "allowSkip": True},
+    ]
+    partial = product_chat_router.ResumeRunRequest.model_validate({"answer": {"SCOPE": "MVP"}})
+    with pytest.raises(Exception) as exc_info:
+        product_chat_router._validated_resume_answer(partial, questions)
+    error = exc_info.value
+    assert getattr(error, "status_code", None) == 400
+    assert error.detail["code"] == "QUESTIONS_INCOMPLETE"
+    assert error.detail["missingQuestionIds"] == ["DEPLOYMENT"]
+
+    complete = product_chat_router.ResumeRunRequest.model_validate({
+        "answer": {"SCOPE": "MVP", "DEPLOYMENT": {"value": "PRIVATE", "action": "answer"}},
+    })
+    assert product_chat_router._validated_resume_answer(complete, questions) == {
+        "SCOPE": "MVP",
+        "DEPLOYMENT": "PRIVATE",
     }
 
 

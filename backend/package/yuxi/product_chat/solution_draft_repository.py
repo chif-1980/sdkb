@@ -112,6 +112,12 @@ class SolutionDraftRepository:
             return draft
 
         data = payload.as_json()
+        # A conversation can be reloaded several times while a legacy run is
+        # being repaired.  Do not append an identical immutable version on
+        # every GET; besides creating noisy history this used to make a stale
+        # clarification card appear to change versions without any user edit.
+        if data == dict(draft.payload or {}):
+            return draft
         next_version = int(draft.current_version or 0) + 1
         draft.current_version = next_version
         draft.status = payload.quality.status.value if payload.quality else "BLOCKED"

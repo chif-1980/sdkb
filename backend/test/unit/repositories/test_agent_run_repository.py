@@ -88,3 +88,30 @@ async def test_get_subagent_run_for_creator_returns_none_for_relation_mismatch(s
     )
 
     assert result is None
+
+
+async def test_set_interrupt_snapshot_preserves_existing_input_payload(session):
+    run = AgentRun(
+        id="run-interrupted",
+        conversation_thread_id="thread-interrupted",
+        agent_slug="solution-draft",
+        uid="user-1",
+        status="running",
+        request_id="request-interrupted",
+        run_type="chat",
+        input_payload={"model_spec": "provider:model"},
+    )
+    session.add(run)
+    await session.commit()
+
+    snapshot = {
+        "questions": [{"question_id": "SCOPE", "question": "首期范围？"}],
+        "source": "ask_user_question",
+    }
+    await AgentRunRepository(session).set_interrupt_snapshot(run.id, snapshot)
+    await session.commit()
+
+    assert run.input_payload == {
+        "model_spec": "provider:model",
+        "interrupt_snapshot": snapshot,
+    }
