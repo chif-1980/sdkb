@@ -99,6 +99,17 @@ def _excerpt(content: str, limit: int = 420) -> str:
     return cleaned if len(cleaned) <= limit else f"{cleaned[:limit].rstrip()}…"
 
 
+def _is_decorative_only(content: str) -> bool:
+    """Exclude image-only fragments whose OCR is just isolated icon letters."""
+    text = (content or "").strip()
+    if not text or not re.search(r"!\[[^]]*\]\([^)]*\)", text):
+        return False
+    remainder = re.sub(r"!\[[^]]*\]\([^)]*\)", "", text)
+    remainder = re.sub(r"图片文字\s*[:：]?", "", remainder)
+    tokens = re.findall(r"[A-Za-z0-9一-龥]+", remainder)
+    return bool(tokens) and len(tokens) <= 3 and all(len(token) == 1 for token in tokens)
+
+
 def _passages(content: str, *, limit: int = 160) -> list[str]:
     passages: list[str] = []
     for block in re.split(r"\n+|(?<=[。！？!?])", content or ""):
@@ -651,10 +662,14 @@ class DuplicateKnowledgeService:
         threshold = 0.94 if relation.relation_type == CrossDocumentRelationType.EXACT_DUPLICATE else 0.72
         candidates = []
         for source_chunk in source_chunks:
+            if _is_decorative_only(source_chunk.content):
+                continue
             source_normalized = _normalize_content(source_chunk.content)
             if len(source_normalized) < MIN_FRAGMENT_LENGTH:
                 continue
             for target_chunk in target_chunks:
+                if _is_decorative_only(target_chunk.content):
+                    continue
                 target_normalized = _normalize_content(target_chunk.content)
                 if len(target_normalized) < MIN_FRAGMENT_LENGTH:
                     continue

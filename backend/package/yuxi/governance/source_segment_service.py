@@ -274,10 +274,13 @@ def _split_ppt_groups(text: str) -> list[StructuralBlock]:
             current = []
     if current:
         groups.append("\n".join(current))
+    # Docling 的 PPTX Markdown 不保证每张幻灯片都有明确分隔标记；此前
+    # 用“图片出现次数”推导 slide 编号，会把图片序号误报成不存在的页码。
+    # 在没有可靠页码时保留片段类型，但不伪造 slide 定位。
     return [
         block
-        for slide, group in enumerate(groups, start=1)
-        for block in _generic_blocks(group, base_locator={"slide": slide}, default_type="slide")
+        for group in groups
+        for block in _generic_blocks(group, base_locator={}, default_type="slide")
     ]
 
 
