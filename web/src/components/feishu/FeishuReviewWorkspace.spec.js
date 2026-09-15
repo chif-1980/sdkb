@@ -1028,7 +1028,13 @@ describe('FeishuReviewWorkspace', () => {
     expect(message.success).toHaveBeenCalledWith('版式编辑草稿已保存，飞书原文未被修改')
   })
 
-  it('点击 Word 知识单元时按来源片段切页并高亮对应内容块', async () => {
+  it.each([
+    ['completed', '待确认纳入', '自动检查已完成，系统建议纳入；尚未提交审核决定。'],
+    ['queued', '等待自动检查', '等待不代表已发现内容风险'],
+    ['running', '自动检查中', '检查结束后再确认审核建议'],
+    ['failed', '自动检查失败', '检查未成功完成'],
+    [undefined, '检查状态未知', '尚未取得自动检查状态']
+  ])('Word 待确认原因与原文定位同步：%s', async (comparisonStatus, expectedTitle, expectedReason) => {
     const documentSummary = {
       ...packages[0],
       package_id: 'package-docx-unit-linkage',
@@ -1054,6 +1060,9 @@ describe('FeishuReviewWorkspace', () => {
           subject_locator: { source_segment_ids: ['seg-page-1'] },
           knowledge_unit: true,
           content: '第一页条款内容',
+          relation_ids: ['resolved-document-relation'],
+          comparison_status: comparisonStatus,
+          recommendation_reason: '未发现冲突或解析异常，建议纳入知识库。',
           source_segment_ids: ['seg-page-1'],
           change_type: 'NEW',
           recommended_outcome: 'PUBLISH',
@@ -1068,10 +1077,13 @@ describe('FeishuReviewWorkspace', () => {
           subject_locator: { source_segment_ids: ['seg-page-2'] },
           knowledge_unit: true,
           content: '第二页条款内容',
+          comparison_status: 'completed',
+          recommendation_reason: '发现部分内容重叠，需要核对重叠范围后决定。',
+          problem_tags: ['OVERLAP'],
           source_segment_ids: ['seg-page-2'],
           change_type: 'NEW',
           recommended_outcome: 'PUBLISH',
-          manual_review_required: false
+          manual_review_required: true
         }
       ]
     }
@@ -1101,8 +1113,9 @@ describe('FeishuReviewWorkspace', () => {
               label: '第 1 页',
               aspect_ratio: 0.707,
               render_mode: 'image',
-              block_count: 1,
+              block_count: 2,
               blocks: [
+                { block_id: 'stale-block', content: '文件。', source_segment_ids: ['seg-page-2'], left: 1, top: 1, width: 5, height: 5 },
                 {
                   block_id: 'page-1-block-1',
                   content: '第一页条款内容',
@@ -1128,7 +1141,7 @@ describe('FeishuReviewWorkspace', () => {
                   top: 20,
                   width: 40,
                   height: 8,
-                  source_segment_ids: ['seg-page-2']
+                  source_segment_ids: []
                 }
               ]
             }
@@ -1151,10 +1164,23 @@ describe('FeishuReviewWorkspace', () => {
     const wrapper = mountWorkspace()
     await flushPromises()
 
+    await wrapper.get('.layout-sidebar-list-toggle').trigger('click')
+    await wrapper.findAll('.layout-sidebar-unit-list button')[0].trigger('click')
+    await flushPromises()
+    if (wrapper.find('.layout-sidebar-unit-list').exists()) {
+      await wrapper.get('.layout-sidebar-list-toggle').trigger('click')
+    }
+
     expect(wrapper.get('.document-layout-page-strip button.active').text()).toContain('第 1 页')
     expect(wrapper.get('.document-layout-page-strip button.pending-target').text()).toContain('第 1 页')
     expect(wrapper.get('.document-layout-page-strip button.pending-target').classes()).toContain('active')
     expect(wrapper.get('.document-layout-block.active').attributes('title')).toBe('第一页条款内容')
+    const explanation = wrapper.get('[aria-label="当前单元待处理原因"]')
+    expect(explanation.text()).toContain('第一页条款内容')
+    expect(explanation.text()).toContain(expectedTitle)
+    expect(explanation.text()).toContain(expectedReason)
+    expect(wrapper.get('.document-layout-block.unit-target').text()).toContain('待确认')
+
     await wrapper.get('.layout-sidebar-list-toggle').trigger('click')
     await wrapper.findAll('.layout-sidebar-unit-list button')[1].trigger('click')
     await flushPromises()
@@ -1163,6 +1189,17 @@ describe('FeishuReviewWorkspace', () => {
     expect(wrapper.get('.document-layout-page-strip button.pending-target').text()).toContain('第 1 页')
     expect(wrapper.get('.document-layout-page-strip button.pending-target').classes()).not.toContain('active')
     expect(wrapper.get('.document-layout-block.active').attributes('title')).toBe('第二页条款内容')
+    expect(explanation.text()).toContain('第二页条款内容')
+    expect(explanation.text()).toContain('需要核对内容重叠')
+    expect(explanation.text()).toContain('发现部分内容重叠，需要核对重叠范围后决定。')
+    expect(explanation.text()).not.toContain('第一页条款内容')
+    const target = wrapper.get('.document-layout-block.unit-target').element
+    target.scrollIntoView = vi.fn()
+    await explanation.findAll('button')[0].trigger('click')
+    await flushPromises()
+    expect(target.scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ block: 'center' }))
+
+
     expect(wrapper.get('.layout-sidebar-facts').text()).toContain('2 / 2')
     expect(apiAdminGet).toHaveBeenCalledWith(
       '/api/governance/review-packages/package-docx-unit-linkage/layout/pages/2',
@@ -2364,6 +2401,53 @@ describe('FeishuReviewWorkspace', () => {
     ).toBe(true)
   })
 
+  it.each([null, 2])('旧片段页码不能替代已核验的原文页码：%s', async (locatedPage) => {
+    const detail = duplicatePackageDetail()
+    const candidates = duplicateCandidates()
+    candidates.fragment_matches[0].source_locator = { slide: 55 }
+    candidates.fragment_matches[0].target_locator = { slide: 20 }
+    const pages = [1, 2].map((page_number) => ({
+      page_number, render_mode: 'markdown', blocks: []
+    }))
+    apiAdminGet.mockImplementation((url) => {
+      if (url.startsWith('/api/governance/review-packages?'))
+        return Promise.resolve({ items: [detail], total: 1, counts: { mine: 1 } })
+      if (url === '/api/governance/review-packages/package-duplicate')
+        return Promise.resolve(detail)
+      if (url.endsWith('/duplicate-candidates')) return Promise.resolve(candidates)
+      if (url.endsWith('/layout-comparison')) return Promise.resolve({
+        supported: true,
+        relation_id: 'relation-duplicate',
+        source: { title: '来源一.pptx', pages },
+        target: { title: '来源二.pptx', pages },
+        matches: [{
+          ...candidates.fragment_matches[0],
+          source_page_number: locatedPage,
+          target_page_number: locatedPage,
+          source_block_ids: [], target_block_ids: []
+        }]
+      })
+      if (url === '/api/governance/reviewers') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    await wrapper.findAll('.evidence-tabs button')
+      .find((button) => button.text().includes('跨文档证据')).trigger('click')
+    await flushPromises()
+    const evidence = wrapper.get('.duplicate-governance').text()
+    expect(evidence).not.toContain('第 55 页')
+    expect(evidence).not.toContain('第 20 页')
+    if (locatedPage) {
+      expect(evidence).toContain('第 2 页幻灯片')
+    } else {
+      expect(evidence).toContain('尚未定位到原文')
+      expect(evidence).not.toContain('第 2 页幻灯片')
+      expect(wrapper.text()).toContain('页面仅供浏览')
+    }
+    wrapper.unmount()
+  })
+
   it('Word 与 Excel 对比时完整展示证据单元格并允许滚动查看自然宽度表格', async () => {
     const detail = duplicatePackageDetail()
     Object.defineProperty(URL, 'createObjectURL', {
@@ -2766,6 +2850,104 @@ describe('FeishuReviewWorkspace', () => {
       expect.objectContaining({ strategy: 'KEEP_SEPARATE' })
     )
     expect(wrapper.get('.duplicate-decision-result').text()).toContain('已决定分别保留')
+  })
+
+  it('显示跨文档检查等待和运行数量，刷新后清除已完成提醒', async () => {
+    let detail = knowledgeUnitPackageDetail()
+    detail.items[0].comparison_status = 'queued'
+    detail.items[0].manual_review_required = true
+    detail.items[1].comparison_status = 'running'
+    const originalGet = apiAdminGet.getMockImplementation()
+    apiAdminGet.mockImplementation((url) =>
+      url === '/api/governance/review-packages/package-first'
+        ? Promise.resolve(detail)
+        : originalGet(url)
+    )
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    const notice = wrapper.get('[aria-label="自动检查状态"]')
+    expect(notice.text()).toContain('跨文档检查进行中')
+    expect(notice.text()).toContain('等待 1 个，检查中 1 个')
+
+    detail = knowledgeUnitPackageDetail()
+    await notice.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[aria-label="自动检查状态"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('自动更新检查状态，编辑时暂停且卸载后停止请求', async () => {
+    vi.useFakeTimers()
+    let wrapper
+    try {
+      let detail = knowledgeUnitPackageDetail()
+      detail.items[0].comparison_status = 'queued'
+      const originalGet = apiAdminGet.getMockImplementation()
+      apiAdminGet.mockImplementation((url) =>
+        url === '/api/governance/review-packages/package-first'
+          ? Promise.resolve(detail)
+          : originalGet(url)
+      )
+      wrapper = mountWorkspace()
+      await flushPromises()
+      detail = knowledgeUnitPackageDetail()
+      detail.items[0].comparison_status = 'running'
+      await vi.advanceTimersByTimeAsync(10000)
+      await flushPromises()
+      expect(wrapper.get('[aria-label="自动检查状态"]').text()).toContain('检查中 1 个')
+
+      await wrapper.findAll('.record-actions button')
+        .find((button) => button.text().includes('处理当前知识单元')).trigger('click')
+      const countBeforeEdit = apiAdminGet.mock.calls.length
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(apiAdminGet.mock.calls.length).toBe(countBeforeEdit)
+      await wrapper.get('[aria-label="关闭审核处理"]').trigger('click')
+      detail = knowledgeUnitPackageDetail()
+      await vi.advanceTimersByTimeAsync(10000)
+      await flushPromises()
+      expect(wrapper.find('[aria-label="自动检查状态"]').exists()).toBe(false)
+      wrapper.unmount()
+      const countAfterUnmount = apiAdminGet.mock.calls.length
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(apiAdminGet.mock.calls.length).toBe(countAfterUnmount)
+    } finally {
+      if (wrapper?.exists()) wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('区分检查失败、尚未开始和缺失状态，并解释批量审核的等待原因', async () => {
+    const detail = knowledgeUnitPackageDetail()
+    detail.items[0].comparison_status = 'not_started'
+    detail.items[1].comparison_status = 'failed'
+    delete detail.items[2].comparison_status
+    detail.items.forEach((item) => {
+      item.manual_review_required = true
+    })
+    const originalGet = apiAdminGet.getMockImplementation()
+    apiAdminGet.mockImplementation((url) =>
+      url === '/api/governance/review-packages/package-first'
+        ? Promise.resolve(detail)
+        : originalGet(url)
+    )
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    const notice = wrapper.get('[aria-label="自动检查状态"]')
+    expect(notice.text()).toContain('等待跨文档检查')
+    expect(notice.text()).toContain('等待 1 个，检查中 0 个')
+    expect(notice.text()).toContain('1 个知识单元检查失败')
+    await wrapper
+      .findAll('.record-actions button')
+      .find((button) => button.text().includes('整篇批量审核'))
+      .trigger('click')
+    expect(Modal.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('其中 1 个跨文档检查尚未完成')
+      })
+    )
+    wrapper.unmount()
   })
 
   it('知识单元默认展示待处理项并可从顶部批量处理低风险项', async () => {

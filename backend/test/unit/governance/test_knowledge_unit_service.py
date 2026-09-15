@@ -1345,3 +1345,36 @@ async def test_keep_current_rejects_when_counterpart_is_only_a_candidate(unit_re
             ),
             operator_id="admin-a",
         )
+
+
+@pytest.mark.asyncio
+async def test_reprocessing_retires_removed_units_and_pending_reviews(unit_review_session):
+    session = unit_review_session[0]
+    service = KnowledgeUnitService(session)
+    units = await service.ensure_for_version('version-1')
+    assert units
+    for segment in await session.scalars(select(FeishuSourceSegment)):
+        segment.status = 'OBSOLETE'
+    await session.flush()
+    assert await service.ensure_for_version('version-1') == []
+    assert all(unit.status == 'OBSOLETE' for unit in units)
+    items = list(await session.scalars(select(FeishuReviewItem).where(FeishuReviewItem.subject_type == 'KNOWLEDGE_UNIT')))
+    assert items
+    assert all(item.item_status == 'INVALIDATED' for item in items)
+
+
+@pytest.mark.asyncio
+async def test_reprocess_preserves_manual_decisions(unit_review_session):
+    from server.routers.feishu_knowledge_router import FeishuReviewService
+    session, package, _ = unit_review_session
+    version = await session.scalar(select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == 'version-1'))
+    version.source_object_path = 'minio://archive/original.docx'
+    item = await session.scalar(select(FeishuReviewItem).where(FeishuReviewItem.package_id == package.package_id))
+    item.decided_by = 'admin'
+    item.item_status = 'DECIDED'
+    await session.commit()
+    with pytest.raises(ValueError, match='manual decisions'):
+        await FeishuReviewService(session).reprocess('version-1', operator_id='admin')
+    await session.refresh(version)
+    assert version.processing_status == 'awaiting_review'
+    assert version.yuxi_file_id == 'file-1'

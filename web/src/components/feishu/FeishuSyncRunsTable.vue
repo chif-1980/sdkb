@@ -26,8 +26,11 @@
             <span>新增 {{ record.new_count || 0 }}</span>
             <span>变更 {{ record.changed_count || 0 }}</span>
             <span>跳过 {{ record.unchanged_count || 0 }}</span>
+            <span>待加工 {{ record.processing_queued_count || 0 }}</span>
           </div>
           <div class="count-line muted">
+            <span>加工中 {{ record.processing_count || 0 }}</span>
+            <span>待审核 {{ record.awaiting_review_count || 0 }}</span>
             <span>失败 {{ record.failed_count || 0 }}</span>
             <span>失效 {{ record.invalidated_count || 0 }}</span>
             <span>不支持 {{ record.unsupported_count || 0 }}</span>
@@ -89,8 +92,11 @@ function runStatus(value) {
 }
 
 function displayStatus(record) {
-  if (record?.status === 'succeeded' && isActive(record)) {
-    return { label: '资料加工中', color: 'processing' }
+  if (record?.status === 'succeeded' && (record.processing_queued_count || record.processing_count)) {
+    return { label: record.processing_count ? '加工中' : '部分完成', color: 'processing' }
+  }
+  if (record?.status === 'succeeded' && record.awaiting_review_count) {
+    return { label: '待审核', color: 'warning' }
   }
   return runStatus(record?.status)
 }

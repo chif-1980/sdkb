@@ -33,6 +33,13 @@ from yuxi.storage.postgres.models_knowledge import (
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.mark.parametrize("slide", [1, 55])
+async def test_unmatched_legacy_slide_hint_is_not_a_located_page(slide):
+    layout = {"pages": [{"page_number": 1, "blocks": [{"block_id": "end", "content": "谢谢"}]}]}
+    match = {"source_locator": {"slide": slide}, "source_excerpt": "![icon](/minio/public/icon.png)"}
+    assert governance_router_module._comparison_block_ids(layout, match, "source") == (None, [])
+
+
 async def test_comparison_block_ids_falls_back_to_the_page_containing_the_excerpt():
     excerpt = "提供全面的数据分析服务，让用户更方便、快捷、智能的完成日常工作"
     layout = {

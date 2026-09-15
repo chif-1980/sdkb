@@ -67,7 +67,8 @@ services:
     environment:
       <<: *api-worker-env
     # endregion api_envs
-    command: uv run --no-sync --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050 --no-server-header --reload --reload-dir /app/server --reload-dir /app/package
+    # 稳定启动：开发热重载会重复执行 lifespan 初始化，导致 API 长时间不监听端口。
+    command: uv run --no-sync --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050 --no-server-header
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "--fail", "--max-time", "10", "http://localhost:5050/api/system/healthz"]
@@ -283,6 +284,8 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MILVUS_LOG_LEVEL: error
     volumes:
       - ./docker/volumes/milvus/milvus:/var/lib/milvus
@@ -314,7 +317,8 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-yuxi}
       - TZ=${TZ:-Asia/Shanghai}
     volumes:
-      - ./docker/volumes/postgresql:/var/lib/postgresql/data
+      # 使用持久化命名卷，确保重建项目不会切换到空数据库。
+      - knowledgebase-yuxi-postgres-local:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-yuxi} || exit 1"]
       interval: 5s
@@ -412,8 +416,11 @@ services:
 
 volumes:
   nltk_data:
+  knowledgebase-yuxi-postgres-local:
+    name: knowledgebase-yuxi-postgres-local
+    external: true
 
 networks:
   app-network:
-    driver: bridge
     name: ${APP_DOCKER_NETWORK:-yuxi-know_app-network}
+    driver: bridge

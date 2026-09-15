@@ -118,6 +118,27 @@ async def test_governance_domain_defines_stable_public_types():
     assert KnowledgeSourceRole.ALIAS.value == "ALIAS"
 
 
+@pytest.mark.parametrize("status,decision", [("open", None), ("resolved", "USE_SOURCE")])
+async def test_recheck_retires_image_path_overlap_but_preserves_human_decisions(
+    governance_session, status, decision
+):
+    relation = await governance_session.scalar(select(FeishuCrossDocumentRelation))
+    relation.relation_type = "OVERLAP"
+    relation.status = status
+    relation.human_decision = decision
+    await governance_session.commit()
+
+    async def load_content(file_id):
+        return f'![image](/minio/public/kb/kb-images/{file_id}.png "preview.webp")'
+
+    result = await CrossDocumentComparisonService(
+        governance_session, content_loader=load_content
+    ).compare_version("version-current")
+    assert result == []
+    assert relation.status == ("invalidated" if status == "open" else "resolved")
+    assert relation.human_decision == ("NO_TEXT_EVIDENCE" if status == "open" else decision)
+
+
 async def test_content_quality_marks_title_only_material_as_missing():
     assert assess_content(content="# 产品手册", title="产品手册")["has_body"] is False
     assert assess_content(content="# 产品手册\n\n部署步骤如下。", title="产品手册")["has_body"] is True

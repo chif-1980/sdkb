@@ -10,10 +10,13 @@
         </a-tooltip>
       </div>
       <div class="heading-actions">
+        <a-button data-testid="manage-sources" :disabled="sourceActionsLocked" @click="openSourceManager">
+          <BookOpen :size="16" /> 数据源管理
+        </a-button>
         <a-tooltip title="确认当前飞书知识源是否可访问">
           <a-button
             :loading="checkingSource"
-            :disabled="!currentSource || initialLoading"
+            :disabled="!currentSource || sourceActionsLocked"
             @click="checkCurrentSource"
           >
             <Link2 :size="16" />
@@ -24,14 +27,14 @@
           <a-button
             data-testid="scan-incremental"
             :loading="scanningMode === 'incremental'"
-            :disabled="!currentSource || scanLocked || initialLoading"
+            :disabled="!currentSource || scanLocked || initialLoading || !hasFullScan"
             @click="startScan('incremental')"
           >
             <RefreshCw :size="16" />
             增量扫描
           </a-button>
         </a-tooltip>
-        <a-tooltip title="全面校准：重新核对知识空间内的全部资料">
+        <a-tooltip title="全面校准：重新核对当前同步范围内的全部资料">
           <a-button
             data-testid="scan-full"
             type="primary"
@@ -120,7 +123,7 @@
 
           <div v-show="sourceOverviewExpanded" class="source-details" aria-label="数据源详情">
             <div class="source-field source-field-wide">
-              <label>Wiki 根节点</label>
+              <label>飞书知识库链接</label>
               <a
                 v-if="currentSource.wiki_root_url"
                 :href="currentSource.wiki_root_url"
@@ -132,8 +135,8 @@
               <span v-else>{{ currentSource.wiki_root_token || '-' }}</span>
             </div>
             <div class="source-field">
-              <label>目标知识库</label>
-              <strong>{{ currentSource.target_kb_id || '-' }}</strong>
+              <label>同步范围</label>
+              <strong>{{ currentSource.scan_scope === 'space' ? '整个知识空间' : '链接页面及下级内容' }}</strong>
             </div>
             <div class="source-field">
               <label>飞书访问身份</label>
@@ -154,7 +157,7 @@
             :class="{ active: activeModule === 'reviews' }"
             @click="activeModule = 'reviews'"
           >
-            待审核 <span class="governance-count">{{ governanceCounts.reviews }}</span>
+            审核任务 <span class="governance-count">{{ governanceCounts.reviews }}</span>
           </button>
           <button
             type="button"
@@ -186,11 +189,11 @@
             :class="{ active: activeModule === 'materials' }"
             @click="activeModule = 'materials'"
           >
-            资料与扫描
+            资料与扫描 <span class="governance-count">待加工 {{ processingCount }}</span>
           </button>
         </nav>
 
-        <section v-if="activeModule === 'materials'" aria-label="资料与扫描">
+        <section v-if="['materials', 'processing'].includes(activeModule)" aria-label="资料与扫描">
           <div class="workspace-grid">
             <section class="workspace-section tree-section" aria-label="飞书知识目录">
               <div class="section-heading">
@@ -315,8 +318,8 @@
           <section class="workspace-section material-section">
             <div class="section-heading material-heading">
               <div>
-                <h2>素材队列</h2>
-                <p>{{ selectedRunId ? '正在查看所选批次素材' : '显示当前数据源的全部素材版本' }}</p>
+                <h2>{{ activeModule === 'processing' ? '待加工队列' : '素材队列' }}</h2>
+                <p>{{ activeModule === 'processing' ? '显示等待系统自动加工或正在加工的素材' : (selectedRunId ? '正在查看所选批次素材' : '显示当前数据源的全部素材版本') }}</p>
               </div>
               <a-button aria-label="刷新素材" :disabled="initialLoading" @click="loadMaterials">
                 <RefreshCw :size="16" />
@@ -370,12 +373,14 @@
         </section>
 
         <FeishuWorkItemsPanel
+          :key="currentSourceId"
           v-else-if="activeModule === 'work-items'"
           :source-id="currentSourceId"
           @count-change="governanceCounts.workItems = $event"
           @navigate="openWorkItem"
         />
         <FeishuReviewWorkspace
+          :key="currentSourceId"
           v-else-if="activeModule === 'reviews'"
           :source-id="currentSourceId"
           :target-review-id="governanceReviewTarget"
@@ -385,6 +390,7 @@
           @target-consumed="governanceReviewTarget = null"
         />
         <FeishuRelationsPanel
+          :key="currentSourceId"
           v-else-if="activeModule === 'relations'"
           :source-id="currentSourceId"
           :write-disabled="scanInProgress"
@@ -392,6 +398,7 @@
           @open-review="openGovernanceReview"
         />
         <FeishuFormalKnowledgePanel
+          :key="currentSourceId"
           v-else-if="activeModule === 'formal'"
           :source-id="currentSourceId"
           :write-disabled="scanInProgress"
@@ -400,7 +407,11 @@
         />
       </template>
 
-      <a-empty v-else class="empty-source" description="尚未配置飞书知识数据源" />
+      <div v-else class="empty-source">
+        <a-empty description="尚未配置知识数据源" />
+        <p class="empty-source-copy">连接飞书知识库后，即可扫描、加工并审核企业知识。</p>
+        <a-button type="primary" size="large" @click="openAddSource">连接飞书知识库</a-button>
+      </div>
       </a-spin>
     </div>
 
@@ -438,7 +449,7 @@
         <div class="qr-oauth-copy">
           <h3>{{ qrPhase === 'success' ? '授权已完成' : '请使用手机飞书扫码' }}</h3>
           <p v-if="qrPhase === 'success'">正在刷新电脑端的授权身份与知识目录。</p>
-          <p v-else>由能够访问“SD 知识库”的管理员扫码，并在手机上确认授权。</p>
+          <p v-else>请能够访问“{{ currentSource?.name }}”的管理员扫码，并在手机上确认授权。</p>
           <div class="qr-status" :class="`is-${qrPhase}`">
             <CircleCheck v-if="qrPhase === 'success'" :size="16" />
             <RefreshCw v-else-if="qrPhase === 'waiting'" :size="16" />
@@ -449,6 +460,49 @@
           <p class="qr-permission">二维码 5 分钟内有效，仅申请知识库只读访问与自动续期权限。</p>
         </div>
       </div>
+    </a-modal>
+    <a-modal v-model:open="manageDialogOpen" title="知识数据源" :footer="null" :width="560">
+      <div class="source-setup">
+        <label for="source-picker">当前数据源</label>
+        <a-select id="source-picker" data-testid="source-picker" :value="currentSourceId" :disabled="sourceActionsLocked" :options="sources.map(item => ({ value: item.source_id, label: item.name }))" @change="selectSource" />
+        <template v-if="currentSource">
+          <p class="source-link">{{ currentSource.wiki_root_url || currentSource.name }}</p>
+          <p>{{ currentSource.scan_scope === 'space' ? '整个知识空间' : '链接页面及下级内容' }} · {{ oauthStatusLabel }}</p>
+          <p>重新授权会保留该数据源的扫描记录和审核结果。</p>
+          <div class="source-dialog-actions">
+            <a-button :disabled="sourceActionsLocked" @click="authorizeManagedSource('qr')">{{ oauthStatus.authorized ? '重新扫码授权' : '管理员扫码授权' }}</a-button>
+            <a-button :disabled="sourceActionsLocked" @click="authorizeManagedSource('redirect')">浏览器授权</a-button>
+          </div>
+        </template>
+        <a-button type="primary" :disabled="sourceActionsLocked" @click="openAddSource">添加飞书数据源</a-button>
+      </div>
+    </a-modal>
+    <a-modal v-model:open="sourceDialogOpen" title="连接飞书知识库" :width="560" :confirm-loading="savingSource" :ok-button-props="{ disabled: !sourceForm.wiki_root_url.trim() || (useExistingKnowledge && (loadingDatabases || !sourceForm.target_kb_id)) || scanInProgress }" :closable="!savingSource" :mask-closable="!savingSource" :cancel-button-props="{ disabled: savingSource }" @ok="createSource" ok-text="保存并授权" cancel-text="取消">
+      <p class="source-setup-intro">粘贴链接 → 管理员授权 → 检查连接 → 首次全量扫描</p>
+      <a-alert v-if="sourceSetupError" type="error" show-icon :message="sourceSetupError" class="page-alert" />
+      <a-form layout="vertical" :disabled="savingSource">
+        <a-form-item label="飞书知识库链接" required extra="在飞书知识库内打开要同步的页面，复制浏览器地址。">
+          <a-input v-model:value="sourceForm.wiki_root_url" data-testid="source-url" placeholder="https://企业.feishu.cn/wiki/…" :maxlength="1024" />
+        </a-form-item>
+        <a-form-item label="数据源名称（选填）"><a-input v-model:value="sourceForm.name" placeholder="例如：公司制度知识库" :maxlength="255" /></a-form-item>
+        <a-form-item label="同步范围">
+          <a-radio-group v-model:value="sourceForm.scan_scope">
+            <a-radio value="root">链接页面及下级内容</a-radio>
+            <a-radio value="space">整个知识空间</a-radio>
+          </a-radio-group>
+          <p v-if="sourceForm.scan_scope === 'space'" class="source-scope-hint">将读取该页面所属空间的全部目录，需要管理员拥有相应权限。</p>
+        </a-form-item>
+        <a-form-item label="导入到哪个知识库">
+          <p v-if="!useExistingKnowledge" class="source-scope-hint">自动创建同名知识库，授权成功后从飞书读取名称。新知识库默认仅自己可见，可在知识库设置中共享。</p>
+          <a-button type="link" data-testid="toggle-existing-knowledge" :aria-expanded="useExistingKnowledge" @click="toggleExistingKnowledge">{{ useExistingKnowledge ? '改为自动创建同名知识库' : '选择已有知识库' }}</a-button>
+          <template v-if="useExistingKnowledge">
+          <a-select :value="sourceForm.target_kb_id || undefined" @update:value="sourceForm.target_kb_id = $event" data-testid="target-knowledge" :loading="loadingDatabases" placeholder="选择正式知识库" :options="targetDatabases.map(item => ({ value: item.kb_id, label: item.name }))" />
+          <p v-if="!loadingDatabases && !targetDatabases.length" class="source-scope-hint">尚无可写入的知识库，可改为自动创建。</p>
+          <a-button v-if="!loadingDatabases && (!targetDatabases.length || sourceSetupError)" type="link" @click="loadTargetDatabases">刷新知识库列表</a-button>
+          </template>
+        </a-form-item>
+        <p class="source-scope-hint">授权成功后自动检查连接。扫描结果仍需经过现有审核流程，才会成为正式知识。</p>
+      </a-form>
     </a-modal>
   </main>
 </template>
@@ -472,7 +526,7 @@ import QRCode from 'qrcode'
 
 import { feishuKnowledgeApi, MAX_BATCH_SIZE } from '@/apis/feishu_knowledge_api'
 import { governanceApi } from '@/apis/governance_api'
-import { documentApi } from '@/apis/knowledge_api'
+import { databaseApi, documentApi, typeApi } from '@/apis/knowledge_api'
 import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetailDrawer.vue'
 import FeishuMaterialTable from '@/components/feishu/FeishuMaterialTable.vue'
 import FeishuSyncRunsTable from '@/components/feishu/FeishuSyncRunsTable.vue'
@@ -487,11 +541,24 @@ const QR_AUTH_TTL_MS = 5 * 60 * 1000
 const QR_POLL_INTERVAL_MS = 2000
 const TREE_CACHE_KEY = 'feishu-knowledge-tree-cache-v1'
 const TREE_CACHE_TTL_MS = 12 * 60 * 60 * 1000
-const WORKSPACE_CACHE_KEY = 'feishu-knowledge-workspace-cache-v1'
+const WORKSPACE_CACHE_KEY = 'feishu-knowledge-workspace-cache-v2'
+const OAUTH_SOURCE_KEY = 'feishu-knowledge-oauth-source'
 const WORKSPACE_CACHE_FRESH_TTL_MS = 5 * 60 * 1000
 const WORKSPACE_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
 const sources = ref([])
+const sourceDialogOpen = ref(false)
+const savingSource = ref(false)
+const manageDialogOpen = ref(false)
+const loadingDatabases = ref(false)
+const targetDatabases = ref([])
+const useExistingKnowledge = ref(false)
+const sourceSetupError = ref('')
+const sourceForm = reactive({ name: '', wiki_root_url: '', target_kb_id: '', scan_scope: 'root' })
+const connectionState = ref('unchecked')
+const connectionError = ref('')
+const connectionRootTitle = ref('')
+let callbackNeedsCheck = false
 const currentSourceId = ref('')
 const runs = ref([])
 const materials = ref([])
@@ -529,11 +596,15 @@ const materialTableRef = ref(null)
 const activeModule = ref('reviews')
 const sourceOverviewExpanded = ref(false)
 const governanceCounts = reactive({ workItems: 0, reviews: 0, relations: 0, formal: 0 })
+const processingCount = computed(() => materials.value.filter((item) =>
+  ['processing_queued', 'processing', 'parsing', 'chunking', 'embedding'].includes(item.processing_status)
+).length)
 const governanceReviewTarget = ref(null)
 const taskerStore = useTaskerStore()
 let pollTimer = null
 let qrPollTimer = null
 let formalKnowledgeRefreshTimers = []
+let runsRefreshTimer = null
 let qrRequestSeq = 0
 let detailRequestSeq = 0
 let isAlive = true
@@ -624,6 +695,130 @@ const typeOptions = [
 const currentSource = computed(() =>
   sources.value.find((item) => item.source_id === currentSourceId.value)
 )
+async function createSource() {
+  if (savingSource.value || scanInProgress.value) return
+  if (!sourceForm.wiki_root_url.trim() || (useExistingKnowledge.value && !sourceForm.target_kb_id)) {
+    sourceSetupError.value = '请填写飞书知识库链接；导入已有知识库时，请先选择知识库'
+    return
+  }
+  savingSource.value = true
+  sourceSetupError.value = ''
+  try {
+    const created = await feishuKnowledgeApi.createSource({
+      ...sourceForm,
+      target_kb_id: useExistingKnowledge.value ? sourceForm.target_kb_id : null,
+      name: sourceForm.name.trim() || '飞书知识库',
+      enabled: true
+    })
+    sources.value.unshift(created)
+    sourceDialogOpen.value = false
+    await selectSource(created.source_id, true)
+    await startQrOAuth()
+  } catch (error) {
+    sourceSetupError.value = feishuKnowledgeApi.getErrorMessage(error, '添加数据源失败')
+  } finally {
+    savingSource.value = false
+  }
+}
+
+async function loadTargetDatabases() {
+  loadingDatabases.value = true
+  sourceSetupError.value = ''
+  try {
+    const [result, types] = await Promise.all([
+      databaseApi.getDatabases(),
+      typeApi.getKnowledgeBaseTypes()
+    ])
+    targetDatabases.value = (result.databases || []).filter(
+      item => types.kb_types?.[item.kb_type]?.supports_documents
+    )
+    if (!targetDatabases.value.some(item => item.kb_id === sourceForm.target_kb_id)) {
+      sourceForm.target_kb_id = targetDatabases.value.length === 1 ? targetDatabases.value[0].kb_id : ''
+    }
+  } catch (error) {
+    sourceSetupError.value = feishuKnowledgeApi.getErrorMessage(error, '加载正式知识库失败，请重试')
+  } finally {
+    loadingDatabases.value = false
+  }
+}
+
+function openSourceManager() {
+  if (sourceActionsLocked.value) return
+  if (!sources.value.length) return openAddSource()
+  manageDialogOpen.value = true
+}
+
+function openAddSource() {
+  if (sourceActionsLocked.value) return
+  manageDialogOpen.value = false
+  Object.assign(sourceForm, { name: '', wiki_root_url: '', target_kb_id: '', scan_scope: 'root' })
+  useExistingKnowledge.value = false
+  sourceSetupError.value = ''
+  sourceDialogOpen.value = true
+}
+
+function toggleExistingKnowledge() {
+  useExistingKnowledge.value = !useExistingKnowledge.value
+  sourceSetupError.value = ''
+  if (useExistingKnowledge.value) void loadTargetDatabases()
+}
+
+function authorizeManagedSource(mode) {
+  manageDialogOpen.value = false
+  return mode === 'qr' ? startQrOAuth() : startBrowserOAuth()
+}
+
+async function selectSource(sourceId, newlyCreated = false) {
+  if ((!newlyCreated && sourceActionsLocked.value) || sourceId === currentSourceId.value) return
+  closeQrAuthorization()
+  clearTimeout(pollTimer)
+  formalKnowledgeRefreshTimers.forEach(clearTimeout)
+  detailRequestSeq += 1
+  currentSourceId.value = sourceId
+  runs.value = []
+  materials.value = []
+  treeData.value = []
+  treeError.value = ''
+  selectedRunId.value = ''
+  activeRunId.value = ''
+  detailOpen.value = false
+  detailMaterial.value = null
+  governanceReviewTarget.value = null
+  updatedRange.value = []
+  Object.keys(filters).forEach(key => {
+    filters[key] = key === 'directory' ? '' : undefined
+  })
+  Object.assign(governanceCounts, { workItems: 0, reviews: 0, relations: 0, formal: 0 })
+  oauthStatus.value = { authorized: false, status: 'not_authorized' }
+  connectionState.value = 'unchecked'
+  connectionError.value = ''
+  connectionRootTitle.value = ''
+  sessionStorage.removeItem(WORKSPACE_CACHE_KEY)
+  pageError.value = ''
+  initialLoading.value = true
+  initialLoadProgress.value = 3
+  initialLoadMessage.value = '正在加载所选数据源…'
+  try {
+    await refreshAll({
+      forceTree: true,
+      onProgress: (progress, text) => {
+        initialLoadProgress.value = Math.round(progress)
+        initialLoadMessage.value = text
+      }
+    })
+  } catch (error) {
+    pageError.value = feishuKnowledgeApi.getErrorMessage(error, '加载数据源失败')
+  } finally {
+    initialLoading.value = false
+  }
+}
+
+const hasFullScan = computed(() => Boolean(currentSource.value?.has_successful_full_scan))
+const sourceActionsLocked = computed(() => Boolean(
+  initialLoading.value || scanInProgress.value || checkingSource.value ||
+  qrDialogOpen.value || authorizingUser.value || loadingTree.value ||
+  loadingMaterials.value || loadingRuns.value
+))
 
 const hasActiveRun = computed(() =>
   runs.value.some((run) => isRunActive(run))
@@ -655,6 +850,10 @@ const scanProgressMessage = computed(() => {
 const scanLocked = computed(() =>
   Boolean(
     !oauthStatus.value.authorized ||
+      connectionState.value === 'error' ||
+      checkingSource.value ||
+      qrDialogOpen.value ||
+      authorizingUser.value ||
       scanningMode.value ||
       activeRunId.value ||
       hasActiveRun.value ||
@@ -689,7 +888,7 @@ const qrStatusLabel = computed(() => {
 
 const stats = computed(() => [
   { label: '素材总数', value: currentSource.value?.total_count ?? 0 },
-  { label: '待审核', value: currentSource.value?.awaiting_review_count ?? 0, tone: 'warning' },
+  { label: '待审核素材', value: currentSource.value?.awaiting_review_count ?? 0, tone: 'warning' },
   { label: '失败', value: currentSource.value?.failed_count ?? 0, tone: 'error' },
   { label: '来源失效', value: currentSource.value?.source_invalid_count ?? 0, tone: 'muted' }
 ])
@@ -754,44 +953,54 @@ async function loadSources() {
 }
 
 async function loadReviewCount() {
-  if (!currentSourceId.value) return
+  const sourceId = currentSourceId.value
+  if (!sourceId) return
   try {
-    const response = await governanceApi.listReviewPackages(currentSourceId.value, { view: 'mine' })
+    const response = await governanceApi.listReviewPackages(sourceId, { view: 'mine' })
+    if (!isAlive || sourceId !== currentSourceId.value) return
     governanceCounts.reviews = response.counts?.mine ?? response.total ?? 0
   } catch {
+    if (!isAlive || sourceId !== currentSourceId.value) return
     governanceCounts.reviews = currentSource.value?.awaiting_review_count ?? 0
   }
 }
 
 async function loadWorkItemCount() {
-  if (!currentSourceId.value) return
+  const sourceId = currentSourceId.value
+  if (!sourceId) return
   try {
     const response = await governanceApi.getWorkItemSummary({
-      source_id: currentSourceId.value,
+      source_id: sourceId,
       assignee: 'mine'
     })
-    governanceCounts.workItems = response.total ?? 0
+    if (isAlive && sourceId === currentSourceId.value) governanceCounts.workItems = response.total ?? 0
   } catch {
     // 首屏统计失败时保留缓存值，避免把未知状态误显示为 0。
   }
 }
 
 async function loadRelationCount() {
-  if (!currentSourceId.value) return
+  const sourceId = currentSourceId.value
+  if (!sourceId) return
   try {
-    const response = await governanceApi.getComparisonStatus(currentSourceId.value)
+    const response = await governanceApi.getComparisonStatus(sourceId)
+    if (!isAlive || sourceId !== currentSourceId.value) return
     governanceCounts.relations = response.relation_count ?? 0
   } catch {
+    if (!isAlive || sourceId !== currentSourceId.value) return
     governanceCounts.relations = 0
   }
 }
 
 async function loadFormalKnowledgeCount() {
-  if (!currentSourceId.value) return
+  const sourceId = currentSourceId.value
+  if (!sourceId) return
   try {
-    const response = await governanceApi.listFormalKnowledge(currentSourceId.value)
+    const response = await governanceApi.listFormalKnowledge(sourceId)
+    if (!isAlive || sourceId !== currentSourceId.value) return
     governanceCounts.formal = response.items?.length ?? 0
   } catch {
+    if (!isAlive || sourceId !== currentSourceId.value) return
     governanceCounts.formal = 0
   }
 }
@@ -975,10 +1184,11 @@ function validateAuthorizationUrl(value) {
 }
 
 async function startBrowserOAuth() {
-  if (!currentSource.value || authorizingUser.value) return
+  if (!currentSource.value || authorizingUser.value || scanInProgress.value) return
   authorizingUser.value = true
   try {
     const response = await feishuKnowledgeApi.startOAuth(currentSource.value.source_id, 'redirect')
+    sessionStorage.setItem(OAUTH_SOURCE_KEY, currentSource.value.source_id)
     window.location.assign(validateAuthorizationUrl(response.authorization_url))
   } catch (error) {
     message.error(feishuKnowledgeApi.getErrorMessage(error, '发起飞书用户授权失败'))
@@ -987,7 +1197,9 @@ async function startBrowserOAuth() {
 }
 
 async function startQrOAuth() {
-  if (!currentSource.value || qrAuthorizing.value) return
+  if (!currentSource.value || qrAuthorizing.value || scanInProgress.value) return
+  connectionState.value = 'unchecked'
+  connectionError.value = ''
   const requestId = ++qrRequestSeq
   clearTimeout(qrPollTimer)
   qrDialogOpen.value = true
@@ -1053,10 +1265,12 @@ async function pollQrAuthorization(requestId) {
     oauthStatus.value = status
     qrPhase.value = 'success'
     qrError.value = ''
+    // 授权状态已确认后立即收起二维码，连接检查和目录刷新在后台继续。
+    qrPollTimer = setTimeout(() => closeQrAuthorization(), 300)
+    await checkCurrentSource()
     await Promise.all([loadSources(), loadTree(true)])
     if (!isAlive || requestId !== qrRequestSeq) return
-    message.success('飞书用户授权成功，知识目录已刷新')
-    qrPollTimer = setTimeout(() => closeQrAuthorization(), 800)
+    message.success('飞书用户授权成功')
   } catch {
     if (!isAlive || requestId !== qrRequestSeq) return
     qrError.value = '暂时无法确认授权结果，系统会继续检查。'
@@ -1080,6 +1294,9 @@ function handleOAuthCallbackResult() {
   const params = new URLSearchParams(window.location.search)
   const status = params.get('oauth_status')
   if (!status) return
+  currentSourceId.value = params.get('source_id') || sessionStorage.getItem(OAUTH_SOURCE_KEY) || ''
+  sessionStorage.removeItem(OAUTH_SOURCE_KEY)
+  callbackNeedsCheck = status === 'success'
   if (status === 'success') {
     message.success('飞书用户授权成功，后续读取将使用该用户权限')
   } else {
@@ -1099,8 +1316,13 @@ async function initialize() {
   initialLoadMessage.value = initialLoading.value ? '正在准备知识加工…' : ''
   pageError.value = ''
   if (cacheState.fresh) {
-    // 工作台缓存用于快速首屏，但运营待办数量需要及时反映最新状态。
-    void loadWorkItemCount()
+    // 工作台缓存用于快速首屏；后台刷新治理统计，避免缓存与实时任务数不一致。
+    void Promise.allSettled([
+      loadReviewCount(),
+      loadWorkItemCount(),
+      loadRelationCount(),
+      loadFormalKnowledgeCount()
+    ]).then(() => writeWorkspaceCache())
     return
   }
   try {
@@ -1116,16 +1338,39 @@ async function initialize() {
     loadingSources.value = false
     initialLoading.value = false
   }
+  if (callbackNeedsCheck && currentSource.value) {
+    callbackNeedsCheck = false
+    await checkCurrentSource()
+  }
 }
 
 async function checkCurrentSource() {
-  if (!currentSource.value || initialLoading.value) return
+  if (!currentSource.value || initialLoading.value || checkingSource.value || scanInProgress.value) return false
+  const sourceId = currentSource.value.source_id
   checkingSource.value = true
+  connectionError.value = ''
   try {
-    await feishuKnowledgeApi.checkSource(currentSource.value.source_id)
+    const result = await feishuKnowledgeApi.checkSource(sourceId)
+    if (currentSourceId.value !== sourceId) return false
+    connectionRootTitle.value = result.root_title || currentSource.value.name
+    if (currentSource.value.name === '飞书知识库' && result.root_title) {
+      currentSource.value.name = result.root_title.slice(0, 255)
+    }
+    connectionState.value = 'ready'
+    await loadOAuthStatus()
     message.success('飞书数据源连接正常')
+    return true
   } catch (error) {
-    message.error(feishuKnowledgeApi.getErrorMessage(error, '连接检查失败'))
+    if (currentSourceId.value !== sourceId) return false
+    connectionState.value = 'error'
+    connectionError.value = feishuKnowledgeApi.getErrorMessage(error, '连接检查失败')
+    message.error(connectionError.value)
+    try {
+      await loadOAuthStatus()
+    } catch {
+      // 保留连接检查的具体错误。
+    }
+    return false
   } finally {
     checkingSource.value = false
   }
@@ -1133,6 +1378,10 @@ async function checkCurrentSource() {
 
 async function startScan(mode) {
   if (!currentSource.value || scanLocked.value || initialLoading.value) return
+  if (mode === 'incremental' && !hasFullScan.value) {
+    message.warning('首次接入请先完成全量扫描')
+    return
+  }
   scanningMode.value = mode
   const sourceId = currentSource.value.source_id
   const sourceName = currentSource.value.name
@@ -1161,6 +1410,11 @@ async function startScan(mode) {
     schedulePoll()
   } catch (error) {
     message.error(feishuKnowledgeApi.getErrorMessage(error, '扫描提交失败'))
+    try {
+      await loadOAuthStatus()
+    } catch {
+      // 保留扫描提交的具体错误。
+    }
   } finally {
     scanningMode.value = ''
   }
@@ -1331,6 +1585,7 @@ async function executeSingle(action, material, reason) {
     if (action === 'approve') await feishuKnowledgeApi.approveMaterial(material.version_id)
     if (action === 'reject') await feishuKnowledgeApi.rejectMaterial(material.version_id, reason)
     if (action === 'retry') await feishuKnowledgeApi.retryMaterial(material.version_id)
+    if (action === 'reprocess') await feishuKnowledgeApi.reprocessMaterial(material.version_id)
     if (action === 'reindex') await feishuKnowledgeApi.reindexMaterial(material.version_id)
     if (action === 'confirm_removal') await feishuKnowledgeApi.confirmRemoval(material.version_id)
     message.success(actionSuccessLabel(action))
@@ -1352,12 +1607,14 @@ function handleMaterialAction({ action, material }) {
   const titles = {
     approve: `确认审核通过“${material.title || '未命名素材'}”？`,
     retry: `确认重试“${material.title || '未命名素材'}”？`,
+    reprocess: `重新加工“${material.title || '未命名素材'}”？`,
     reindex: `重新解析并重建“${material.title || '未命名素材'}”的索引？`,
     confirm_removal: `确认下架“${material.title || '未命名素材'}”？`
   }
   const descriptions = {
     approve: '通过后将进入正式知识库发布流程。',
     retry: '系统将根据当前状态重新执行加工或发布。',
+    reprocess: '从归档原文件重新解析和检查，结果仍需审核，不会自动发布。',
     reindex: '系统会先生成新索引，成功后再替换当前索引；失败时继续使用当前索引。',
     confirm_removal: '确认后将从正式知识库移除该素材。'
   }
@@ -1403,6 +1660,7 @@ function handleBatchAction({ action, versionIds }) {
   const labels = {
     approve: '审核通过',
     retry: '重试',
+    reprocess: '重新加工',
     reindex: '重新解析并重建索引',
     confirm_removal: '确认下架'
   }
@@ -1412,7 +1670,9 @@ function handleBatchAction({ action, versionIds }) {
       ? '这些素材将从正式知识库移除。'
       : action === 'reindex'
         ? '系统会逐条生成新索引，成功后再替换当前索引；失败的素材继续使用当前索引。'
-        : '操作将应用到全部所选素材。',
+        : action === 'reprocess'
+          ? '重新解析并检查所选资料，结果仍需审核，不会自动发布。'
+          : '操作将应用到全部所选素材。',
     () => executeBatch(action, versionIds),
     action === 'confirm_removal'
   )
@@ -1423,6 +1683,7 @@ function actionSuccessLabel(action) {
     approve: '已审核通过，等待发布',
     reject: '已驳回素材',
     retry: '已提交重试',
+    reprocess: '已提交重新加工，完成后仍需审核',
     reindex: '已提交重新解析和索引重建',
     confirm_removal: '已确认下架'
   }[action]
@@ -1442,11 +1703,17 @@ function formatTime(value) {
 onMounted(() => {
   handleOAuthCallbackResult()
   initialize()
+  runsRefreshTimer = setInterval(() => {
+    if (isAlive && currentSourceId.value && ['materials', 'processing'].includes(activeModule.value) && !loadingRuns.value) {
+      void loadRuns()
+    }
+  }, 10000)
 })
 onBeforeUnmount(() => {
   isAlive = false
   clearTimeout(pollTimer)
   clearTimeout(qrPollTimer)
+  clearInterval(runsRefreshTimer)
   formalKnowledgeRefreshTimers.forEach((timer) => clearTimeout(timer))
 })
 </script>
@@ -1460,6 +1727,17 @@ onBeforeUnmount(() => {
   color: var(--color-text);
 }
 
+.source-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 12px;
+  p { margin: 0; color: var(--color-text-secondary); }
+}
+.source-link { overflow-wrap: anywhere; }
+.source-dialog-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.source-setup-intro { margin: 12px 0 24px; color: var(--color-text-secondary); line-height: 1.8; }
+.source-scope-hint { margin: 8px 0 0; font-size: 12px; color: var(--color-text-secondary); line-height: 1.7; }
 .page-heading {
   display: flex;
   align-items: center;
@@ -2081,7 +2359,25 @@ onBeforeUnmount(() => {
 }
 
 .empty-source {
-  padding-top: 20vh;
+  min-height: min(560px, calc(100vh - 180px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.empty-source :deep(.ant-empty) {
+  margin: 0;
+}
+
+.empty-source-copy {
+  max-width: 360px;
+  margin: 4px 0 20px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 :deep(.ant-table-wrapper .ant-table-thead > tr > th) {

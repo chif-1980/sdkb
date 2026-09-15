@@ -9,6 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.governance.domain import CrossDocumentRelationType
+from yuxi.governance.evidence_text import text_comparison_content
 from yuxi.storage.postgres.models_knowledge import (
     FeishuCrossDocumentRelation,
     FeishuGovernanceReview,
@@ -117,6 +118,41 @@ class CrossDocumentComparisonService:
             [current.yuxi_file_id, *(candidate.yuxi_file_id for candidate, _ in candidate_rows)]
         )
         current_content = content_by_file_id.get(current.yuxi_file_id or "", "")
+        # Rechecking must retire obsolete automatic overlap evidence, including
+        # pairs no longer in the top candidate window. Human decisions stay intact.
+        candidates_by_id = {version.version_id: (version, item) for version, item in candidate_rows}
+        existing_relations = list(await self.session.scalars(
+            select(FeishuCrossDocumentRelation).where(
+                FeishuCrossDocumentRelation.status == "open",
+                FeishuCrossDocumentRelation.human_decision.is_(None),
+                FeishuCrossDocumentRelation.relation_type.in_({"OVERLAP", "EXACT_DUPLICATE"}),
+                or_(
+                    FeishuCrossDocumentRelation.source_version_id == version_id,
+                    FeishuCrossDocumentRelation.target_version_id == version_id,
+                ),
+            )
+        ))
+        for relation in existing_relations:
+            other_id = (
+                relation.target_version_id if relation.source_version_id == version_id
+                else relation.source_version_id
+            )
+            if other_id not in candidates_by_id:
+                continue
+            candidate, candidate_item = candidates_by_id[other_id]
+            candidate_content = content_by_file_id.get(candidate.yuxi_file_id or "", "")
+            if not current_content.strip() or not candidate_content.strip():
+                continue
+            if self._classify(
+                current, current_item, candidate, candidate_item,
+                current_content=current_content,
+                candidate_content=candidate_content,
+            ) is None:
+                relation.status = "invalidated"
+                relation.human_decision = "NO_TEXT_EVIDENCE"
+                relation.human_comment = "重新检查后无有效正文重叠证据；图片地址不作为文字证据"
+                relation.resolved_by = "system"
+                relation.resolved_at = utc_now_naive()
         content_similarity_by_version_id = {
             candidate.version_id: self._content_similarity(
                 current_content,
@@ -344,7 +380,7 @@ class CrossDocumentComparisonService:
                 status="open",
             )
             self.session.add(relation)
-        elif relation.status == "open" or relation.human_decision == "NO_TEXT_EVIDENCE":
+        elif relation.status == "open" or relation.human_decision in {"NO_TEXT_EVIDENCE", "REPROCESSED"}:
             relation.relation_type = evidence["relation_type"]
             relation.similarity = evidence["similarity"]
             relation.confidence = evidence["confidence"]
@@ -371,6 +407,8 @@ class CrossDocumentComparisonService:
     ) -> dict | None:
         if current.item_id == candidate.item_id:
             return None
+        current_content = text_comparison_content(current_content)
+        candidate_content = text_comparison_content(candidate_content)
         body_similarity = CrossDocumentComparisonService._local_content_similarity(
             current_content,
             candidate_content,
@@ -491,7 +529,7 @@ class CrossDocumentComparisonService:
 
 
 def _text_features(value: str) -> set[str]:
-    normalized = re.sub(r"\s+", "", value.lower())[:200_000]
+    normalized = re.sub(r"\s+", "", text_comparison_content(value).lower())[:200_000]
     if not normalized:
         return set()
     features: set[str] = set(re.findall(r"[a-z0-9]+", normalized))
@@ -506,7 +544,7 @@ def _normalized_text(value: str) -> str:
 
 def _text_passages(value: str, *, limit: int = 100) -> list[str]:
     passages: list[str] = []
-    for block in re.split(r"\n+|(?<=[。！？!?])", value):
+    for block in re.split(r"\n+|(?<=[。！？!?])", text_comparison_content(value)):
         cleaned = block.strip()
         if not cleaned:
             continue

@@ -13,6 +13,8 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai \
     UV_PROJECT_ENVIRONMENT="/usr/local" \
     UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
+    UV_HTTP_TIMEOUT=120 \
+    UV_RETRIES=5 \
     UV_COMPILE_BYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 

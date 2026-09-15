@@ -1,5 +1,6 @@
 <template>
   <section
+    ref="reviewWorkspace"
     class="review-workspace"
     :class="{
       'queue-collapsed': queueCollapsed,
@@ -214,6 +215,26 @@
                 <span>待处理关系 {{ packageDetail.impactSummary.openRelationCount || 0 }}</span>
               </div>
             </div>
+          </section>
+          <section
+            v-if="comparisonNotice"
+            class="comparison-status-notice"
+            role="status"
+            aria-live="polite"
+            aria-label="自动检查状态"
+          >
+            <CircleHelp :size="16" />
+            <div>
+              <strong>{{ comparisonNotice.title }}</strong>
+              <p>{{ comparisonNotice.description }}</p>
+            </div>
+            <a-button
+              size="small"
+              :disabled="loadingPackages || batchResolving || decisionPanelOpen"
+              @click="loadPackages({ preferredItemId: selectedItemId })"
+            >
+              刷新状态
+            </a-button>
           </section>
           <div v-if="publishBlocked" class="content-quality-alert">
             <CircleAlert :size="16" />
@@ -591,7 +612,7 @@
                             :title="fragment.content"
                             @click="selectPresentationFragment(fragment)"
                           >
-                            <span>{{ fragment.fragment_number }}</span>
+                            <span>{{ currentUnitReviewNotice && isCurrentUnitBlock(fragment) ? '待确认' : fragment.fragment_number }}</span>
                           </button>
                         </template>
                       </div>
@@ -627,11 +648,7 @@
                             class="unit-recommendation"
                             :class="{ attention: currentItem.manual_review_required }"
                           >
-                            {{
-                              currentItem.manual_review_required
-                                ? '需要人工确认'
-                                : `建议${outcomeLabel(currentItem.recommended_outcome)}`
-                            }}
+                            {{ unitRecommendationLabel(currentItem) }}
                           </span>
                         </div>
                         <dl class="layout-sidebar-facts">
@@ -648,7 +665,28 @@
                             <dd>{{ currentItem?.source_segment_ids?.length || 0 }} 个</dd>
                           </div>
                         </dl>
-                        <p v-if="currentItem?.summary" class="layout-sidebar-summary">
+                        <section
+                          v-if="currentUnitReviewNotice"
+                          class="unit-review-notice"
+                          aria-label="当前单元待处理原因"
+                          aria-live="polite"
+                        >
+                          <strong>{{ currentUnitReviewNotice.title }}</strong>
+                          <p class="unit-review-excerpt">{{ currentUnitReviewExcerpt }}</p>
+                          <p><b>原因：</b>{{ currentUnitReviewNotice.reason }}</p>
+                          <p><b>下一步：</b>{{ currentUnitReviewNotice.next }}</p>
+                          <button
+                            v-if="findDocumentTarget(currentItem) || findPresentationTarget(currentItem)"
+                            type="button" @click="focusCurrentUnitOriginal"
+                          >
+                            定位这段原文
+                          </button>
+                          <p v-else>尚未定位到这段原文，当前页面仅供浏览。</p>
+                          <button v-if="currentUnitReviewNotice.showComparisons" type="button" @click="showComparisons">
+                            查看跨文档证据
+                          </button>
+                        </section>
+                        <p v-else-if="currentItem?.summary" class="layout-sidebar-summary">
                           {{ currentItem.summary }}
                         </p>
                         <button
@@ -823,6 +861,7 @@
                           class="document-layout-block spreadsheet-cell"
                           :class="{
                             active: block.block_id === selectedDocumentBlockId,
+                          'unit-target': Boolean(currentUnitReviewNotice) && isCurrentUnitBlock(block),
                             edited: block.edited
                           }"
                           :style="fragmentHotspotStyle(block)"
@@ -856,13 +895,14 @@
                         class="document-layout-block"
                         :class="{
                           active: block.block_id === selectedDocumentBlockId,
+                          'unit-target': Boolean(currentUnitReviewNotice) && isCurrentUnitBlock(block),
                           edited: block.edited
                         }"
                         :style="fragmentHotspotStyle(block)"
                         :title="block.content"
                         @click="selectDocumentBlock(block)"
                       >
-                        <span>{{ block.edited ? '已改' : '定位' }}</span>
+                        <span>{{ currentUnitReviewNotice && isCurrentUnitBlock(block) ? '待确认' : block.edited ? '已改' : '定位' }}</span>
                       </button>
                     </div>
                     <aside class="layout-side-panel" aria-label="版式审核信息">
@@ -896,11 +936,7 @@
                             class="unit-recommendation"
                             :class="{ attention: currentItem.manual_review_required }"
                           >
-                            {{
-                              currentItem.manual_review_required
-                                ? '需要人工确认'
-                                : `建议${outcomeLabel(currentItem.recommended_outcome)}`
-                            }}
+                            {{ unitRecommendationLabel(currentItem) }}
                           </span>
                         </div>
                         <dl class="layout-sidebar-facts">
@@ -917,7 +953,28 @@
                             <dd>{{ currentItem?.source_segment_ids?.length || 0 }} 个</dd>
                           </div>
                         </dl>
-                        <p v-if="currentItem?.summary" class="layout-sidebar-summary">
+                        <section
+                          v-if="currentUnitReviewNotice"
+                          class="unit-review-notice"
+                          aria-label="当前单元待处理原因"
+                          aria-live="polite"
+                        >
+                          <strong>{{ currentUnitReviewNotice.title }}</strong>
+                          <p class="unit-review-excerpt">{{ currentUnitReviewExcerpt }}</p>
+                          <p><b>原因：</b>{{ currentUnitReviewNotice.reason }}</p>
+                          <p><b>下一步：</b>{{ currentUnitReviewNotice.next }}</p>
+                          <button
+                            v-if="findDocumentTarget(currentItem) || findPresentationTarget(currentItem)"
+                            type="button" @click="focusCurrentUnitOriginal"
+                          >
+                            定位这段原文
+                          </button>
+                          <p v-else>尚未定位到这段原文，当前页面仅供浏览。</p>
+                          <button v-if="currentUnitReviewNotice.showComparisons" type="button" @click="showComparisons">
+                            查看跨文档证据
+                          </button>
+                        </section>
+                        <p v-else-if="currentItem?.summary" class="layout-sidebar-summary">
                           {{ currentItem.summary }}
                         </p>
                         <button
@@ -1179,7 +1236,7 @@
                           <div class="comparison-layout-heading">
                             <strong>版式对比</strong>
                             <span v-if="comparisonMatchCount"
-                              >已定位 {{ comparisonMatchCount }} 组匹配片段</span
+                              >共 {{ comparisonMatchCount }} 组文字匹配</span
                             >
                             <span v-else>暂未生成可定位片段</span>
                           </div>
@@ -1270,6 +1327,12 @@
                           <CircleAlert :size="15" />{{
                             relationLayoutComparison.message || '当前仅提供文字证据。'
                           }}
+                        </p>
+                        <p
+                          v-if="activeComparisonMatch && (!activeComparisonMatch.source_page_number || !activeComparisonMatch.target_page_number)"
+                          class="comparison-layout-fallback"
+                        >
+                          <CircleAlert :size="15" />部分证据尚未定位到原文，未定位一侧的页面仅供浏览。
                         </p>
                         <div class="comparison-layout-columns">
                           <section class="comparison-layout-pane">
@@ -1758,40 +1821,30 @@
                                   <section>
                                     <label
                                       >来源一 · 重叠部分
-                                      <span
-                                        v-if="
-                                          formatSegmentLocator(activeDuplicateMatch.source_locator)
-                                        "
-                                        >{{
-                                          formatSegmentLocator(activeDuplicateMatch.source_locator)
-                                        }}</span
-                                      ></label
+                                      <span>{{ formatDuplicateLocator(activeDuplicateMatch.source_locator, 'source') }}</span></label
                                     >
-                                    <p class="overlap-snippet">
-                                      {{
-                                        activeDuplicateMatch.source_overlap_excerpt ||
-                                        activeDuplicateMatch.source_excerpt
-                                      }}
-                                    </p>
+                                    <div class="overlap-snippet">
+                                      <MarkdownPreview
+                                        :content="
+                                          activeDuplicateMatch.source_overlap_excerpt ||
+                                          activeDuplicateMatch.source_excerpt
+                                        "
+                                      />
+                                    </div>
                                   </section>
                                   <section>
                                     <label
                                       >来源二 · 重叠部分
-                                      <span
-                                        v-if="
-                                          formatSegmentLocator(activeDuplicateMatch.target_locator)
-                                        "
-                                        >{{
-                                          formatSegmentLocator(activeDuplicateMatch.target_locator)
-                                        }}</span
-                                      ></label
+                                      <span>{{ formatDuplicateLocator(activeDuplicateMatch.target_locator, 'target') }}</span></label
                                     >
-                                    <p class="overlap-snippet">
-                                      {{
-                                        activeDuplicateMatch.target_overlap_excerpt ||
-                                        activeDuplicateMatch.target_excerpt
-                                      }}
-                                    </p>
+                                    <div class="overlap-snippet">
+                                      <MarkdownPreview
+                                        :content="
+                                          activeDuplicateMatch.target_overlap_excerpt ||
+                                          activeDuplicateMatch.target_excerpt
+                                        "
+                                      />
+                                    </div>
                                   </section>
                                 </div>
                               </article>
@@ -2082,7 +2135,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { diffLines } from 'diff'
 import {
@@ -2091,6 +2144,7 @@ import {
   ChevronRight,
   CircleAlert,
   CircleCheck,
+  CircleHelp,
   ClipboardCheck,
   ExternalLink,
   FileText,
@@ -2135,6 +2189,7 @@ const problemFilter = ref('')
 const packageNameQuery = ref('')
 let packageNameSearchTimer = null
 let packageListRequestSeq = 0
+const reviewWorkspace = ref(null)
 const activeEvidenceView = ref('content')
 const queueCollapsed = ref(false)
 const decisionPanelOpen = ref(false)
@@ -2582,6 +2637,11 @@ const comparisonLayoutReady = computed(() =>
     relationLayoutComparison.value.target?.pages?.length
   )
 )
+function clampComparisonPageNumber(side, value) {
+  const pages = side === 'source' ? comparisonSourcePages.value : comparisonTargetPages.value
+  const numeric = Number(value) || 1
+  return pages.length ? Math.max(1, Math.min(pages.length, numeric)) : 1
+}
 const comparisonMatchCount = computed(() => relationLayoutComparison.value?.matches?.length || 0)
 const activeComparisonView = computed(() => comparisonViews[activeComparisonViewSide.value])
 const comparisonZoomPercentage = computed(() => Math.round(activeComparisonView.value.scale * 100))
@@ -2645,6 +2705,90 @@ const bulkActionableItems = computed(() =>
     ['PENDING', 'WAITING_BUSINESS_CONFIRMATION'].includes(item.item_status)
   )
 )
+function waitingForComparison(item) {
+  return ['not_started', 'queued', 'running'].includes(item?.comparison_status)
+}
+function unitRecommendationLabel(item) {
+  if (waitingForComparison(item) && !item.problem_tags?.length && !item.relation_ids?.length) {
+    return item.comparison_status === 'running' ? '自动检查中' : '等待自动检查'
+  }
+  return item.manual_review_required ? '需要人工确认' : `建议${outcomeLabel(item.recommended_outcome)}`
+}
+const currentUnitReviewNotice = computed(() => {
+  const item = currentItem.value
+  if (!item?.knowledge_unit || !remainingUnitItems.value.includes(item)) return null
+  if (item.item_status === 'WAITING_SOURCE_CHANGE') {
+    return { title: '等待原文修改', reason: '此单元已退回修改，尚未完成后续审核。', next: '等待资料负责人修改原文，再检查更新后的内容。' }
+  }
+  if (item.item_status === 'WAITING_BUSINESS_CONFIRMATION') {
+    return { title: '等待业务确认', reason: item.recommendation_reason || item.summary || '此单元已暂缓，等待业务结论。', next: '取得业务确认后，再提交审核决定。' }
+  }
+  if (waitingForComparison(item)) {
+    return {
+      title: item.comparison_status === 'running' ? '自动检查中' : '等待自动检查',
+      reason: '自动检查尚未完成；等待不代表已发现内容风险。',
+      next: '状态会自动更新，检查结束后再确认审核建议。'
+    }
+  }
+  if (item.comparison_status === 'failed') {
+    return { title: '自动检查失败', reason: '检查未成功完成，当前建议不能作为已通过检查的结论。', next: '重试检查或人工核对后，再提交审核决定。' }
+  }
+  if (item.comparison_status !== 'completed') {
+    return { title: '检查状态未知', reason: '尚未取得自动检查状态，暂时无法说明是否存在内容风险。', next: '刷新审核任务，确认检查结果后再处理。' }
+  }
+  const tags = item.problem_tags || []
+  if (item.manual_review_required || tags.length) {
+    const title = tags.includes('CONFLICT') ? '需要核对内容冲突'
+      : tags.includes('OVERLAP') || tags.includes('DUPLICATE') ? '需要核对内容重叠'
+      : '需要人工判断'
+    return {
+      title,
+      showComparisons: Boolean(item.relation_ids?.length),
+      reason: item.recommendation_reason || item.summary || '系统标记需要人工判断，但未提供具体原因，请查看检查证据。',
+      next: item.relation_ids?.length ? '查看跨文档证据，核对后选择纳入、保留现有知识或不纳入。' : '核对这段内容，再点击下方按钮选择处理结果。'
+    }
+  }
+  return {
+    title: item.recommended_outcome === 'PUBLISH' ? '待确认纳入' : '待确认审核建议',
+    reason: `自动检查已完成，系统建议${item.recommended_outcome === 'PUBLISH' ? '纳入' : outcomeLabel(item.recommended_outcome)}；尚未提交审核决定。`,
+    next: '确认内容适合进入知识库后，点击下方按钮提交；也可使用整篇批量审核。'
+  }
+})
+const currentUnitReviewExcerpt = computed(() =>
+  String(currentItem.value?.content || currentItem.value?.title || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '[图片]')
+)
+async function focusCurrentUnitOriginal() {
+  focusKnowledgeUnit(currentItem.value)
+  await nextTick()
+  reviewWorkspace.value?.querySelector('.document-layout-block.unit-target, .presentation-fragment-hotspot.unit-target')
+    ?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+}
+function isCurrentUnitBlock(block) {
+  return blockMatchesKnowledgeUnit(block, currentItem.value)
+}
+const comparisonWaitingItems = computed(() => bulkActionableItems.value.filter(waitingForComparison))
+const comparisonRefreshError = ref('')
+const comparisonNotice = computed(() => {
+  const waiting = comparisonWaitingItems.value.length
+  const running = comparisonWaitingItems.value.filter(
+    (item) => item.comparison_status === 'running'
+  ).length
+  const failed = bulkActionableItems.value.filter((item) => item.comparison_status === 'failed').length
+  if (!waiting && !failed) return null
+  return {
+    title: waiting ? (running ? '跨文档检查进行中' : '等待跨文档检查') : '跨文档检查失败',
+    description: [
+      waiting
+        ? `本资料有 ${waiting} 个知识单元尚未完成自动检查（等待 ${waiting - running} 个，检查中 ${running} 个）。等待状态不代表已发现内容风险；当前建议仍待检查结果确认。`
+        : '',
+      failed ? `${failed} 个知识单元检查失败，需要重试检查或人工核对。` : '',
+      comparisonRefreshError.value || '每 10 秒自动更新；编辑审核意见时暂停更新，也可点击“刷新状态”。'
+    ]
+      .filter(Boolean)
+      .join(' ')
+  }
+})
 const allActionableUnitsUnchanged = computed(
   () =>
     bulkActionableItems.value.length > 0 &&
@@ -2819,6 +2963,41 @@ watch(
 )
 watch(decisionPanelOpen, (open) => {
   if (!open) flushDraftAutoSave()
+})
+
+let comparisonRefreshTimer = null
+let refreshingComparison = false
+function comparisonRefreshPaused() {
+  return loadingPackages.value || loadingDetail.value || decisionPanelOpen.value ||
+    batchResolving.value || resolving.value || savingDraft.value || Boolean(actionSubmitting.value) ||
+    ['pending', 'error'].includes(draftSaveStatus.value)
+}
+async function refreshComparisonStatus() {
+  if (!comparisonNotice.value || refreshingComparison || comparisonRefreshPaused() || document.hidden) return
+  const packageId = selectedPackageId.value
+  const requestSeq = detailRequestSeq
+  const currentDetail = packageDetail.value
+  refreshingComparison = true
+  try {
+    const response = await governanceApi.getReviewPackage(packageId)
+    if (requestSeq !== detailRequestSeq || packageId !== selectedPackageId.value ||
+        currentDetail !== packageDetail.value || comparisonRefreshPaused()) return
+    packageDetail.value = response
+    comparisonRefreshError.value = ''
+  } catch {
+    if (packageId === selectedPackageId.value) {
+      comparisonRefreshError.value = '状态更新失败，显示的是上次结果；系统将在 10 秒后重试。'
+    }
+  } finally {
+    refreshingComparison = false
+  }
+}
+onMounted(() => {
+  comparisonRefreshTimer = setInterval(refreshComparisonStatus, 10000)
+})
+onBeforeUnmount(() => {
+  clearInterval(comparisonRefreshTimer)
+  detailRequestSeq += 1
 })
 
 async function loadPackages(options = {}) {
@@ -3551,16 +3730,16 @@ function segmentTitle(segment) {
   const path = (segment.title_path || []).filter(Boolean).join(' > ')
   return [path, segment.locator_label].filter(Boolean).join(' · ') || segmentLabel(segment)
 }
-function formatSegmentLocator(locator) {
-  if (!locator || typeof locator !== 'object') return ''
-  if (locator.page) return '第 ' + locator.page + ' 页'
-  if (locator.slide) return '第 ' + locator.slide + ' 页幻灯片'
-  if (locator.sheet) {
-    if (locator.row_start && locator.row_end)
-      return locator.sheet + ' · 第 ' + locator.row_start + '-' + locator.row_end + ' 行'
-    return '工作表 ' + locator.sheet
-  }
-  return locator.block ? '片段 ' + locator.block : ''
+function formatDuplicateLocator(locator, side) {
+  const match = relationLayoutComparison.value?.matches?.find(
+    (item) => item.match_id === activeDuplicateMatch.value?.match_id
+  )
+  const pages = side === 'source' ? comparisonSourcePages.value : comparisonTargetPages.value
+  const page = pages.find((item) => item.page_number === match?.[`${side}_page_number`])
+  if (!page) return '尚未定位到原文'
+  return locator?.slide || locator?.slide_number
+    ? `第 ${page.page_number} 页幻灯片`
+    : `第 ${page.page_number} 页`
 }
 function toggleProblemTag(tag) {
   form.problem_tags = form.problem_tags.includes(tag)
@@ -3573,24 +3752,34 @@ function knowledgeUnitSourceSegmentIds(item) {
     ...(item?.subject_locator?.source_segment_ids || [])
   ])
 }
+function blockMatchesKnowledgeUnit(block, item) {
+  if (!item?.knowledge_unit) return false
+  const normalize = (value) => String(value || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase()
+  const content = normalize(item.content)
+  const blockContent = normalize(block.content)
+  // Historical segment IDs can point to unrelated blocks. Verify the words,
+  // and never treat short fragments such as “文件。” as a content anchor.
+  if (content) {
+    return Math.min(content.length, blockContent.length) >= 6 &&
+      (content.includes(blockContent) || blockContent.includes(content))
+  }
+  const ids = knowledgeUnitSourceSegmentIds(item)
+  return (block.source_segment_ids || []).some((id) => ids.has(id))
+}
 function findPresentationTarget(item) {
-  const sourceSegmentIds = knowledgeUnitSourceSegmentIds(item)
-  if (!sourceSegmentIds.size) return null
   for (const slide of presentationSlides.value) {
     const fragment = (slide.fragments || []).find((candidate) =>
-      (candidate.source_segment_ids || []).some((segmentId) => sourceSegmentIds.has(segmentId))
+      blockMatchesKnowledgeUnit(candidate, item)
     )
     if (fragment) return { slide, fragment }
   }
   return null
 }
 function findDocumentTarget(item) {
-  const sourceSegmentIds = knowledgeUnitSourceSegmentIds(item)
-  if (!sourceSegmentIds.size) return null
   for (const page of documentPages.value) {
-    const block = (page.blocks || []).find((candidate) =>
-      (candidate.source_segment_ids || []).some((segmentId) => sourceSegmentIds.has(segmentId))
-    )
+    const block = (page.blocks || []).find((candidate) => blockMatchesKnowledgeUnit(candidate, item))
     if (block) return { page, block }
   }
   return null
@@ -3601,7 +3790,9 @@ function focusKnowledgeUnit(item, { loadPreview = true } = {}) {
   const presentationTarget = findPresentationTarget(item)
   const slide = Number(presentationTarget?.slide.slide_number || item.subject_locator?.slide || 0)
   if (slide && presentationSlides.value.length) {
-    activeSlideNumber.value = slide
+    // 来源定位可能使用原始演示文稿页码，而版式接口只返回可预览页面；
+    // 未匹配到页面时必须限制在实际页面范围内，避免请求不存在的页码。
+    activeSlideNumber.value = Math.max(1, Math.min(presentationSlides.value.length, slide))
     selectedPresentationFragmentId.value = presentationTarget?.fragment.fragment_id || ''
     if (loadPreview) void loadSlidePreview()
   }
@@ -3947,7 +4138,9 @@ function confirmWholePackage() {
   if (!safeCount) {
     Modal.confirm({
       title: '整篇资料暂不能批量处理',
-      content: `共 ${bulkActionableItems.value.length} 个待处理项，其中 ${riskCount} 个存在风险或需要人工确认。请在右侧逐条处理。`,
+      content: comparisonWaitingItems.value.length
+        ? `共 ${bulkActionableItems.value.length} 个待处理项，其中 ${comparisonWaitingItems.value.length} 个跨文档检查尚未完成。可稍后刷新状态；如有明确风险，请查看右侧具体原因。`
+        : `共 ${bulkActionableItems.value.length} 个待处理项，其中 ${riskCount} 个存在风险或需要人工确认。请在右侧逐条处理。`,
       okText: '知道了',
       cancelText: '关闭'
     })
@@ -4444,8 +4637,8 @@ async function loadRelationLayoutComparison(comparison) {
     relationLayoutComparison.value = response
     const match = response.matches?.[0]
     selectedComparisonMatchId.value = match?.match_id || ''
-    comparisonPageNumbers.source = match?.source_page_number || 1
-    comparisonPageNumbers.target = match?.target_page_number || 1
+    comparisonPageNumbers.source = clampComparisonPageNumber('source', match?.source_page_number)
+    comparisonPageNumbers.target = clampComparisonPageNumber('target', match?.target_page_number)
     if (!comparisonMatchPagesAligned.value) comparisonSyncPages.value = false
     if (response.supported) {
       const previewRequests = []
@@ -4469,8 +4662,8 @@ async function selectComparisonMatch(match) {
   selectedComparisonMatchId.value = match.match_id
   comparisonGridBlockIds.source = ''
   comparisonGridBlockIds.target = ''
-  comparisonPageNumbers.source = match.source_page_number || comparisonPageNumbers.source
-  comparisonPageNumbers.target = match.target_page_number || comparisonPageNumbers.target
+  comparisonPageNumbers.source = clampComparisonPageNumber('source', match.source_page_number || comparisonPageNumbers.source)
+  comparisonPageNumbers.target = clampComparisonPageNumber('target', match.target_page_number || comparisonPageNumbers.target)
   if (!comparisonMatchPagesAligned.value) comparisonSyncPages.value = false
   await Promise.all([loadComparisonPagePreview('source'), loadComparisonPagePreview('target')])
 }
@@ -4538,7 +4731,7 @@ function comparisonMatchLocator(match) {
   const targetPages = comparisonMatchPages(match, 'target')
   if (sourcePages.length || targetPages.length)
     return `来源一第 ${sourcePages.join('、') || '-'} 页 ↔ 来源二第 ${targetPages.join('、') || '-'} 页`
-  return match?.source_overlap_excerpt || match?.source_excerpt || '已定位片段'
+  return '尚未定位到原文'
 }
 
 function comparisonMatchPages(match, side) {
@@ -4551,7 +4744,7 @@ function comparisonMatchPages(match, side) {
       .filter((value) => Number.isFinite(value))
     if (values.length) return values
   }
-  const page = match?.[`${side}_page_number`] || match?.[`${side}_locator`]?.page
+  const page = match?.[`${side}_page_number`]
   return page ? [page] : []
 }
 
@@ -4688,7 +4881,11 @@ async function resolveDuplicateRelation(relationId, strategy) {
     duplicateCandidates[relationId] = response
     const automation = response.review_automation
     if (strategy === 'KEEP_SEPARATE') {
-      message.success('已分别保留两边内容，两边知识单元继续独立审批')
+      message.success(
+        automation?.source_review_closed
+          ? '已分别保留两边内容，并直接纳入知识库'
+          : `已分别保留两边内容，已直接纳入匹配单元${automation ? `，仍有 ${automation.remaining_unit_count || 0} 个其他单元待审核` : ''}`
+      )
     } else if (automation?.source_review_closed) {
       message.success('已处理重复来源，另一来源无需再次审批')
     } else {
@@ -6135,6 +6332,31 @@ loadReviewers()
   vertical-align: middle;
   content: '';
 }
+.comparison-status-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  border: 1px solid var(--main-30);
+  border-radius: 8px;
+  background: var(--main-10);
+  color: var(--color-text);
+
+  > div {
+    flex: 1;
+  }
+  > svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--main-color);
+  }
+  p {
+    margin: 4px 0 0;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+  }
+}
+
 .content-quality-alert {
   display: flex;
   align-items: flex-start;
@@ -6779,6 +7001,47 @@ loadReviewers()
   color: var(--color-text-secondary);
   font-size: 10px;
   line-height: 1.55;
+}
+.unit-review-notice {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  background: var(--gray-25);
+  border: 1px solid var(--gray-150);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+.unit-review-notice strong { color: var(--color-text); }
+.unit-review-notice p { margin: 0; }
+.unit-review-notice .unit-review-excerpt {
+  max-height: 100px;
+  overflow: auto;
+  padding-left: 8px;
+  border-left: 3px solid var(--main-color);
+  color: var(--color-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.unit-review-notice button {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--main-color);
+  cursor: pointer;
+}
+.document-layout-canvas .document-layout-block.unit-target,
+.presentation-canvas .presentation-fragment-hotspot.unit-target {
+  border: 2px solid var(--color-warning-500);
+  background: color-mix(in srgb, var(--color-warning-500) 12%, transparent);
+}
+.document-layout-block.unit-target > span,
+.presentation-fragment-hotspot.unit-target > span {
+  opacity: 1;
+  background: var(--color-warning-500);
+  color: var(--gray-900);
 }
 .layout-sidebar-navigation {
   display: grid;

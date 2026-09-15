@@ -948,7 +948,8 @@ def _comparison_page_number(locator: dict | None) -> int | None:
 
 
 def _comparison_text(value: object) -> str:
-    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", str(value or "").lower())
+    text = re.sub(r"!\[[^\]]*\]\([^\n]*?\)", "", str(value or ""))
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", text.lower())
 
 
 def _comparison_block_ids_by_page(
@@ -1056,7 +1057,10 @@ def _comparison_block_ids_by_page(
         if by_page:
             first_page = next(iter(by_page))
             return first_page, by_page
-    return page_number, {}
+    # Legacy PPT locators used a segment ordinal as a slide number. Without
+    # matching source content or a block anchor, even an in-range hint is not
+    # evidence that the excerpt is on that page.
+    return None, {}
 
 
 def _comparison_block_ids(layout: dict, match: dict, side: str) -> tuple[int | None, list[str]]:

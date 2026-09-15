@@ -51,7 +51,7 @@ async def test_pdf_segments_keep_page_locator():
     assert drafts[0].locator["page_count"] == 2
 
 
-async def test_ppt_segments_keep_approximate_slide_locator():
+async def test_ppt_segments_do_not_invent_slide_numbers_without_page_boundaries():
     drafts = _drafts(
         "# 公司简介\n我们提供覆盖咨询、实施、交付和运维的完整服务能力。\n"
         "![slide-1](slide-1.png)\n"
@@ -61,7 +61,7 @@ async def test_ppt_segments_keep_approximate_slide_locator():
 
     assert drafts
     assert {draft.segment_type for draft in drafts} == {"slide", "image"}
-    assert all(draft.locator.get("slide") for draft in drafts)
+    assert all("slide" not in draft.locator for draft in drafts)
 
 
 async def test_faq_question_and_answer_stay_in_one_segment():

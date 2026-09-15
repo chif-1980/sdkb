@@ -195,6 +195,7 @@ async def test_successful_full_scan_is_the_only_incremental_prerequisite(reposit
     running_full = await repository.start_sync_run(source_id="source-1", run_type="full")
 
     assert await repository.has_successful_full_scan("source-1") is False
+    assert (await repository.get_source_summary("source-1")).has_successful_full_scan is False
 
     await repository.finish_sync_run(
         run_id=running_full.run_id,
@@ -208,6 +209,7 @@ async def test_successful_full_scan_is_the_only_incremental_prerequisite(reposit
         invalidated_count=0,
     )
     assert await repository.has_successful_full_scan("source-1") is True
+    assert (await repository.get_source_summary("source-1")).has_successful_full_scan is True
 
 
 async def test_upsert_and_version_methods_preserve_active_version(repository):

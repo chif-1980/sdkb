@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apiAdminGet, apiAdminPatch, apiAdminPost } from '@/apis/base'
 import { feishuKnowledgeApi } from '@/apis/feishu_knowledge_api'
-import { documentApi } from '@/apis/knowledge_api'
+import { databaseApi, documentApi, typeApi } from '@/apis/knowledge_api'
 import FeishuMaterialDetailDrawer from '@/components/feishu/FeishuMaterialDetailDrawer.vue'
 import FeishuMaterialTable from '@/components/feishu/FeishuMaterialTable.vue'
 import FeishuKnowledgeView from './FeishuKnowledgeView.vue'
@@ -21,6 +21,8 @@ vi.mock('@/apis/base', () => ({
 }))
 
 vi.mock('@/apis/knowledge_api', () => ({
+  databaseApi: { getDatabases: vi.fn() },
+  typeApi: { getKnowledgeBaseTypes: vi.fn() },
   documentApi: {
     getDocumentContent: vi.fn()
   }
@@ -57,7 +59,8 @@ const source = {
   wiki_root_token: 'wiki-token',
   wiki_root_url: 'https://quickdone.feishu.cn/wiki/wiki-token',
   target_kb_id: 'kb-1',
-  last_full_sync_at: null,
+  last_full_sync_at: '2026-09-01T00:00:00Z',
+  has_successful_full_scan: true,
   last_incremental_sync_at: null,
   total_count: 12,
   awaiting_review_count: 3,
@@ -94,9 +97,17 @@ function mountView() {
         },
         'a-tag': { template: '<span><slot /></span>' },
         'a-alert': { template: '<div><slot name="message" /><slot name="description" /></div>' },
-        'a-select': { template: '<div />' },
+        'a-select': {
+          props: ['value', 'options', 'disabled'],
+          emits: ['change', 'update:value'],
+          template: '<select :value="value" :disabled="disabled" @change="$emit(\'update:value\', $event.target.value); $emit(\'change\', $event.target.value)"><option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option></select>'
+        },
         'a-checkbox': { template: '<label><input type="checkbox" /><slot /></label>' },
-        'a-input': { template: '<input />' },
+        'a-input': { props: ['value'], emits: ['update:value'], template: '<input :value="value" @input="$emit(\'update:value\', $event.target.value)" />' },
+        'a-form': { template: '<form><slot /></form>' },
+        'a-form-item': { props: ['label'], template: '<label>{{ label }}<slot /></label>' },
+        'a-radio-group': { template: '<div><slot /></div>' },
+        'a-radio': { template: '<span><slot /></span>' },
         'a-range-picker': { template: '<div />' },
         'a-empty': { template: '<div />' },
         'a-spin': { template: '<div><slot /></div>' },
@@ -107,10 +118,10 @@ function mountView() {
             '<div class="tree-stub">{{ treeData.map((item) => item.title).join(",") }}</div>'
         },
         'a-modal': {
-          props: ['open'],
-          emits: ['cancel'],
+          props: ['open', 'title', 'okButtonProps'],
+          emits: ['cancel', 'ok'],
           template:
-            '<section v-if="open" data-testid="oauth-qr-modal"><slot /><button data-testid="oauth-qr-close" @click="$emit(\'cancel\')">关闭</button></section>'
+            '<section v-if="open" data-testid="oauth-qr-modal"><slot /><button v-if="title === \'连接飞书知识库\'" data-testid="source-submit" :disabled="okButtonProps?.disabled" @click="$emit(\'ok\')">保存并授权</button><button data-testid="oauth-qr-close" @click="$emit(\'cancel\')">关闭</button></section>'
         },
         FeishuSyncRunsTable: true,
         FeishuWorkItemsPanel: true,
@@ -455,6 +466,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: false,
       驳回: false,
       重试: true,
+      重新加工: false,
       重新解析并重建索引: true,
       确认下架: true
     })
@@ -462,6 +474,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: false,
       重试: false,
+      重新加工: true,
       重新解析并重建索引: true,
       确认下架: true
     })
@@ -471,6 +484,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: true,
+      重新加工: true,
       重新解析并重建索引: true,
       确认下架: false
     })
@@ -544,6 +558,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: true,
+      重新加工: true,
       重新解析并重建索引: true,
       确认下架: true
     })
@@ -560,6 +575,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: false,
       重试: true,
+      重新加工: true,
       重新解析并重建索引: true,
       确认下架: true
     })
@@ -578,6 +594,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: false,
       驳回: false,
       重试: true,
+      重新加工: false,
       重新解析并重建索引: true,
       确认下架: true
     })
@@ -588,6 +605,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: false,
+      重新加工: true,
       重新解析并重建索引: true,
       确认下架: true
     })
@@ -598,6 +616,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: true,
+      重新加工: true,
       重新解析并重建索引: true,
       确认下架: false
     })
@@ -608,6 +627,7 @@ describe('FeishuMaterialTable', () => {
       审核通过: true,
       驳回: true,
       重试: true,
+      重新加工: true,
       重新解析并重建索引: false,
       确认下架: true
     })
@@ -701,6 +721,10 @@ describe('FeishuKnowledgeView', () => {
     vi.useFakeTimers()
     vi.clearAllMocks()
     sessionStorage.clear()
+    window.history.replaceState({}, '', '/feishu-knowledge')
+    databaseApi.getDatabases.mockResolvedValue({ databases: [{ kb_id: 'kb-1', name: '企业正式知识', kb_type: 'milvus' }] })
+    typeApi.getKnowledgeBaseTypes.mockResolvedValue({ kb_types: { milvus: { supports_documents: true }, notion: { supports_documents: false } } })
+    apiAdminPost.mockReset().mockResolvedValue({ status: 'ok', root_title: '飞书目录' })
     QRCode.toDataURL.mockResolvedValue('data:image/png;base64,oauth-qr')
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
@@ -733,8 +757,143 @@ describe('FeishuKnowledgeView', () => {
 
     expect(toggle.attributes('aria-expanded')).toBe('true')
     expect(wrapper.get('.source-details').attributes('style') || '').not.toContain('display: none')
-    expect(wrapper.get('.source-details').text()).toContain('Wiki 根节点')
-    expect(wrapper.get('.source-details').text()).toContain('目标知识库')
+    expect(wrapper.get('.source-details').text()).toContain('飞书知识库链接')
+    expect(wrapper.get('.source-details').text()).toContain('同步范围')
+    wrapper.unmount()
+  })
+
+  it('粘贴链接后保存同一个数据源并自动发起管理员授权，不要求填写内部编号', async () => {
+    let saved = null
+    apiAdminGet.mockImplementation((url) => {
+      if (url.endsWith('/sources')) return Promise.resolve({ items: saved ? [saved] : [] })
+      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: false })
+      return Promise.resolve({ items: [], nodes: [] })
+    })
+    apiAdminPost.mockImplementation((url, payload) => {
+      if (url.endsWith('/sources')) {
+        saved = { ...payload, source_id: 'new-source', wiki_root_token: 'Abc123' }
+        return Promise.resolve(saved)
+      }
+      return Promise.resolve({ authorization_url: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize', started_at: new Date().toISOString() })
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="manage-sources"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Token')
+    expect(wrapper.text()).not.toContain('知识库 ID')
+    expect(wrapper.find('[data-testid="target-knowledge"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('自动创建同名知识库')
+    await wrapper.get('[data-testid="source-url"]').setValue('https://team.feishu.cn/wiki/Abc123')
+    await wrapper.get('[data-testid="source-submit"]').trigger('click')
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenCalledWith('/api/feishu-knowledge/sources', {
+      name: '飞书知识库', wiki_root_url: 'https://team.feishu.cn/wiki/Abc123',
+      target_kb_id: null, scan_scope: 'root', enabled: true
+    })
+    expect(apiAdminPost).toHaveBeenCalledWith('/api/feishu-knowledge/sources/new-source/oauth/authorize', { mode: 'qr' })
+    expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="manage-sources"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('无已有知识库时仍可自动创建，展开已有模式才阻止空目标', async () => {
+    databaseApi.getDatabases.mockResolvedValue({ databases: [{ kb_id: 'readonly', name: 'Notion', kb_type: 'notion' }] })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="manage-sources"]').trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '添加飞书数据源').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="source-url"]').setValue('https://team.feishu.cn/wiki/Abc123')
+    expect(wrapper.get('[data-testid="source-submit"]').attributes('disabled')).toBeUndefined()
+    expect(databaseApi.getDatabases).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="toggle-existing-knowledge"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('尚无可写入的知识库')
+    expect(wrapper.get('[data-testid="source-submit"]').attributes('disabled')).toBeDefined()
+    expect(apiAdminPost).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="toggle-existing-knowledge"]').trigger('click')
+    expect(wrapper.find('[data-testid="target-knowledge"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="source-submit"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('按需选择已有知识库时提交选中的目标，切回自动创建不携带旧目标', async () => {
+    apiAdminPost.mockRejectedValue(new Error('创建失败'))
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="manage-sources"]').trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '添加飞书数据源').trigger('click')
+    await wrapper.get('[data-testid="source-url"]').setValue('https://team.feishu.cn/wiki/Abc123')
+    await wrapper.get('[data-testid="toggle-existing-knowledge"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="target-knowledge"]').element.value).toBe('kb-1')
+    await wrapper.get('[data-testid="source-submit"]').trigger('click')
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenLastCalledWith('/api/feishu-knowledge/sources', expect.objectContaining({ target_kb_id: 'kb-1' }))
+    await wrapper.get('[data-testid="toggle-existing-knowledge"]').trigger('click')
+    await wrapper.get('[data-testid="source-submit"]').trigger('click')
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenLastCalledWith('/api/feishu-knowledge/sources', expect.objectContaining({ target_kb_id: null }))
+    wrapper.unmount()
+  })
+
+  it('授权回跳选中对应数据源，自动检查，首次扫描前禁止增量', async () => {
+    window.history.replaceState({}, '', '/feishu-knowledge?oauth_status=success&source_id=source-2')
+    apiAdminGet.mockImplementation((url) => {
+      if (url.endsWith('/sources')) return Promise.resolve({ items: [source, { ...source, source_id: 'source-2', name: '公司制度', has_successful_full_scan: false }] })
+      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: true })
+      return Promise.resolve({ items: [], nodes: [] })
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="source-overview-toggle"]').text()).toContain('公司制度')
+    expect(apiAdminPost).toHaveBeenCalledWith('/api/feishu-knowledge/sources/source-2/check', {})
+    expect(wrapper.get('.heading-actions').text()).toContain('全量扫描')
+    expect(wrapper.get('[data-testid="scan-incremental"]').attributes('disabled')).toBeDefined()
+    expect(window.location.search).toBe('')
+    wrapper.unmount()
+  })
+
+  it('切换数据源清空上一来源的资料和授权；重新授权不重复创建', async () => {
+    apiAdminGet.mockImplementation((url) => {
+      if (url.endsWith('/sources')) return Promise.resolve({ items: [source, { ...source, source_id: 'source-2', name: '未授权来源', last_full_sync_at: null }] })
+      if (url.endsWith('/oauth/status')) return Promise.resolve({ authorized: url.includes('/source-1/') })
+      if (url.includes('/source-1/materials')) return Promise.resolve({ items: [makeMaterial('old-version')] })
+      return Promise.resolve({ items: [], nodes: [] })
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await openMaterials(wrapper)
+    expect(wrapper.findComponent({ name: 'FeishuMaterialTable' }).props('materials')).toHaveLength(1)
+    await wrapper.get('[data-testid="manage-sources"]').trigger('click')
+    await wrapper.get('[data-testid="source-picker"]').setValue('source-2')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'FeishuMaterialTable' }).props('materials')).toEqual([])
+    expect(wrapper.get('[data-testid="source-overview-toggle"]').text()).toContain('未授权来源')
+    expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
+    apiAdminPost.mockResolvedValue({ authorization_url: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize', started_at: new Date().toISOString() })
+    await wrapper.findAll('button').find(button => button.text() === '管理员扫码授权').trigger('click')
+    await flushPromises()
+    expect(apiAdminPost).toHaveBeenCalledWith('/api/feishu-knowledge/sources/source-2/oauth/authorize', { mode: 'qr' })
+    expect(apiAdminPost.mock.calls.some(([url]) => url.endsWith('/sources'))).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('连接检查失败时禁止扫描，修复后重试恢复扫描而不新建来源', async () => {
+    apiAdminPost.mockRejectedValueOnce({ response: { data: { detail: { code: 'FEISHU_ROOT_PERMISSION_DENIED' } } } })
+    const wrapper = mountView()
+    await flushPromises()
+    const checkButton = wrapper.get('.heading-actions').findAll('button').find(button => button.text().includes('检查连接'))
+    await checkButton.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.heading-actions').text()).toContain('检查连接')
+    expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeDefined()
+    await checkButton.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.heading-actions').text()).toContain('检查连接')
+    expect(wrapper.get('[data-testid="scan-full"]').attributes('disabled')).toBeUndefined()
+    expect(apiAdminPost.mock.calls.every(([url]) => url === '/api/feishu-knowledge/sources/source-1/check')).toBe(true)
     wrapper.unmount()
   })
 
@@ -825,14 +984,16 @@ describe('FeishuKnowledgeView', () => {
     wrapper.unmount()
   })
 
-  it('将资料与扫描放在模块导航最后', async () => {
+  it('将资料与扫描放在模块导航最后并合并显示待加工数量', async () => {
     const wrapper = mountView()
     await flushPromises()
 
     const labels = wrapper.findAll('.governance-tab').map((tab) => tab.text().trim())
-    expect(labels[0]).toContain('待审核')
+    expect(labels[0]).toContain('审核任务')
     expect(labels[1]).toContain('运营待办')
-    expect(labels.at(-1)).toBe('资料与扫描')
+    expect(labels.at(-1)).toContain('资料与扫描')
+    expect(labels.at(-1)).toContain('待加工 0')
+    expect(labels.some((label) => label.startsWith('待加工'))).toBe(false)
     expect(wrapper.findAll('.governance-tab')[0].classes()).toContain('active')
     expect(wrapper.find('[data-testid="review-workspace"]').exists()).toBe(true)
     wrapper.unmount()
@@ -856,7 +1017,7 @@ describe('FeishuKnowledgeView', () => {
     secondWrapper.unmount()
   })
 
-  it('首次进入知识加工页面时立即显示真实待审核数量', async () => {
+  it('首次进入知识加工页面时立即显示真实待审核数量且不重复显示检查连接', async () => {
     apiAdminGet.mockImplementation((url) => {
       if (url === '/api/feishu-knowledge/sources') return Promise.resolve({ items: [source] })
       if (url.endsWith('/oauth/status')) {
@@ -875,11 +1036,13 @@ describe('FeishuKnowledgeView', () => {
 
     const reviewTab = wrapper
       .findAll('.governance-tab')
-      .find((tab) => tab.text().includes('待审核'))
+      .find((tab) => tab.text().includes('审核任务'))
     expect(reviewTab.text()).toContain('2')
     expect(apiAdminGet).toHaveBeenCalledWith(
       '/api/governance/review-packages?source_id=source-1&view=mine'
     )
+    expect(wrapper.get('.heading-actions').text()).toContain('检查连接')
+    expect(wrapper.find('.source-next-step').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -1229,7 +1392,8 @@ describe('FeishuKnowledgeView', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="oauth-qr-modal"]').exists()).toBe(false)
-    expect(message.success).toHaveBeenCalledWith('飞书用户授权成功，知识目录已刷新')
+    expect(message.success).toHaveBeenCalledWith('飞书用户授权成功')
+    expect(apiAdminPost).toHaveBeenCalledWith('/api/feishu-knowledge/sources/source-1/check', {})
     expect(apiAdminGet).toHaveBeenCalledWith('/api/feishu-knowledge/sources/source-1/tree')
   })
 

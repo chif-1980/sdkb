@@ -46,6 +46,9 @@ NON_KNOWLEDGE_TITLES = {
     "thank you",
     "thanks",
 }
+DECORATIVE_IMAGE_HINTS = {
+    "logo", "标志", "水印", "页码"
+}
 RELATION_TAGS = {
     "EXACT_DUPLICATE": ProblemTag.DUPLICATE,
     "OVERLAP": ProblemTag.OVERLAP,
@@ -137,6 +140,19 @@ def _is_non_knowledge(title: str, content: str) -> bool:
     return len(normalized_content) < 24
 
 
+def _is_decorative_element(segments: Sequence[FeishuSourceSegment], title: str, content: str) -> bool:
+    """过滤仅包含装饰性图片/标识的素材，避免生成无业务价值的知识单元。"""
+    if not segments or not content:
+        return False
+    if not all(str(segment.segment_type or '').lower() in {'image', 'figure', 'media'} for segment in segments):
+        return False
+    image_only = bool(re.fullmatch(r"\s*!\[[^\]]*\]\([^)]*\)\s*", content, re.DOTALL))
+    if not image_only:
+        return False
+    context = _normalized(" ".join([title, *(segments[0].title_path or [])]))
+    return any(_normalized(hint) in context for hint in DECORATIVE_IMAGE_HINTS)
+
+
 @dataclass(slots=True)
 class KnowledgeUnitDraft:
     unit_key: str
@@ -194,13 +210,14 @@ def build_knowledge_unit_drafts(
         content = "\n\n".join(segment.content.strip() for segment in group if segment.content.strip()).strip()
         if not content:
             continue
+        title = _unit_title(group, unit_type, index)
         drafts.append(
             KnowledgeUnitDraft(
                 unit_key=_hash(anchor, str(occurrence), length=48),
                 lineage_key=_hash(item_id, anchor, str(occurrence), length=48),
                 unit_index=len(drafts),
                 unit_type=unit_type,
-                title=_unit_title(group, unit_type, index),
+                title=title,
                 content=content,
                 content_hash=_content_hash(content),
                 source_segment_ids=[segment.segment_id for segment in group],
@@ -250,8 +267,6 @@ class KnowledgeUnitService:
                 .order_by(FeishuSourceSegment.segment_index.asc())
             )
         )
-        if not segments:
-            return []
         units = await self._upsert_units(version, source_item, segments)
         comparison_status = str(
             ((version.processing_params or {}).get("comparison") or {}).get("status") or "not_started"
@@ -358,6 +373,20 @@ class KnowledgeUnitService:
         if base_item and base_item.item_status == ReviewItemStatus.WAITING_SOURCE_CHANGE:
             return
 
+        active_unit_ids = {unit.unit_id for unit in units}
+        for old_item in unit_items.values():
+            if (old_item.subject_id not in active_unit_ids
+                    and old_item.item_status in {
+                        ReviewItemStatus.PENDING, ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION
+                    }):
+                old_item.item_status = ReviewItemStatus.INVALIDATED
+                old_item.decision_comment = "重新加工后该知识单元已失效"
+        # Reprocessing may reactivate a previously invalidated automatic item.
+        for unit in units:
+            old_item = unit_items.get(unit.unit_id)
+            if old_item and old_item.item_status == ReviewItemStatus.INVALIDATED and not old_item.decided_by:
+                old_item.item_status = ReviewItemStatus.PENDING
+
         previous_unit_ids = [unit.previous_unit_id for unit in units if unit.previous_unit_id]
         previous_units = {
             unit.unit_id: unit
@@ -385,10 +414,13 @@ class KnowledgeUnitService:
                 reason = (
                     "跨文档检查失败，请人工核对后处理。"
                     if comparison_status == "failed"
-                    else "跨文档检查尚未完成，完成后系统会自动刷新建议。"
+                    else "跨文档检查尚未完成，先按 AI 建议处理，完成后系统会自动复核。"
                 )
                 confidence = min(confidence, 0.5)
-                manual_required = True
+                # A queued/running comparison is advisory, not a blocking risk.
+                # Only a failed comparison requires manual confirmation here;
+                # actual conflicts/duplicates are handled by relation_types above.
+                manual_required = comparison_status == "failed"
             unit.recommended_outcome = recommended_outcome
             unit.recommendation_reason = reason
             unit.recommendation_confidence = confidence
