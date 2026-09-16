@@ -30,6 +30,11 @@ features:
     details: 知识助手只使用已发布内容回答，并提供可核对的引用来源与简洁、详细两种模式。
 ---
 
+## 在线访问
+
+- **善达企业知识助手**：[http://assit.quickdone.cn/](http://assit.quickdone.cn/)
+- **善达知枢（管理端）**：[http://manager.assit.quickdone.cn/](http://manager.assit.quickdone.cn/)
+
 <div class="home-path">
   <strong>推荐阅读顺序</strong>
   <span>产品概览</span><i>→</i><span>系统架构</span><i>→</i><span>知识加工</span><i>→</i><span>审核与发布</span><i>→</i><span>知识助手</span>
