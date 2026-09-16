@@ -11,11 +11,11 @@ hero:
     alt: 善达信息
   actions:
     - theme: brand
-      text: 开始使用
-      link: /guide/overview
+      text: 善达知枢使用手册
+      link: /guide/zhishu-manual
     - theme: alt
-      text: 进入知识加工指南
-      link: /guide/knowledge-processing
+      text: 企业知识助手使用手册
+      link: /guide/knowledge-assistant
 
 features:
   - title: 资料接入

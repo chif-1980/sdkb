@@ -21,10 +21,10 @@ export default defineConfig({
     logo: '/quickdone-mark.webp',
     siteTitle: '善达知枢',
     nav: [
-      { text: '使用指南', link: '/guide/overview' },
+      { text: '知枢手册', link: '/guide/zhishu-manual' },
       { text: '系统架构', link: '/guide/architecture' },
       { text: '知识加工', link: '/guide/knowledge-processing' },
-      { text: '知识助手', link: '/guide/knowledge-assistant' },
+      { text: '助手手册', link: '/guide/knowledge-assistant' },
       {
         text: '部署与配置',
         items: [
@@ -35,6 +35,13 @@ export default defineConfig({
       }
     ],
     sidebar: [
+      {
+        text: '产品使用手册',
+        items: [
+          { text: '善达知枢 · 管理员与审核人员', link: '/guide/zhishu-manual' },
+          { text: '企业知识助手 · 员工', link: '/guide/knowledge-assistant' }
+        ]
+      },
       {
         text: '开始使用',
         items: [
