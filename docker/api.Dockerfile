@@ -13,6 +13,8 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai \
     UV_PROJECT_ENVIRONMENT="/usr/local" \
     UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
+    UV_HTTP_TIMEOUT=120 \
+    UV_RETRIES=5 \
     UV_COMPILE_BYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 
@@ -28,6 +30,7 @@ RUN set -ex \
     && apt-get update \
     && apt-get install -y --no-install-recommends --fix-missing \
         curl \
+        chromium \
         ffmpeg \
         fonts-liberation \
         fonts-noto-cjk \
@@ -52,6 +55,8 @@ COPY backend/package /app/package
 
 # 如果网络还是不好，可以在后面添加 --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 RUN uv sync --no-cache --group test --no-dev --frozen
+
+ENV MEETING_BROWSER_EXECUTABLE=/usr/bin/chromium
 
 # 复制 server 代码
 COPY backend/server /app/server

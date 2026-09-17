@@ -35,6 +35,8 @@ class SendMessageRequest(StrictRequest):
     request_id: str | None = Field(default=None, alias="requestId", max_length=128)
     skill_id: ProductSkillId | None = Field(default=None, alias="skillId")
     attachment_ids: list[str] = Field(default_factory=list, max_length=5, alias="attachmentIds")
+    meeting_id: str | None = Field(default=None, alias="meetingId", max_length=64)
+    history_meeting_ids: list[str] = Field(default_factory=list, max_length=5, alias="historyMeetingIds")
 
 
 class ResumeRunRequest(StrictRequest):
@@ -143,6 +145,7 @@ class MessageResponse(ProductResponse):
     citations: list[CitationResponse]
     materials: list[ProductMaterialResponse] = Field(default_factory=list)
     solution_draft: dict | None = None
+    meeting: dict | None = None
     created_at: str
 
 
