@@ -6,13 +6,13 @@
 
 ## 1. 功能架构与知识来源
 
-![企业知识助手功能架构：登录权限、提问附件、正式知识检索、答案来源与反馈](/images/manuals/assistant-architecture.svg)
+[![企业知识助手 v0.3.6 浅色功能架构：普通问答、查资料、做方案，以及知识依据与反馈闭环](/images/manuals/assistant-architecture-v036-light.svg)](/images/manuals/assistant-architecture-v036-light.svg)
 
-[下载架构图 SVG](/images/manuals/assistant-architecture.svg) · [下载高清 PNG](/images/manuals/assistant-architecture@2x.png)
+[下载架构图 SVG](/images/manuals/assistant-architecture-v036-light.svg) · [下载高清 PNG](/images/manuals/assistant-architecture-v036-light@2x.png)
 
 助手的企业知识证据来自善达知枢中已审核发布、当前有效且你有权访问的正式知识。它不会因为检索不到答案，就改用待审核或不纳入的资料。会话附件可作为你此次提问的上下文，**不会自动发布到企业知识库**。
 
-使用闭环是：**提问 → 阅读回答 → 核对引用 → 继续追问或反馈**。
+三条功能路径分别是：**普通问答获得有引用的回答，`@查资料` 查找现成文件，`@做方案` 根据需求生成可复核、保存和确认的草稿**。发现知识问题后可反馈给管理员，经复核和审核发布更新可用知识。
 
 ## 2. 登录并开始使用
 
