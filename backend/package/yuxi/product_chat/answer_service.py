@@ -317,8 +317,11 @@ class AnswerService:
         conversation_id: str,
         *,
         mode: Literal["CONCISE", "DETAILED"] = "CONCISE",
+        include_history: bool = True,
     ) -> GroundedAnswer:
-        async for event in self.answer_events(question, user, conversation_id, mode=mode):
+        async for event in self.answer_events(
+            question, user, conversation_id, mode=mode, include_history=include_history
+        ):
             if isinstance(event, GroundedAnswer):
                 return event
         raise RuntimeError("Answer orchestration completed without a result")
@@ -330,6 +333,7 @@ class AnswerService:
         conversation_id: str,
         *,
         mode: Literal["CONCISE", "DETAILED"] = "CONCISE",
+        include_history: bool = True,
     ) -> AsyncIterator[AnswerProgress | AnswerDelta | GroundedAnswer]:
         started_at = perf_counter()
         evidence_count = 0
@@ -337,7 +341,7 @@ class AnswerService:
             understanding_message = "正在分析问题并规划查证路径" if mode == "DETAILED" else "正在结合当前对话理解问题"
             yield AnswerProgress("UNDERSTANDING", understanding_message)
             scope = await self._resolve_scope(user)
-            history = await self._load_history(conversation_id, user)
+            history = await self._load_history(conversation_id, user) if include_history else ()
             model = None
 
             if mode == "DETAILED":

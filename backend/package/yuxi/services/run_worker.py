@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -16,6 +17,7 @@ from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentR
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.product_chat.progress import ProgressAccumulator, progress_stage_from_chunk
+from yuxi.product_chat.meeting_service import process_meeting_run
 from yuxi.services.run_queue_service import (
     append_run_stream_event,
     clear_cancel_signal,
@@ -659,6 +661,11 @@ async def _worker_startup(ctx):
     async with pg_manager.get_async_session_context() as session:
         await init_builtin_skills(session)
     sys_config.start_runtime_sync()
+    # Meeting analysis runs here, so formal knowledge needs the same initialization as the API.
+    if os.environ.get("LITE_MODE", "").lower() not in ("true", "1"):
+        from yuxi.knowledge.runtime import knowledge_base
+
+        await knowledge_base.initialize()
 
 
 async def _worker_shutdown(ctx):
@@ -666,7 +673,7 @@ async def _worker_shutdown(ctx):
 
 
 class WorkerSettings:
-    functions = [process_agent_run]
+    functions = [process_agent_run, process_meeting_run]
     max_tries = 2
     retry_jobs = True
     job_timeout = 3600

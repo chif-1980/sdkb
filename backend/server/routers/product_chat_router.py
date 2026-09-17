@@ -21,6 +21,14 @@ from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
 from yuxi.product_chat.answer_service import AnswerDelta, AnswerProgress, AnswerService, GroundedAnswer
 from yuxi.product_chat.citation_service import CitationResolutionError
 from yuxi.product_chat.material_service import ProductMaterialService
+from yuxi.product_chat.meeting_repository import MeetingRepository, serialize_meeting
+from yuxi.product_chat.meeting_service import wants_meeting
+from server.routers.product_meeting_router import (
+    start_meeting,
+    meeting_stream,
+    cancel_meeting,
+    require_meeting,
+)
 from yuxi.product_chat.progress import progress_stage_from_chunk
 from yuxi.product_chat.repository import (
     ProductChatNotFoundError,
@@ -78,6 +86,7 @@ from yuxi.storage.postgres.models_product import (
     MessageCitation,
     ProductConversation,
     ProductMessage,
+    MeetingRecord,
 )
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.utils import logger
@@ -85,7 +94,7 @@ from yuxi.utils.datetime_utils import format_utc_datetime, utc_isoformat
 
 product_chat = APIRouter(route_class=ProductApiRoute)
 
-_SKILL_MENTION_PATTERN = re.compile(r"(^|\s)@(查资料|做方案|分析会议)(?=\s|$)")
+_SKILL_MENTION_PATTERN = re.compile(r"(^|\s)@(查资料|做方案|会议纪要|分析会议)(?=\s|$)")
 _MATERIAL_INTENT_PATTERN = re.compile(r"查资料|产品说明|宣传手册|宣传册|解决方案|下载|分发|飞书原文")
 
 
@@ -1471,7 +1480,14 @@ async def get_conversation(
                                     message.answer_status = _solution_answer_status(candidate)
                                     await db.flush()
                         draft_data = serialize_solution_draft(draft, await draft_repository.list_versions(draft.id))
-                message_responses.append(_message_response(message, citations, materials, draft_data))
+                response = _message_response(message, citations, materials, draft_data)
+                if message.role == "ASSISTANT" and message.skill_id == "MEETING_ANALYSIS":
+                    meeting = await db.scalar(
+                        select(MeetingRecord).where(MeetingRecord.message_id == message.message_id)
+                    )
+                    if meeting:
+                        response.meeting = serialize_meeting(meeting)
+                message_responses.append(response)
             return ConversationDetailResponse(
                 conversation=_conversation_response(conversation, len(messages)),
                 messages=message_responses,
@@ -1490,6 +1506,11 @@ async def send_message(
     request: SendMessageRequest,
     current_user: User = Depends(get_product_user),
 ) -> MessageExchangeResponse | JSONResponse:
+    if wants_meeting(request.content, request.skill_id):
+        meeting_id = await start_meeting(conversation_id, request, current_user)
+        return JSONResponse(
+            {"run": {"runId": meeting_id, "streamUrl": f"/api/chat/runs/{meeting_id}/events"}}, status_code=202
+        )
     if request.skill_id == "SOLUTION_DRAFT":
         try:
             run = await _create_solution_run(
@@ -1594,6 +1615,9 @@ async def stream_message(
     request: SendMessageRequest,
     current_user: User = Depends(get_product_user),
 ) -> StreamingResponse | JSONResponse:
+    if wants_meeting(request.content, request.skill_id):
+        meeting_id = await start_meeting(conversation_id, request, current_user)
+        return await meeting_stream(meeting_id, current_user)
     if request.skill_id == "SOLUTION_DRAFT":
         try:
             run = await _create_solution_run(
@@ -1796,6 +1820,13 @@ async def get_active_product_chat_run(
             await ProductChatRepository(db).require_conversation(conversation_id, current_user.id)
         except ProductChatNotFoundError:
             raise _not_found() from None
+        meeting = await MeetingRepository(db).active(conversation_id)
+        if meeting:
+            return {"run": {
+                "runId": meeting.id, "status": meeting.state,
+                "skillId": "MEETING_ANALYSIS", "inputContent": meeting.input["content"],
+                "streamUrl": f"/api/chat/runs/{meeting.id}/events",
+            }}
         run = await AgentRunRepository(db).get_latest_run_by_thread_for_user(
             f"product-{conversation_id}", str(current_user.uid),
         )
@@ -1813,6 +1844,14 @@ async def get_product_chat_run(
     run_id: str,
     current_user: User = Depends(get_product_user),
 ) -> dict:
+    if run_id.startswith("MT-"):
+        async with pg_manager.get_async_session_context() as db:
+            record = await require_meeting(db, run_id, current_user)
+            return {"run": {
+                "runId": record.id, "status": record.state,
+                "skillId": "MEETING_ANALYSIS", "progress": record.progress,
+                "streamUrl": f"/api/chat/runs/{run_id}/events",
+            }}
     try:
         async with pg_manager.get_async_session_context() as db:
             result = await get_agent_run_view(run_id=run_id, current_uid=str(current_user.uid), db=db)
@@ -1997,6 +2036,8 @@ async def stream_product_chat_run_events(
     run_id: str,
     current_user: User = Depends(get_product_user),
 ):
+    if run_id.startswith("MT-"):
+        return await meeting_stream(run_id, current_user)
     async def events() -> AsyncIterator[str]:
         # Keep the product-facing stream contract identical for initial and
         # resumed runs.  The browser can immediately bind its cancel action to
@@ -2120,6 +2161,8 @@ async def cancel_product_chat_run(
     run_id: str,
     current_user: User = Depends(get_product_user),
 ) -> dict:
+    if run_id.startswith("MT-"):
+        return await cancel_meeting(run_id, current_user)
     async with pg_manager.get_async_session_context() as db:
         return await cancel_agent_run_view(run_id=run_id, current_uid=str(current_user.uid), db=db)
 

@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1240" role="img" aria-labelledby="title desc">
+<title id="title">企业知识助手功能架构（含会议纪要）</title>
+<desc id="desc">统一登录和会话入口，通过自然提问或 @ 技能选择普通问答、查资料、做方案和会议纪要。普通问答检索知识并组织有引用的回答；查资料展示现成资料及摘要、原文、下载和分发；做方案支持条件确认、能力证据匹配、草稿复核、保存与确认。企业知识须已审核发布、索引就绪、当前有效且有访问权限；会话附件与确认方案均不自动入库。可定位反馈交由善达知枢复核，审核发布后更新可用知识。</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#94a3b8"/></marker></defs>
+<style>text{font-family:"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#203047}.title{font-size:32px;font-weight:650}.heading{font-size:24px;font-weight:650}.body{font-size:20px}.small{font-size:18px;fill:#53667d}.kicker{font-size:16px;font-weight:600;letter-spacing:1px}.flow{fill:none;stroke:#94a3b8;stroke-width:2;marker-end:url(#arrow)}</style>
+<rect width="1080" height="1240" rx="20" fill="#f8fafc"/>
+<rect x="1" y="1" width="1078" height="1238" rx="20" fill="none" stroke="#dce4ec"/>
+
+<text x="42" y="57" class="title" text-anchor="start">企业知识助手 · 功能架构</text>
+<text x="42" y="87" class="body" text-anchor="start" style="fill:#53667d">问答、查资料、做方案与会议纪要</text>
+<rect x="895" y="33" width="143" height="38" rx="19" fill="#e8f2fc" stroke="#cee0f3"/>
+<text x="966.5" y="59" class="body" text-anchor="middle" style="fill:#2463a0">2026.09</text>
+<rect x="42" y="118" width="996" height="105" rx="12" fill="#fff" stroke="#dce4ec"/>
+<text x="64" y="157" class="heading" text-anchor="start">登录与权限</text>
+<text x="64" y="195" class="small" text-anchor="start">飞书登录 · 按账号授权访问</text>
+<text x="400" y="157" class="heading" text-anchor="start">会话管理</text>
+<text x="400" y="195" class="small" text-anchor="start">新建 · 历史 · 搜索 · 归档</text>
+<text x="736" y="157" class="heading" text-anchor="start">问题与需求</text>
+<text x="736" y="195" class="small" text-anchor="start">输入问题 · 补充会话附件</text>
+<path d="M374 142V199" stroke="#e2e8f0"/>
+<path d="M710 142V199" stroke="#e2e8f0"/>
+<path d="M540 223V261" class="flow"/>
+<rect x="42" y="266" width="996" height="58" rx="12" fill="#edf4fb" stroke="#cbddee"/>
+<text x="540" y="303" class="body" text-anchor="middle">自然提问识别意图  /  输入 @ 或点击技能入口明确指定</text>
+<path d="M540 324V345M159 345H921" fill="none" stroke="#94a3b8" stroke-width="2"/>
+<path d="M159 345V369" class="flow"/>
+<rect x="42" y="374" width="234" height="356" rx="12" fill="#edf8fa" stroke="#c5e4e9"/>
+<text x="58" y="415" class="heading" style="font-size:23px;fill:#16768a">01  普通问答</text>
+<text x="58" y="444" class="small">直接输入具体问题</text>
+<rect x="54" y="468" width="210" height="66" rx="9" fill="#fff" stroke="#c5e4e9"/>
+<text x="159" y="495" class="body" text-anchor="middle" style="font-size:18px">检索正式知识</text>
+<text x="159" y="520" class="small" text-anchor="middle" style="font-size:16px">结合问题与会话上下文</text>
+<path d="M159 534V548" class="flow"/>
+<rect x="54" y="552" width="210" height="66" rx="9" fill="#fff" stroke="#c5e4e9"/>
+<text x="159" y="579" class="body" text-anchor="middle" style="font-size:18px">组织回答与引用</text>
+<text x="159" y="604" class="small" text-anchor="middle" style="font-size:16px">结论 · 条件 · 依据</text>
+<path d="M159 618V632" class="flow"/>
+<rect x="54" y="636" width="210" height="66" rx="9" fill="#fff" stroke="#c5e4e9"/>
+<text x="159" y="663" class="body" text-anchor="middle" style="font-size:18px">核对原文并追问</text>
+<text x="159" y="688" class="small" text-anchor="middle" style="font-size:16px">围绕同一主题继续</text>
+<path d="M159 730V752" fill="none" stroke="#94a3b8" stroke-width="2"/>
+<path d="M413 345V369" class="flow"/>
+<rect x="296" y="374" width="234" height="356" rx="12" fill="#eef5fe" stroke="#d0e1f7"/>
+<text x="312" y="415" class="heading" style="font-size:23px;fill:#2463a0">02  @查资料</text>
+<text x="312" y="444" class="small">查找现成文件</text>
+<rect x="308" y="468" width="210" height="66" rx="9" fill="#fff" stroke="#d0e1f7"/>
+<text x="413" y="495" class="body" text-anchor="middle" style="font-size:18px">查找已发布资料</text>
+<text x="413" y="520" class="small" text-anchor="middle" style="font-size:16px">产品说明 · 手册 · 方案</text>
+<path d="M413 534V548" class="flow"/>
+<rect x="308" y="552" width="210" height="66" rx="9" fill="#fff" stroke="#d0e1f7"/>
+<text x="413" y="579" class="body" text-anchor="middle" style="font-size:18px">展示相关资料</text>
+<text x="413" y="604" class="small" text-anchor="middle" style="font-size:16px">标题 · 摘要 · 更新时间</text>
+<path d="M413 618V632" class="flow"/>
+<rect x="308" y="636" width="210" height="66" rx="9" fill="#fff" stroke="#d0e1f7"/>
+<text x="413" y="663" class="body" text-anchor="middle" style="font-size:18px">使用符合需求的资料</text>
+<text x="413" y="688" class="small" text-anchor="middle" style="font-size:16px">原文 · 下载 · 分发</text>
+<path d="M413 730V752" fill="none" stroke="#94a3b8" stroke-width="2"/>
+<path d="M667 345V369" class="flow"/>
+<rect x="550" y="374" width="234" height="356" rx="12" fill="#f5f1fb" stroke="#dfd4ef"/>
+<text x="566" y="415" class="heading" style="font-size:23px;fill:#7052a8">03  @做方案</text>
+<text x="566" y="444" class="small">起草方案或汇报提纲</text>
+<rect x="562" y="468" width="210" height="66" rx="9" fill="#fff" stroke="#dfd4ef"/>
+<text x="667" y="495" class="body" text-anchor="middle" style="font-size:18px">澄清需求与条件</text>
+<text x="667" y="520" class="small" text-anchor="middle" style="font-size:16px">按提示补充后继续</text>
+<path d="M667 534V548" class="flow"/>
+<rect x="562" y="552" width="210" height="66" rx="9" fill="#fff" stroke="#dfd4ef"/>
+<text x="667" y="579" class="body" text-anchor="middle" style="font-size:18px">匹配企业能力与证据</text>
+<text x="667" y="604" class="small" text-anchor="middle" style="font-size:16px">生成草稿并提示风险</text>
+<path d="M667 618V632" class="flow"/>
+<rect x="562" y="636" width="210" height="66" rx="9" fill="#fff" stroke="#dfd4ef"/>
+<text x="667" y="663" class="body" text-anchor="middle" style="font-size:18px">复核、保存与确认</text>
+<text x="667" y="688" class="small" text-anchor="middle" style="font-size:16px">依据不足先补充资料</text>
+<path d="M667 730V752" fill="none" stroke="#94a3b8" stroke-width="2"/>
+<path d="M921 345V369" class="flow"/>
+<rect x="804" y="374" width="234" height="356" rx="12" fill="#f0f8f6" stroke="#cfe3dc"/>
+<text x="820" y="415" class="heading" style="font-size:23px;fill:#24715c">04  @会议纪要</text>
+<text x="820" y="444" class="small">会议链接、文字或文件</text>
+<rect x="816" y="468" width="210" height="66" rx="9" fill="#fff" stroke="#cfe3dc"/>
+<text x="921" y="495" class="body" text-anchor="middle" style="font-size:18px">读取并核对全文</text>
+<text x="921" y="520" class="small" text-anchor="middle" style="font-size:16px">公开网页自动尝试识别</text>
+<path d="M921 534V548" class="flow"/>
+<rect x="816" y="552" width="210" height="66" rx="9" fill="#fff" stroke="#cfe3dc"/>
+<text x="921" y="579" class="body" text-anchor="middle" style="font-size:18px">提炼纪要与业务分析</text>
+<text x="921" y="604" class="small" text-anchor="middle" style="font-size:16px">决定 · 行动 · 待确认</text>
+<path d="M921 618V632" class="flow"/>
+<rect x="816" y="636" width="210" height="66" rx="9" fill="#fff" stroke="#cfe3dc"/>
+<text x="921" y="663" class="body" text-anchor="middle" style="font-size:18px">核对、修改与导出</text>
+<text x="921" y="688" class="small" text-anchor="middle" style="font-size:16px">原文引用 · 保存 · Word</text>
+<path d="M921 730V752" fill="none" stroke="#94a3b8" stroke-width="2"/>
+<path d="M159 752H921M540 752V775" class="flow"/>
+<rect x="42" y="780" width="996" height="88" rx="12" fill="#fff" stroke="#dce4ec"/>
+<text x="540" y="817" class="heading" text-anchor="middle">共同核验：引用来源、原文内容与适用条件</text>
+<text x="540" y="850" class="body" text-anchor="middle" style="fill:#53667d">依据不足或存在冲突时明确提示；方案中的企业能力与交付边界需核对</text>
+<text x="42" y="917" class="heading" text-anchor="start">知识依据与使用边界</text>
+<rect x="42" y="938" width="604" height="115" rx="12" fill="#f0f8f6" stroke="#cfe3dc"/>
+<text x="64" y="972" class="body" text-anchor="start" style="fill:#24715c">企业正式知识 → 核对企业能力与事实</text>
+<text x="64" y="1004" class="body" text-anchor="start">来自善达知枢：已审核发布、索引就绪</text>
+<text x="64" y="1034" class="body" text-anchor="start">只使用当前有效且有访问权限的内容</text>
+<rect x="676" y="938" width="362" height="115" rx="12" fill="#fff9ec" stroke="#eddfbd"/>
+<text x="698" y="972" class="body" text-anchor="start" style="fill:#866118">会话附件 → 提供需求上下文</text>
+<text x="698" y="1004" class="body" text-anchor="start">用于当前会话和会议分析</text>
+<text x="698" y="1034" class="body" text-anchor="start">附件、草稿和纪要不自动入库</text>
+<path d="M344 1100V1059" class="flow"/>
+<rect x="42" y="1105" width="996" height="65" rx="12" fill="#fff" stroke="#dce4ec"/>
+<text x="540" y="1145" class="body" text-anchor="middle">可定位反馈 → 知枢复核 → 审核发布 → 更新可用知识</text>
+<text x="42" y="1205" class="small" text-anchor="start">会议默认只分析本次资料；历史会议需明确选择，不能读取时可上传完整文字。</text>
+</svg>

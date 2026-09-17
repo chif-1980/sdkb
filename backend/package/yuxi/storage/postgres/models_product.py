@@ -179,6 +179,42 @@ class ProductMessage(Base):
     )
 
 
+class MeetingRecord(Base):
+    __tablename__ = "product_meeting_records"
+
+    id = Column(String(64), primary_key=True)
+    conversation_id = Column(
+        String(26), ForeignKey("product_conversations.conversation_id"), nullable=False, index=True
+    )
+    message_id = Column(String(26), ForeignKey("product_messages.message_id"), nullable=False, unique=True)
+    user_message_id = Column(String(26), ForeignKey("product_messages.message_id"), nullable=False)
+    request_id = Column(String(128), nullable=False)
+    state = Column(String(24), nullable=False, default="pending")
+    progress = Column(JSON, nullable=False, default=dict)
+    input = Column(JSON, nullable=False, default=dict)
+    sources = Column(JSON, nullable=False, default=list)
+    result = Column(JSON, nullable=True)
+    error = Column(JSON, nullable=True)
+    version = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive)
+
+    __table_args__ = (UniqueConstraint("conversation_id", "request_id", name="uq_meeting_request"),)
+
+
+class MeetingRevision(Base):
+    __tablename__ = "product_meeting_revisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    meeting_id = Column(String(64), ForeignKey("product_meeting_records.id"), nullable=False)
+    version = Column(Integer, nullable=False)
+    result = Column(JSON, nullable=False)
+    editor_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+    __table_args__ = (UniqueConstraint("meeting_id", "version", name="uq_meeting_revision"),)
+
+
 class SolutionDraft(Base):
     """Current immutable projection of one solution-draft Agent Run."""
 

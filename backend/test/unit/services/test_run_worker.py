@@ -499,7 +499,15 @@ async def test_process_agent_run_persists_interrupt_snapshot_before_terminal(mon
 
 @pytest.mark.asyncio
 async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.MonkeyPatch):
+    from yuxi.knowledge.runtime import knowledge_base
+
     calls: list[str] = []
+
+    async def fake_knowledge_initialize():
+        calls.append("knowledge_initialize")
+
+    monkeypatch.setenv("LITE_MODE", "false")
+    monkeypatch.setattr(knowledge_base, "initialize", fake_knowledge_initialize)
 
     def fake_initialize():
         calls.append("initialize")
@@ -541,4 +549,5 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "ensure_builtin_mcp_servers_in_db",
         "init_builtin_skills",
         "start_runtime_sync",
+        "knowledge_initialize",
     ]
