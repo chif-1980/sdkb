@@ -4,7 +4,7 @@
   <p><strong>企业知识治理与可信知识助手平台</strong></p>
   <p>让企业资料从接入、加工、审核到发布形成可追溯闭环，并以可核对的引用支撑每一次回答。</p>
 
-  [![Version](https://img.shields.io/badge/version-v0.3.0-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.3.0)
+  [![Version](https://img.shields.io/badge/version-v0.4.0-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.4.0)
   [![License](https://img.shields.io/badge/license-MIT-475569)](LICENSE)
   [![Docs](https://img.shields.io/badge/docs-在线文档-2563eb)](https://chif-1980.github.io/sdkb/)
 
@@ -77,7 +77,7 @@
 
 ## 当前版本
 
-`v0.3.0` 在治理自动化与可信知识问答基础上，新增基于 LangGraph Agent Run 的企业级方案智能体：支持需求分析、企业能力匹配、方案蓝图、证据核验、冲突与待确认项处理，并保留可追溯的执行过程、流式事件和历史恢复能力。此前版本的知识治理、资料检索、引用与权限控制继续保留。
+`v0.4.0` 新增会议纪要与通用公开链接读取、自动保存和 Word 导出，集中管理双产品模型用途，并完善分析失败重试及知识治理。会议跟进与任务分配将作为后续功能开发。
 
 ## 开源说明
 
