@@ -988,16 +988,18 @@ async def test_excluded_unit_can_be_reopened_once_as_a_new_review(unit_review_se
 
 
 @pytest.mark.asyncio
-async def test_pending_comparison_keeps_new_units_out_of_safe_batch(unit_review_session):
+async def test_pending_comparison_keeps_new_units_eligible_with_advisory_warning(unit_review_session):
     session, package, _ = unit_review_session
     version = await session.scalar(select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-1"))
     version.processing_params = {"comparison": {"status": "running"}}
 
     detail = await ReviewPackageService(session).get_package(package.package_id)
 
-    assert detail["attention_unit_count"] == 2
-    assert detail["safe_recommendation_count"] == 0
-    assert all(item["manual_review_required"] for item in detail["items"])
+    # A queued/running comparison is advisory. Only a failed comparison or an
+    # actual relation requires manual confirmation and blocks safe batching.
+    assert detail["attention_unit_count"] == 0
+    assert detail["safe_recommendation_count"] == 2
+    assert all(not item["manual_review_required"] for item in detail["items"])
     assert all(item["comparison_status"] == "running" for item in detail["items"])
 
 
