@@ -139,3 +139,75 @@ async def test_assignment_checks_directory_and_allows_employee_without_local_acc
             await router.edit_meeting_followup("MT-test", patch, SimpleNamespace(id=1, username="上传者"))
         assert exc.value.status_code == 422
         save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirm_sends_task_content_and_source_refs(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from server.routers import product_meeting_router as router
+
+    record = SimpleNamespace(
+        id="MT-test",
+        state="completed",
+        version=1,
+        result={
+            "title": "产品交流",
+            "followup": {
+                "coordinator": {"userId": "1", "displayName": "上传者"},
+                "tasks": [{"id": "t1", "title": "核对资料", "content": "补充报价范围", "assignee": None,
+                            "dueDate": None, "status": "OPEN", "sourceRefs": ["S1-P3"]}],
+                "knowledgeSuggestions": [],
+            },
+        },
+    )
+    db = object()
+
+    @asynccontextmanager
+    async def session():
+        yield db
+
+    class FakeFeishuClient:
+        def __init__(self):
+            self.message = None
+            self.task = None
+
+        async def send_text_message(self, **kwargs):
+            self.message = kwargs
+            return {"data": {"message_id": "om_1"}}
+
+        async def create_task(self, **kwargs):
+            self.task = kwargs
+            return {"data": {"task": {"guid": "task_1"}}}
+
+        async def aclose(self):
+            return None
+
+    client = FakeFeishuClient()
+    save = AsyncMock()
+    monkeypatch.setattr(router.pg_manager, "get_async_session_context", session)
+    monkeypatch.setattr(router, "require_meeting", AsyncMock(return_value=record))
+    monkeypatch.setattr(router, "load_meeting_directory", AsyncMock(return_value={"users": [
+        {"userId": None, "feishuUserId": "ou_1", "feishuOpenId": "ou_open_1", "displayName": "张三"},
+    ]}))
+    monkeypatch.setattr(router, "MeetingRepository", lambda _: SimpleNamespace(save_result=save))
+    monkeypatch.setattr(router, "serialize_meeting", lambda _: {})
+    monkeypatch.setattr(router, "FeishuClient", lambda: client)
+
+    patch = router.MeetingFollowupEdit(
+        version=1,
+        action="CONFIRM",
+        taskId="t1",
+        tasks=[router.FollowupTaskEdit(
+            id="t1", title="核对资料", content="补充报价范围", assigneeFeishuUserId="ou_1",
+        )],
+    )
+    await router.edit_meeting_followup("MT-test", patch, SimpleNamespace(id=1, username="上传者"))
+
+    assert "内容：补充报价范围" in client.message["text"]
+    assert "依据：S1-P3" in client.message["text"]
+    assert "补充报价范围" in client.task["description"]
+    assert "依据：S1-P3" in client.task["description"]
+    task = save.await_args.args[1]["followup"]["tasks"][0]
+    assert task["reviewStatus"] == "CONFIRMED"
+    assert task["delivery"] == {"notification": "SENT", "feishuTaskId": "task_1", "messageId": "om_1", "error": None}

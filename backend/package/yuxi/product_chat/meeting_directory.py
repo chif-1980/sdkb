@@ -67,6 +67,8 @@ async def load_meeting_directory(db, user_id: int) -> dict:
                         "englishName": item.get("en_name") or "",
                         "departmentIds": [],
                     }
+                    if item.get("open_id"):
+                        users[identity]["feishuOpenId"] = item["open_id"]
                 users[identity]["departmentIds"].append(department["id"])
         return {
             "departments": departments,

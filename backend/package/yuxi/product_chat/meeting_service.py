@@ -70,6 +70,7 @@ def build_followup(result: dict, *, coordinator_id: int, coordinator_name: str) 
                 {
                     "id": f"task-{index}",
                     "title": title,
+                    "content": str(raw.get("content") or raw.get("description") or raw.get("details") or "").strip(),
                     "assignee": None,
                     "assigneeSuggestion": (
                         assignee_name
@@ -349,7 +350,8 @@ async def _analyze(record_id):
             '"body":"中文 Markdown：会议概况（时间、参与者缺失未提供）、摘要与议题、'
             "明确决定、行动清单表格、待确认问题。"
             '关键结论、决定和行动项均保留原文引用。",'
-            '"actionItems":[{"title":"明确的行动事项", "assigneeName":"未明确",'
+            '"actionItems":[{"title":"明确的行动事项", "content":"执行要求或交付物，无则空",'
+            '"assigneeName":"未明确",'
             '"dueDate":"未明确", "evidence":"[S1-P1]"}],'
             '"knowledgeSuggestions":[{"title":"建议知识维护人员核对的主题",'
             '"reason":"为什么需要维护", "evidence":"[S1-P1]"}],'

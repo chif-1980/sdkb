@@ -392,6 +392,44 @@ class FeishuClient:
             )
         return payload
 
+    async def create_task(
+        self,
+        *,
+        user_id: str,
+        summary: str,
+        description: str = "",
+        due_timestamp: int | None = None,
+        client_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Feishu task assigned to one tenant user."""
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must not be blank")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("summary must not be blank")
+        body: dict[str, Any] = {
+            "summary": summary.strip(),
+            "description": description,
+            "members": [{"id": user_id, "type": "user", "role": "assignee"}],
+        }
+        if due_timestamp is not None:
+            body["due"] = {"timestamp": str(int(due_timestamp)), "is_all_day": True}
+        params = {"client_token": client_token} if client_token else None
+        response = await self._post_response(
+            "/open-apis/task/v2/tasks",
+            params=params,
+            json_body=body,
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict) or payload.get("code", 0) != 0:
+            raise FeishuApiError(
+                "Feishu task API returned an invalid response",
+                error=self._error_from_response(response),
+            )
+        return payload
+
     async def _get(self, path: str, *, params: dict[str, str]) -> dict[str, Any]:
         response = await self._get_response(path, params=params)
         try:

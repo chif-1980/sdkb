@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import date
+from datetime import UTC, date, datetime, time
 import re
 from uuid import uuid4
 from urllib.parse import quote
@@ -18,6 +18,7 @@ from server.utils.auth_middleware import get_product_user
 from yuxi.product_chat.meeting_repository import MeetingRepository, serialize_meeting
 from yuxi.product_chat.meeting_service import enqueue_meeting
 from yuxi.product_chat.meeting_directory import load_meeting_directory
+from yuxi.integrations.feishu.client import FeishuClient, FeishuClientError
 from yuxi.product_chat.repository import ProductChatNotFoundError
 from yuxi.product_chat.schemas import SendMessageRequest
 from yuxi.services.run_queue_service import publish_cancel_signal
@@ -54,7 +55,8 @@ class MeetingEdit(BaseModel):
 
 class FollowupTaskEdit(BaseModel):
     id: str = Field(min_length=1, max_length=80)
-    title: str = Field(min_length=1, max_length=1000)
+    title: str = Field(default="", max_length=1000)
+    content: str = Field(default="", max_length=5000)
     assigneeUserId: str | None = Field(default=None, max_length=32)
     assigneeFeishuUserId: str | None = Field(default=None, max_length=128)
     dueDate: date | None = None
@@ -64,6 +66,8 @@ class FollowupTaskEdit(BaseModel):
 class MeetingFollowupEdit(BaseModel):
     version: int = Field(ge=1)
     tasks: list[FollowupTaskEdit] = Field(default_factory=list, max_length=100)
+    action: Literal["SAVE", "CONFIRM", "IGNORE"] = "SAVE"
+    taskId: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 async def start_meeting(conversation_id, request, user):
@@ -223,29 +227,54 @@ async def edit_meeting_followup(
         updated_tasks = []
         for task in patch.tasks:
             previous = existing_tasks.get(task.id)
-            if previous is None:
+            if previous is None and not task.id.startswith("manual-"):
                 raise HTTPException(422, f"未知的会议任务：{task.id}")
+            if patch.action == "SAVE" and not task.title.strip():
+                raise HTTPException(422, "待办标题不能为空，请补充后再保存。")
             assignee = None
             if task.assigneeUserId or task.assigneeFeishuUserId:
-                assignee = (
+                directory_user = (
                     directory_by_feishu.get(task.assigneeFeishuUserId)
                     if task.assigneeFeishuUserId
                     else directory_by_id.get(task.assigneeUserId)
                 )
-                if assignee is None:
+                if directory_user is None:
                     raise HTTPException(422, "任务负责人必须来自当前飞书企业目录。")
                 assignee = {
-                    "userId": assignee["userId"],
-                    "feishuUserId": assignee["feishuUserId"],
-                    "displayName": assignee["displayName"],
+                    "userId": directory_user["userId"],
+                    "feishuUserId": directory_user["feishuUserId"],
+                    "displayName": directory_user["displayName"],
                 }
+                if directory_user.get("feishuOpenId"):
+                    assignee["feishuOpenId"] = directory_user["feishuOpenId"]
+            previous = previous or {}
+            normalized_due_date = task.dueDate.isoformat() if task.dueDate else None
+            previous_assignee = previous.get("assignee") or {}
+            assignee_changed = (
+                previous_assignee.get("userId") != (assignee or {}).get("userId")
+                or previous_assignee.get("feishuUserId") != (assignee or {}).get("feishuUserId")
+            )
+            task_changed = (
+                previous.get("title", "") != task.title.strip()
+                or previous.get("content", "") != task.content.strip()
+                or assignee_changed
+                or previous.get("dueDate") != normalized_due_date
+            )
+            review_status = previous.get("reviewStatus") or "PENDING"
+            delivery = previous.get("delivery") or {
+                "notification": "NOT_SENT", "feishuTaskId": None, "messageId": None, "error": None,
+            }
+            if task_changed and review_status in {"CONFIRMED", "IGNORED", "DELIVERY_FAILED"}:
+                review_status = "PENDING"
+                delivery = {"notification": "NOT_SENT", "feishuTaskId": None, "messageId": None, "error": None}
             updated_tasks.append(
                 {
                     "id": task.id,
                     "title": task.title.strip(),
+                    "content": task.content.strip(),
                     "assignee": assignee,
                     "assigneeSuggestion": previous.get("assigneeSuggestion"),
-                    "dueDate": task.dueDate.isoformat() if task.dueDate else None,
+                    "dueDate": normalized_due_date,
                     "dueDateSuggestion": previous.get("dueDateSuggestion")
                     or (
                         previous.get("dueDate")
@@ -254,15 +283,105 @@ async def edit_meeting_followup(
                     ),
                     "status": task.status,
                     "sourceRefs": list(previous.get("sourceRefs") or []),
+                    "origin": previous.get("origin") or ("MANUAL" if task.id.startswith("manual-") else "EXTRACTED"),
+                    "reviewStatus": review_status,
+                    "delivery": delivery,
                 }
             )
+        if patch.action in {"CONFIRM", "IGNORE"}:
+            if not patch.taskId:
+                raise HTTPException(422, "请指定要处理的会议待办。")
+            if patch.taskId not in {task["id"] for task in updated_tasks}:
+                raise HTTPException(422, "要处理的会议待办不存在。")
+        delivery_error = None
+        if patch.action == "IGNORE":
+            target = next(task for task in updated_tasks if task["id"] == patch.taskId)
+            if target["reviewStatus"] == "CONFIRMED" and target["delivery"].get("feishuTaskId"):
+                raise HTTPException(409, "该待办已经发送到飞书，如需修改请先编辑后重新确认。")
+            for task in updated_tasks:
+                if task["id"] == patch.taskId:
+                    task["reviewStatus"] = "IGNORED"
+        elif patch.action == "CONFIRM":
+            target = next(task for task in updated_tasks if task["id"] == patch.taskId)
+            if not target["title"].strip():
+                raise HTTPException(422, "待办标题不能为空，请补充后再确认。")
+            if target["reviewStatus"] == "CONFIRMED" and target["delivery"].get("feishuTaskId"):
+                pass
+            else:
+                assignee = target.get("assignee") or {}
+                recipient = assignee.get("feishuOpenId")
+                feishu_user_id = assignee.get("feishuUserId")
+                if not recipient or not feishu_user_id:
+                    raise HTTPException(422, "请先选择任务负责人，再确认并发送。")
+                client = None
+                previous_delivery = target.get("delivery") or {}
+                message_id = previous_delivery.get("messageId")
+                task_id = None
+                try:
+                    client = FeishuClient()
+                    if not message_id:
+                        message_lines = [
+                            f"会议待办：{target['title']}",
+                            f"会议：{(record.result or {}).get('title') or '会议纪要'}",
+                        ]
+                        if target.get("content"):
+                            message_lines.append(f"内容：{target['content']}")
+                        message_lines.append(f"截止日期：{target['dueDate'] or '待确认'}")
+                        if target.get("sourceRefs"):
+                            message_lines.append(f"依据：{'、'.join(target['sourceRefs'])}")
+                        message_lines.append("请在飞书中确认并跟进。")
+                        message = await client.send_text_message(
+                            open_id=recipient,
+                            text="\n".join(message_lines),
+                        )
+                        message_id = (
+                            (message.get("data") or {}).get("message_id")
+                            if isinstance(message, dict) else None
+                        )
+                    created = await client.create_task(
+                        user_id=feishu_user_id,
+                        summary=target["title"],
+                        description=(
+                            f"{target.get('content') + chr(10) if target.get('content') else ''}"
+                            f"来源：{(record.result or {}).get('title') or '会议纪要'}"
+                            f"{chr(10) + '依据：' + '、'.join(target['sourceRefs']) if target.get('sourceRefs') else ''}"
+                        ),
+                        due_timestamp=(
+                            int(
+                                datetime.combine(
+                                    date.fromisoformat(target["dueDate"]), time.max, tzinfo=UTC
+                                ).timestamp()
+                            )
+                            if target.get("dueDate") else None
+                        ),
+                        client_token=f"meeting-{record.id}-{target['id']}",
+                    )
+                    task_id = (((created.get("data") or {}).get("task") or {}).get("guid")
+                               or ((created.get("data") or {}).get("task") or {}).get("id"))
+                    if not task_id:
+                        raise FeishuClientError("飞书待办接口未返回任务编号")
+                    target["reviewStatus"] = "CONFIRMED"
+                    target["delivery"] = {
+                        "notification": "SENT", "feishuTaskId": task_id,
+                        "messageId": message_id, "error": None,
+                    }
+                except (FeishuClientError, ValueError) as exc:
+                    delivery_error = "已确认但飞书通知或待办创建失败，请重试发送。"
+                    target["reviewStatus"] = "DELIVERY_FAILED"
+                    target["delivery"] = {
+                        "notification": "FAILED", "feishuTaskId": task_id,
+                        "messageId": message_id, "error": str(exc)[:300],
+                    }
+                finally:
+                    if client:
+                        await client.aclose()
         followup = {
             "coordinator": existing.get("coordinator") or {"userId": str(user.id), "displayName": user.username},
             "tasks": updated_tasks,
             "knowledgeSuggestions": list(existing.get("knowledgeSuggestions") or []),
         }
         await MeetingRepository(db).save_result(record, {**record.result, "followup": followup}, editor=user.id)
-        return {"meeting": serialize_meeting(record)}
+        return {"meeting": serialize_meeting(record), "deliveryError": delivery_error}
 
 
 @product_meeting.patch("/chat/meetings/{meeting_id}")

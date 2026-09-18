@@ -154,6 +154,36 @@ async def test_send_text_message_uses_open_id_and_text_payload():
 
 
 @pytest.mark.asyncio
+async def test_create_task_uses_assignee_and_idempotency_token():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == TENANT_TOKEN_PATH:
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        assert request.method == "POST"
+        assert request.url.params["client_token"] == "meeting-m1-task-1"
+        payload = json.loads(request.content)
+        assert payload["summary"] == "核对资料"
+        assert payload["description"] == "来源：会议"
+        assert payload["members"] == [{"id": "ou_user", "type": "user", "role": "assignee"}]
+        assert payload["due"] == {"timestamp": "1798656000", "is_all_day": True}
+        return httpx.Response(200, json={"code": 0, "data": {"task": {"guid": "task-guid"}}})
+
+    client = _client(handler)
+    result = await client.create_task(
+        user_id="ou_user",
+        summary="核对资料",
+        description="来源：会议",
+        due_timestamp=1798656000,
+        client_token="meeting-m1-task-1",
+    )
+    assert result["data"]["task"]["guid"] == "task-guid"
+    assert len(requests) == 2
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_tenant_token_is_reused_while_fresh() -> None:
     auth_attempts = 0
 
