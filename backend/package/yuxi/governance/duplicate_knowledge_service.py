@@ -22,6 +22,7 @@ from yuxi.governance.domain import (
     ReviewSubjectType,
 )
 from yuxi.governance.knowledge_unit_service import KnowledgeUnitService
+from yuxi.governance.evidence_text import text_comparison_content
 from yuxi.governance.review_backfill import backfill_legacy_governance_reviews
 from yuxi.governance.schemas import DuplicateRelationResolutionRequest
 from yuxi.storage.postgres.models_knowledge import (
@@ -101,7 +102,7 @@ def _excerpt(content: str, limit: int = 420) -> str:
 
 def _passages(content: str, *, limit: int = 160) -> list[str]:
     passages: list[str] = []
-    for block in re.split(r"\n+|(?<=[。！？!?])", content or ""):
+    for block in re.split(r"\n+|(?<=[。！？!?])", text_comparison_content(content)):
         cleaned = block.strip()
         if _is_media_reference(cleaned):
             continue
@@ -270,6 +271,7 @@ class DuplicateKnowledgeService:
         relation.resolved_by = operator_id
         relation.resolved_at = utc_now_naive()
         if primary_version_id is not None:
+            retained_version_ids = {primary_version_id}
             alias_version_id = (
                 relation.target_version_id
                 if primary_version_id == relation.source_version_id
@@ -277,6 +279,14 @@ class DuplicateKnowledgeService:
             )
             review_automation = await self._close_duplicate_review_items(
                 alias_version_id,
+                relation_id=relation.relation_id,
+                matches=matches,
+                operator_id=operator_id,
+                now=relation.resolved_at,
+            )
+        if payload.strategy == DuplicateResolutionStrategy.KEEP_SEPARATE:
+            review_automation = await self._finalize_retained_review_items(
+                {relation.source_version_id, relation.target_version_id},
                 relation_id=relation.relation_id,
                 matches=matches,
                 operator_id=operator_id,
@@ -496,6 +506,63 @@ class DuplicateKnowledgeService:
         await self.session.flush()
         return await self._review_automation_summary(alias_version_id, relation_id=relation_id)
 
+    async def _finalize_retained_review_items(
+        self,
+        version_ids: set[str],
+        *,
+        relation_id: str,
+        matches: list[dict],
+        operator_id: str,
+        now: datetime,
+    ) -> dict:
+        """A resolved duplicate choice is also the publication decision for matched units."""
+        relation = await self.session.scalar(select(FeishuCrossDocumentRelation).where(
+            FeishuCrossDocumentRelation.relation_id == relation_id
+        ))
+        if relation is None:
+            raise LookupError(f"Cross-document relation not found: {relation_id}")
+        segment_ids_by_version = {
+            relation.source_version_id: {m["source_segment_id"] for m in matches if m.get("source_segment_id")},
+            relation.target_version_id: {m["target_segment_id"] for m in matches if m.get("target_segment_id")},
+        }
+        decided = 0
+        remaining = 0
+        await backfill_legacy_governance_reviews(self.session, version_ids=list(version_ids))
+        for version_id in version_ids:
+            packages = list(await self.session.scalars(select(FeishuReviewPackage).where(
+                FeishuReviewPackage.source_version_id == version_id,
+                FeishuReviewPackage.workflow_status.not_in({ReviewPackageStatus.COMPLETED, ReviewPackageStatus.INVALIDATED}),
+            ).with_for_update()))
+            for package in packages:
+                await KnowledgeUnitService(self.session).ensure_for_package(package)
+                items = list(await self.session.scalars(select(FeishuReviewItem).where(
+                    FeishuReviewItem.package_id == package.package_id
+                ).with_for_update()))
+                units = {u.unit_id: u for u in await self.session.scalars(select(FeishuKnowledgeUnit).where(
+                    FeishuKnowledgeUnit.unit_id.in_([i.subject_id for i in items if i.subject_type == ReviewSubjectType.KNOWLEDGE_UNIT])
+                ).with_for_update())}
+                for item in items:
+                    unit = units.get(item.subject_id)
+                    ids = set(unit.source_segment_ids or []) if unit else set()
+                    if item.subject_type != ReviewSubjectType.KNOWLEDGE_UNIT or item.item_status not in {
+                        ReviewItemStatus.PENDING, ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION
+                    } or not ids or not ids.issubset(segment_ids_by_version.get(version_id, set())):
+                        continue
+                    await KnowledgeUnitService(self.session).apply_decision(item, ReviewOutcome.PUBLISH)
+                    item.item_status = ReviewItemStatus.DECIDED
+                    item.outcome = ReviewOutcome.PUBLISH
+                    item.internal_action = ReviewAction.CREATE
+                    item.decision_comment = "已处理重复关系并直接纳入知识库。"
+                    item.decision_payload = {"request_id": f"duplicate:{relation_id}", "outcome": ReviewOutcome.PUBLISH, "duplicate_relation_id": relation_id, "automated": True}
+                    item.decided_by = operator_id
+                    item.decided_at = now
+                    decided += 1
+                package.workflow_status = self._aggregate_package_status(items)
+                package.completed_at = now if package.workflow_status == ReviewPackageStatus.COMPLETED else None
+                package.lock_version += 1
+                remaining += sum(i.item_status in {ReviewItemStatus.PENDING, ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION} for i in items)
+        return {"auto_decided_unit_count": decided, "remaining_unit_count": remaining, "source_review_closed": remaining == 0}
+
     async def _review_automation_summary(self, alias_version_id: str, *, relation_id: str) -> dict:
         packages = list(
             await self.session.scalars(
@@ -651,17 +718,19 @@ class DuplicateKnowledgeService:
         threshold = 0.94 if relation.relation_type == CrossDocumentRelationType.EXACT_DUPLICATE else 0.72
         candidates = []
         for source_chunk in source_chunks:
-            source_normalized = _normalize_content(source_chunk.content)
+            source_text = text_comparison_content(source_chunk.content)
+            source_normalized = _normalize_content(source_text)
             if len(source_normalized) < MIN_FRAGMENT_LENGTH:
                 continue
             for target_chunk in target_chunks:
-                target_normalized = _normalize_content(target_chunk.content)
+                target_text = text_comparison_content(target_chunk.content)
+                target_normalized = _normalize_content(target_text)
                 if len(target_normalized) < MIN_FRAGMENT_LENGTH:
                     continue
                 similarity = _content_similarity(source_normalized, target_normalized)
                 passage_similarity, source_overlap, target_overlap = _best_passage_match(
-                    source_chunk.content,
-                    target_chunk.content,
+                    source_text,
+                    target_text,
                 )
                 similarity = max(similarity, passage_similarity)
                 if similarity < threshold:
@@ -671,8 +740,8 @@ class DuplicateKnowledgeService:
                         similarity,
                         source_chunk,
                         target_chunk,
-                        source_overlap or source_chunk.content,
-                        target_overlap or target_chunk.content,
+                        source_overlap or source_text,
+                        target_overlap or target_text,
                     )
                 )
 

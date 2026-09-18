@@ -6,6 +6,7 @@ import importlib
 import inspect
 import os
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -36,6 +37,7 @@ EXPECTED_ROUTES = {
     ("POST", "/feishu-knowledge/materials/{version_id}/reject"),
     ("POST", "/feishu-knowledge/materials/{version_id}/retry"),
     ("POST", "/feishu-knowledge/materials/{version_id}/reindex"),
+    ("POST", "/feishu-knowledge/materials/{version_id}/reprocess"),
     ("POST", "/feishu-knowledge/materials/batch-action"),
     ("POST", "/feishu-knowledge/materials/{version_id}/confirm-removal"),
 }
@@ -172,7 +174,14 @@ async def test_feishu_endpoints_reject_non_admin_users():
     assert response.status_code == 403
 
 
-async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkeypatch):
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkeypatch, automatic):
+    monkeypatch.setattr(feishu_module, "name_feishu_target", AsyncMock())
+    create_target = AsyncMock(return_value="kb-1")
+    monkeypatch.setattr(feishu_module, "create_feishu_target", create_target)
+    monkeypatch.setattr(feishu_module.knowledge_base, "get_databases_by_uid", AsyncMock(return_value={
+        "databases": [{"kb_id": "kb-1", "kb_type": "milvus"}],
+    }))
     source = SimpleNamespace(
         source_id="source-1",
         name="Docs",
@@ -277,7 +286,11 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post(
             "/api/feishu-knowledge/sources",
-            json={"name": "Docs", "wiki_root_token": "root", "target_kb_id": "kb-1"},
+            json={
+                "name": "Docs",
+                "wiki_root_url": "https://example.feishu.cn/wiki/root?from=copy",
+                "target_kb_id": None if automatic else "kb-1",
+            },
         )
         checked = await client.post("/api/feishu-knowledge/sources/source-1/check")
         scanned = await client.post(
@@ -292,9 +305,11 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
         approved = await client.post("/api/feishu-knowledge/materials/version-1/approve")
 
     assert created.status_code == 201
+    assert created.json()["target_kb_id"] == "kb-1"
+    assert create_target.await_count == int(automatic)
     assert "credential_env_name" not in created.json()
     assert checked.status_code == 200
-    assert checked.json() == {"status": "ok", "source_id": "source-1", "root_title": "Root"}
+    assert checked.json() == {"status": "ok", "source_id": "source-1", "root_title": "Root", "scan_scope": "root"}
     assert scanned.status_code == 202
     assert scanned.json() == {"task_id": "task-scan", "run_id": "run-1", "status": "queued", "created": True}
     assert queried.status_code == 200
@@ -310,6 +325,7 @@ async def test_admin_create_check_scan_query_reject_and_approve_contracts(monkey
         "updated_at": None,
         "last_full_sync_at": None,
         "last_incremental_sync_at": None,
+        "has_successful_full_scan": False,
         "total_count": 0,
         "awaiting_review_count": 0,
         "failed_count": 0,

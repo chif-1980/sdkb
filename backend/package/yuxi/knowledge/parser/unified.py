@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+from collections import Counter
 import os
 import re
 import tempfile
@@ -19,7 +21,7 @@ from docling.document_converter import DocumentConverter
 from langchain_community.document_loaders import PyPDFLoader
 from markdownify import markdownify as md_convert
 
-from yuxi.knowledge.parser.image_enrichment import enrich_image, image_markdown
+from yuxi.knowledge.parser.image_enrichment import decoration_reason, enrich_image, image_markdown
 from yuxi.knowledge.parser.zip_utils import process_zip_file as _process_zip_file
 from yuxi.storage.minio import get_minio_client
 from yuxi.utils import logger
@@ -156,6 +158,33 @@ def _convert_with_docling(file_path: Path, params: dict | None = None) -> str:
 
     if hasattr(doc, "pictures") and doc.pictures:
         replacements: list[str] = []
+        # Require the same image in a small page-margin box on at least three pages.
+        margin_pages: dict[str, set[int]] = {}
+        margin_pictures: set[int] = set()
+        small_pictures: set[int] = set()
+        page_picture_counts = Counter(prov.page_no for picture in doc.pictures for prov in getattr(picture, "prov", []))
+        text_pages = {prov.page_no for text_item in getattr(doc, "texts", [])
+                      if len(getattr(text_item, "text", "").strip()) >= 8 for prov in getattr(text_item, "prov", [])}
+        for picture in doc.pictures:
+            uri = str(picture.image.uri) if getattr(picture, "image", None) else ""
+            for prov in getattr(picture, "prov", []):
+                page = doc.pages.get(prov.page_no)
+                if page is None or not page.size.width or not page.size.height:
+                    continue
+                box = prov.bbox
+                width, height = abs(box.r - box.l), abs(box.t - box.b)
+                if (width * height / (page.size.width * page.size.height) <= 0.003
+                        and 0.5 <= width / max(1, height) <= 2
+                        and page_picture_counts[prov.page_no] <= 12 and prov.page_no in text_pages):
+                    small_pictures.add(id(picture))
+                small = width * height / (page.size.width * page.size.height) <= 0.015
+                at_margin = (max(box.t, box.b) <= page.size.height * 0.12
+                             or min(box.t, box.b) >= page.size.height * 0.88)
+                if small and at_margin and uri.startswith("data:"):
+                    margin_pages.setdefault(uri, set()).add(prov.page_no)
+                    margin_pictures.add(id(picture))
+        filtered = Counter()
+        enrichment_cache = {}
         for pic in doc.pictures:
             uri = str(pic.image.uri) if hasattr(pic, "image") and hasattr(pic.image, "uri") else ""
             if uri.startswith("data:"):
@@ -163,8 +192,22 @@ def _convert_with_docling(file_path: Path, params: dict | None = None) -> str:
                 try:
                     image_data, mime_type = _parse_data_uri(uri)
                     filename = f"image_{int(time.time() * 1000000)}.{mime_type.split('/')[-1]}"
+                    digest = hashlib.sha256(image_data).hexdigest()
+                    if digest not in enrichment_cache:
+                        enrichment_cache[digest] = enrich_image(image_data, filename, params)
+                    enrichment = enrichment_cache[digest]
+                    reason = decoration_reason(
+                        image_data,
+                        ocr_text=enrichment.ocr_text,
+                        repeated_margin=id(pic) in margin_pictures and len(margin_pages.get(uri, set())) >= 3,
+                        small_pictogram=id(pic) in small_pictures,
+                        has_caption=bool(getattr(pic, "captions", [])),
+                    )
+                    if reason:
+                        filtered[reason] += 1
+                        replacements.append("")
+                        continue
                     url = _upload_image_to_minio(image_data, filename, image_bucket, image_prefix)
-                    enrichment = enrich_image(image_data, filename, params)
                     preview_url = (
                         _upload_image_preview_to_minio(
                             enrichment.preview_data,
@@ -189,6 +232,9 @@ def _convert_with_docling(file_path: Path, params: dict | None = None) -> str:
             else:
                 replacements.append("")
 
+        logger.info(
+            "decoration_filter file={} removed={} reasons={}", file_path.name, sum(filtered.values()), dict(filtered)
+        )
         markdown = doc.export_to_markdown()
         for replacement in replacements:
             markdown = re.sub(r"<!--\s*image\s*-->", replacement, markdown, count=1)

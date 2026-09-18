@@ -35,6 +35,7 @@ class FeishuSourceSummary:
     source_invalid_count: int
     last_full_sync_at: datetime | None
     last_incremental_sync_at: datetime | None
+    has_successful_full_scan: bool = False
 
 
 class FeishuKnowledgeRepository:
@@ -665,10 +666,11 @@ class FeishuKnowledgeRepository:
                 select(
                     func.max(case((FeishuSyncRun.run_type == "full", FeishuSyncRun.started_at), else_=None)),
                     func.max(case((FeishuSyncRun.run_type == "incremental", FeishuSyncRun.started_at), else_=None)),
+                    func.count().filter(FeishuSyncRun.run_type == "full", FeishuSyncRun.status == "succeeded"),
                 ).where(FeishuSyncRun.source_id == source_id)
             )
         total, valid, invalid, unsupported, awaiting_review, failed = result.one()
-        last_full_sync_at, last_incremental_sync_at = run_result.one()
+        last_full_sync_at, last_incremental_sync_at, successful_full_count = run_result.one()
         return FeishuSourceSummary(
             total_count=total or 0,
             valid_count=valid or 0,
@@ -679,6 +681,7 @@ class FeishuKnowledgeRepository:
             source_invalid_count=invalid or 0,
             last_full_sync_at=last_full_sync_at,
             last_incremental_sync_at=last_incremental_sync_at,
+            has_successful_full_scan=successful_full_count > 0,
         )
 
     async def _finish_sync_run(

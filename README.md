@@ -11,6 +11,11 @@
   [文档中心](https://chif-1980.github.io/sdkb/) · [产品概览](https://chif-1980.github.io/sdkb/guide/overview) · [知识加工指南](https://chif-1980.github.io/sdkb/guide/knowledge-processing)
 </div>
 
+## 在线访问
+
+- **善达企业知识助手**：[http://assit.quickdone.cn/](http://assit.quickdone.cn/)
+- **善达知枢（管理端）**：[http://manager.assit.quickdone.cn/](http://manager.assit.quickdone.cn/)
+
 ## 产品定位
 
 善达知枢面向企业内部知识管理场景，将分散的原始资料加工为可审核、可发布、可追溯的正式知识，并通过独立的企业知识助手向员工提供有来源依据的回答。
@@ -20,7 +25,7 @@
 | 产品入口 | 面向角色 | 主要工作 |
 | --- | --- | --- |
 | 知识管理与审核平台 | 知识管理员、审核人员 | 资料接入、知识加工、版式核对、单元审核、整篇审核、正式发布 |
-| 企业知识助手 | 企业员工 | 检索已发布知识、查看引用证据、获取简洁或详细回答 |
+| 企业知识助手 | 企业员工 | 检索已发布知识、查看引用证据、调用企业技能并获取带来源的回答 |
 
 ## 知识模型
 

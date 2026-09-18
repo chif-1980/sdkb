@@ -4,6 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -2263,6 +2264,9 @@ async def test_router_requires_login_and_admin_role():
 
 async def test_create_source_uses_global_credential_marker_and_hides_legacy_field(monkeypatch):
     captured = {}
+    monkeypatch.setattr(router_module.knowledge_base, "get_databases_by_uid", AsyncMock(return_value={
+        "databases": [{"kb_id": "kb-1", "kb_type": "milvus"}],
+    }))
 
     class FakeRepository:
         def __init__(self, _session):
@@ -2320,6 +2324,7 @@ async def test_create_source_rejects_blank_identifiers_before_repository_call(mo
 
 
 async def test_check_source_uses_read_only_feishu_client(monkeypatch):
+    monkeypatch.setattr(router_module, "name_feishu_target", AsyncMock())
     calls = []
 
     class FakeRepository:
@@ -2347,7 +2352,7 @@ async def test_check_source_uses_read_only_feishu_client(monkeypatch):
     monkeypatch.setattr(router_module, "FeishuKnowledgeRepository", FakeRepository)
     monkeypatch.setattr(router_module, "create_user_authorized_feishu_client", lambda _source_id: FakeClient())
     result = await router_module.check_source("source-1", db=SimpleNamespace())
-    assert result == {"status": "ok", "source_id": "source-1", "root_title": "Root"}
+    assert result == {"status": "ok", "source_id": "source-1", "root_title": "Root", "scan_scope": "root"}
     assert calls == [("init",), ("get", "root"), ("close",)]
 
 
@@ -2565,6 +2570,7 @@ async def test_query_endpoints_return_sources_runs_materials_and_events(review_f
         "updated_at": sources["items"][0]["updated_at"],
         "last_full_sync_at": "2026-08-13T03:00:00",
         "last_incremental_sync_at": None,
+        "has_successful_full_scan": True,
         "total_count": 1,
         "awaiting_review_count": 0,
         "failed_count": 0,
@@ -5012,3 +5018,69 @@ async def test_batch_action_returns_partial_results(monkeypatch):
         {"version_id": "missing", "ok": False, "status_code": 404, "error": "material not found"},
         {"version_id": "conflict", "ok": False, "status_code": 409, "error": "invalid state"},
     ]
+
+
+async def test_recover_pending_comparisons_uses_material_state_without_task_history(review_fixture, monkeypatch):
+    session = review_fixture
+    for version_id, status, processing in [
+        ("version-queued", "queued", "awaiting_review"),
+        ("version-running", "running", "parsed"),
+        ("version-completed", "completed", "awaiting_review"),
+        ("version-failed", "failed", "awaiting_review"),
+        ("version-unparsed", "queued", "processing_queued"),
+    ]:
+        session.add(FeishuMaterialVersion(
+            version_id=version_id, item_id="item-1", revision=version_id,
+            content_hash=version_id, processing_status=processing,
+            processing_params={"comparison": {"status": status}},
+        ))
+    await session.commit()
+
+    @asynccontextmanager
+    async def session_context():
+        yield session
+
+    enqueue = AsyncMock()
+    monkeypatch.setattr(router_module.pg_manager, "get_async_session_context", session_context)
+    monkeypatch.setattr(router_module, "_enqueue_comparison", enqueue)
+    assert await router_module._recover_pending_comparisons() == 2
+    assert [call.args[0] for call in enqueue.call_args_list] == ["version-queued", "version-running"]
+
+
+async def test_reprocess_pending_creates_fresh_candidate_and_preserves_active_version(review_fixture):
+    version = await review_fixture.get(FeishuMaterialVersion, 2)
+    version.source_object_path = 'minio://archive/source.docx'
+    version.yuxi_file_id = 'parsed-old'
+    await review_fixture.commit()
+    material = await FeishuReviewService(review_fixture).reprocess('version-new', operator_id='admin')
+    assert material.processing_status == 'processing_queued'
+    assert material.review_status == 'pending'
+    assert material.yuxi_file_id is None
+    assert material.processing_params['reprocess_previous_file_id'] == 'parsed-old'
+    item = await review_fixture.get(FeishuSourceItem, 1)
+    assert item.active_version_id == 'version-old'
+    with pytest.raises(ValueError, match='pending-review'):
+        await FeishuReviewService(review_fixture).reprocess('version-new', operator_id='admin')
+
+
+async def test_reprocess_rejects_published_material(review_fixture):
+    with pytest.raises(ValueError, match='pending-review'):
+        await FeishuReviewService(review_fixture).reprocess('version-old', operator_id='admin')
+
+
+async def test_reprocess_endpoint_commits_before_enqueue(monkeypatch):
+    calls = []
+    class Service:
+        def __init__(self, db): pass
+        async def reprocess(self, version_id, *, operator_id):
+            calls.append('reprocess')
+            return SimpleNamespace(version_id=version_id, processing_status='processing_queued')
+    async def commit(): calls.append('commit')
+    async def enqueue(version_id, *, operator_id):
+        calls.append('enqueue')
+        return SimpleNamespace(id='task-1')
+    monkeypatch.setattr(router_module, 'FeishuReviewService', Service)
+    monkeypatch.setattr(router_module, '_enqueue_processing', enqueue)
+    result = await router_module.reprocess_material('version-new', db=SimpleNamespace(commit=commit), current_user=SimpleNamespace(uid='admin'))
+    assert calls == ['reprocess', 'commit', 'enqueue']
+    assert result['task_id'] == 'task-1'

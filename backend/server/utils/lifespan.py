@@ -1,4 +1,6 @@
 import os
+import asyncio
+import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -36,7 +38,8 @@ async def _recover_recent_feishu_processing_tasks() -> int:
     # Task timestamps are stored as UTC-naive values while the UI displays
     # local time; keep a full day so a morning restart can recover a scan that
     # was submitted late the previous evening.
-    cutoff = utc_now_naive() - timedelta(hours=24)
+    # 重启后恢复所有近期未执行的飞书加工任务；保留 30 天窗口，避免旧任务永久滞留。
+    cutoff = utc_now_naive() - timedelta(days=30)
     async with pg_manager.get_async_session_context() as session:
         result = await session.execute(
             select(TaskRecord).where(
@@ -72,6 +75,7 @@ async def _recover_recent_feishu_processing_tasks() -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan事件管理器"""
+    startup_started_at = time.monotonic()
     # 初始化数据库连接
     try:
         pg_manager.initialize()
@@ -132,7 +136,8 @@ async def lifespan(app: FastAPI):
         logger.info("LITE_MODE enabled, skipping knowledge base initialization")
     else:
         try:
-            await knowledge_base.initialize()
+            # 知识库连接异常时不能阻塞整个 API 启动。
+            await asyncio.wait_for(knowledge_base.initialize(), timeout=20)
         except Exception as e:
             logger.error(f"Failed to initialize knowledge base manager: {e}")
 
@@ -155,7 +160,8 @@ async def lifespan(app: FastAPI):
     # 2. 核心修复：在这里执行一次 setup()，建完表就拉倒
     # =========================================================
     checkpointer = AsyncPostgresSaver(pg_manager.langgraph_pool)
-    await checkpointer.setup()
+    # LangGraph 表结构是幂等的；限制首次连接等待时间，避免 API 长时间无端口。
+    await asyncio.wait_for(checkpointer.setup(), timeout=20)
     print("LangGraph Checkpoint tables verified/created!")
 
     await tasker.start()
@@ -165,6 +171,13 @@ async def lifespan(app: FastAPI):
             await FeishuKnowledgeRepository(session).reconcile_interrupted_work()
     except Exception as e:
         logger.error(f"Failed to reconcile interrupted Feishu work during startup: {e}")
+    try:
+        from server.routers.feishu_knowledge_router import _recover_pending_comparisons
+
+        recovered_comparisons = await _recover_pending_comparisons()
+        logger.info("Restored {} pending Feishu comparisons after restart", recovered_comparisons)
+    except Exception as e:
+        logger.exception("Failed to restore pending Feishu comparisons: {}", e)
     try:
         recovered = await _recover_recent_feishu_processing_tasks()
         if recovered:
@@ -182,7 +195,7 @@ async def lifespan(app: FastAPI):
     ░██      ░█████░██ ░██    ░██ ░██  v{get_version()}
 
     """)
-    logger.info("Yuxi backend startup complete")
+    logger.info("Yuxi backend startup complete (%.1fs)", time.monotonic() - startup_started_at)
     yield
     await tasker.shutdown()
     await retry_coordinator.stop()

@@ -4,6 +4,7 @@ const BASE_URL = '/api/feishu-knowledge'
 const MAX_BATCH_SIZE = 100
 
 const ERROR_MESSAGES = {
+  FEISHU_ROOT_PERMISSION_DENIED: '无法读取链接页面，请确认授权管理员有权访问该页面，并已为应用开通知识库读取权限',
   'A scan is already running for this source': '该数据源已有扫描任务正在执行',
   'Feishu source not found': '未找到飞书数据源',
   'Feishu sync run not found': '未找到扫描批次',
@@ -12,6 +13,8 @@ const ERROR_MESSAGES = {
   'Reject reason is required': '驳回时必须填写原因',
   'Only pending material can be rejected': '仅待审核的素材可以驳回',
   'Only failed material can be retried': '仅处理失败的素材可以重试',
+  'Material has manual decisions; preserve them before reprocessing': '已有人工审批记录，不能直接覆盖重加工',
+  'Material contains published segments and cannot be reprocessed as pending': '已有发布的知识片段，不能按待审核素材重新加工',
   'Only active published material can be reindexed': '仅来源有效且当前生效的已发布素材可以重新解析',
   'Material is not queued for publishing': '素材当前不在等待发布状态',
   'Material is not queued for processing': '素材当前不在等待加工状态',
@@ -52,6 +55,7 @@ function withQuery(url, params = {}) {
 function getErrorDetail(error) {
   const detail = error?.response?.data?.detail
   if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) return detail.map(item => item.msg || '').join('；')
   if (detail && typeof detail === 'object')
     return detail.code || detail.message || detail.error || ''
   return error?.message || ''
@@ -59,6 +63,7 @@ function getErrorDetail(error) {
 
 export const feishuKnowledgeApi = {
   listSources: () => apiAdminGet(`${BASE_URL}/sources`),
+  createSource: (payload) => apiAdminPost(`${BASE_URL}/sources`, payload),
 
   checkSource: (sourceId) => apiAdminPost(`${BASE_URL}/sources/${encoded(sourceId)}/check`, {}),
 
@@ -94,6 +99,8 @@ export const feishuKnowledgeApi = {
   retryMaterial: (versionId) =>
     apiAdminPost(`${BASE_URL}/materials/${encoded(versionId)}/retry`, {}),
 
+  reprocessMaterial: (versionId) =>
+    apiAdminPost(`${BASE_URL}/materials/${encoded(versionId)}/reprocess`, {}),
   reindexMaterial: (versionId) =>
     apiAdminPost(`${BASE_URL}/materials/${encoded(versionId)}/reindex`, {}),
 

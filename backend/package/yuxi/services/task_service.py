@@ -112,7 +112,9 @@ class TaskContext:
 class Tasker:
     def __init__(
         self,
-        worker_count: int = 2,
+        # 文档解析（尤其是 OCR）会占用较多内存；API 进程只允许串行执行，
+        # 避免两个大型飞书素材同时解析导致容器 OOM 并重启。
+        worker_count: int = 1,
         default_timeout_seconds: float = TASKER_DEFAULT_TIMEOUT_SECONDS,
     ):
         self.worker_count = max(1, worker_count)

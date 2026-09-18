@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -8,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Literal, Protocol
 from uuid import uuid4
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -38,11 +40,13 @@ from yuxi.governance.source_segment_service import (
     build_source_segment_drafts,
 )
 from yuxi.knowledge.runtime import knowledge_base
+from yuxi.knowledge.factory import KnowledgeBaseFactory
 from yuxi.repositories.feishu_knowledge_repository import (
     FeishuKnowledgeRepository as _BaseRepository,
     FeishuSourceSummary,
 )
 from yuxi.services.task_service import TaskContext, tasker
+from yuxi.services.feishu_source_onboarding import create_feishu_target, name_feishu_target
 from yuxi.storage.minio import get_minio_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import (
@@ -50,6 +54,8 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuKnowledgeUnit,
     FeishuProcessingEvent,
     FeishuReviewPackage,
+    FeishuReviewItem,
+    FeishuCrossDocumentRelation,
     FeishuSource,
     FeishuSourceItem,
     FeishuSourceSegment,
@@ -575,6 +581,50 @@ class FeishuReviewService:
             body=f"{item.title or '未命名资料'}：{message}",
             feishu=retry_count >= 3,
         )
+
+    async def reprocess(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
+        async with self._transaction():
+            version, item, _ = await self._get_material(version_id, lock=True)
+            if (version.processing_status not in {"parsed", "awaiting_review"}
+                    or version.review_status != "pending" or item.source_validity != "valid"
+                    or item.active_version_id == version.version_id or not version.source_object_path):
+                raise ValueError("Only unpublished pending-review material with an archived source can be reprocessed")
+            decided = await self.session.scalar(
+                select(FeishuReviewItem.review_item_id)
+                .join(FeishuReviewPackage, FeishuReviewPackage.package_id == FeishuReviewItem.package_id)
+                .where(FeishuReviewPackage.source_version_id == version_id,
+                       FeishuReviewItem.decided_by.is_not(None)).limit(1)
+            )
+            if decided:
+                raise ValueError("Material has manual decisions; preserve them before reprocessing")
+            included = await self.session.scalar(
+                select(FeishuSourceSegment.segment_id).where(
+                    FeishuSourceSegment.version_id == version_id,
+                    FeishuSourceSegment.publication_state == "INCLUDED",
+                ).limit(1)
+            )
+            if included:
+                raise ValueError("Material contains published segments and cannot be reprocessed as pending")
+            from_status = version.processing_status
+            params = dict(version.processing_params or {})
+            params["reprocess_previous_file_id"] = version.yuxi_file_id
+            params["reprocess_requested_at"] = utc_now().isoformat()
+            params["decoration_filter_version"] = "image_evidence_v1"
+            params["comparison"] = {"status": "not_started"}
+            version.processing_params = params
+            # A fresh file record is required: parse_file cannot reparse a PARSED file.
+            version.yuxi_file_id = None
+            version.processing_status = "processing_queued"
+            version.error_code = None
+            version.error_message = None
+            version.retry_count = 0
+            self._append_event(
+                source_id=item.source_id, item_id=item.item_id, version_id=version_id,
+                event_type="reprocess_queued", from_status=from_status,
+                to_status="processing_queued", operator_id=operator_id,
+            )
+            await self.session.flush()
+            return version
 
     async def reindex(self, version_id: str, *, operator_id: str) -> FeishuMaterialVersion:
         async with self._transaction():
@@ -1370,20 +1420,45 @@ class FeishuReviewService:
 
 
 class SourceCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
-    wiki_root_token: str = Field(min_length=1, max_length=255)
+    name: str = Field(default="飞书知识库", min_length=1, max_length=255)
+    wiki_root_token: str | None = Field(default=None, min_length=1, max_length=255)
     wiki_root_url: str | None = Field(default=None, max_length=1024)
     scan_scope: Literal["root", "space"] = "root"
-    target_kb_id: str = Field(min_length=1, max_length=80)
+    target_kb_id: str | None = Field(default=None, min_length=1, max_length=80)
     enabled: bool = True
 
     @field_validator("name", "wiki_root_token", "target_kb_id")
     @classmethod
-    def identifiers_must_not_be_blank(cls, value: str) -> str:
+    def identifiers_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         value = value.strip()
         if not value:
             raise ValueError("value must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def resolve_wiki_link(self):
+        if self.wiki_root_url:
+            url = urlsplit(self.wiki_root_url.strip())
+            host = url.hostname or ""
+            match = re.fullmatch(r"/wiki/([A-Za-z0-9_-]{1,255})/?", url.path)
+            if (
+                url.scheme != "https"
+                or not host.endswith(".feishu.cn")
+                or url.username or url.password
+                or url.port not in (None, 443)
+                or not match
+            ):
+                raise ValueError("请粘贴飞书知识库内页面的 HTTPS 链接，例如 https://企业.feishu.cn/wiki/页面编号")
+            token = match.group(1)
+            if self.wiki_root_token and self.wiki_root_token != token:
+                raise ValueError("飞书链接与根节点不一致，请重新粘贴链接")
+            self.wiki_root_token = token
+            self.wiki_root_url = f"https://{host}/wiki/{token}"
+        if not self.wiki_root_token:
+            raise ValueError("请填写飞书知识库链接")
+        return self
 
 
 class ScanRequest(BaseModel):
@@ -1403,7 +1478,7 @@ class RejectRequest(BaseModel):
 
 
 class BatchActionRequest(BaseModel):
-    action: Literal["approve", "reject", "retry", "reindex", "confirm_removal"]
+    action: Literal["approve", "reject", "retry", "reindex", "reprocess", "confirm_removal"]
     version_ids: list[str] = Field(min_length=1, max_length=100)
     reason: str | None = Field(default=None, max_length=2000)
 
@@ -1450,6 +1525,7 @@ def _source_dict(source: FeishuSource, summary: FeishuSourceSummary | None = Non
             {
                 "last_full_sync_at": _iso(summary.last_full_sync_at),
                 "last_incremental_sync_at": _iso(summary.last_incremental_sync_at),
+                "has_successful_full_scan": getattr(summary, "has_successful_full_scan", False),
                 "total_count": summary.total_count,
                 "awaiting_review_count": summary.awaiting_review_count,
                 "failed_count": summary.failed_count,
@@ -1459,7 +1535,18 @@ def _source_dict(source: FeishuSource, summary: FeishuSourceSummary | None = Non
     return data
 
 
-def _run_dict(run: FeishuSyncRun, task: dict | None = None) -> dict:
+def _run_dict(
+    run: FeishuSyncRun,
+    task: dict | None = None,
+    processing_counts: dict[str, int] | None = None,
+) -> dict:
+    processing_counts = processing_counts or {}
+    queued_count = processing_counts.get("processing_queued", 0)
+    processing_count = sum(
+        processing_counts.get(status, 0)
+        for status in ("processing", "parsing", "chunking", "embedding", "publishing")
+    )
+    awaiting_review_count = processing_counts.get("awaiting_review", 0)
     data = {
         "run_id": run.run_id,
         "source_id": run.source_id,
@@ -1475,6 +1562,9 @@ def _run_dict(run: FeishuSyncRun, task: dict | None = None) -> dict:
         "unsupported_count": run.unsupported_count or 0,
         "failed_count": run.failed_count or 0,
         "invalidated_count": run.invalidated_count or 0,
+        "processing_queued_count": queued_count,
+        "processing_count": processing_count,
+        "awaiting_review_count": awaiting_review_count,
         "impact_summary": run.impact_summary or {},
         "error_summary": run.error_summary,
     }
@@ -1497,6 +1587,30 @@ def _run_dict(run: FeishuSyncRun, task: dict | None = None) -> dict:
             }
         )
     return data
+
+
+async def _run_processing_counts(db: AsyncSession, run: FeishuSyncRun) -> dict[str, int]:
+    """Return material states for a run, with a source fallback for legacy rows.
+
+    Older full scans created material versions without sync_run_id.  Showing zero
+    for those batches is misleading, so the latest source snapshot is used when
+    the run has no directly linked versions.
+    """
+    result = await db.execute(
+        select(FeishuMaterialVersion.processing_status, func.count(FeishuMaterialVersion.version_id))
+        .where(FeishuMaterialVersion.sync_run_id == run.run_id)
+        .group_by(FeishuMaterialVersion.processing_status)
+    )
+    rows = result.all()
+    if not rows:
+        result = await db.execute(
+            select(FeishuMaterialVersion.processing_status, func.count(FeishuMaterialVersion.version_id))
+            .join(FeishuSourceItem, FeishuSourceItem.item_id == FeishuMaterialVersion.item_id)
+            .where(FeishuSourceItem.source_id == run.source_id)
+            .group_by(FeishuMaterialVersion.processing_status)
+        )
+        rows = result.all()
+    return {status or "": int(count) for status, count in rows}
 
 
 def _material_dict(
@@ -1586,17 +1700,39 @@ async def create_source(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    source = await FeishuKnowledgeRepository(db).get_or_create_source(
-        source_id=uuid4().hex,
-        name=payload.name.strip(),
-        wiki_root_token=payload.wiki_root_token.strip(),
-        wiki_root_url=payload.wiki_root_url,
-        scan_scope=payload.scan_scope,
-        target_kb_id=payload.target_kb_id.strip(),
-        credential_env_name=GLOBAL_FEISHU_CREDENTIAL_MARKER,
-        enabled=payload.enabled,
-        created_by=current_user.uid,
-    )
+    source_id = uuid4().hex
+    target_kb_id = payload.target_kb_id
+    if target_kb_id:
+        databases = (await knowledge_base.get_databases_by_uid(current_user.uid)).get("databases", [])
+        target = next((item for item in databases if item["kb_id"] == target_kb_id), None)
+        if target is None:
+            raise HTTPException(status_code=422, detail="请选择当前可访问的正式知识库")
+        if not KnowledgeBaseFactory.get_kb_class(target["kb_type"]).supports_documents:
+            raise HTTPException(status_code=422, detail="该知识库不支持资料写入，请选择可管理文档的知识库")
+    else:
+        try:
+            target_kb_id = await create_feishu_target(source_id, current_user)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        source = await FeishuKnowledgeRepository(db).get_or_create_source(
+            source_id=source_id,
+            name=payload.name.strip(),
+            wiki_root_token=payload.wiki_root_token.strip(),
+            wiki_root_url=payload.wiki_root_url,
+            scan_scope=payload.scan_scope,
+            target_kb_id=target_kb_id,
+            credential_env_name=GLOBAL_FEISHU_CREDENTIAL_MARKER,
+            enabled=payload.enabled,
+            created_by=current_user.uid,
+        )
+        if payload.target_kb_id is None:
+            await db.commit()
+    except Exception:
+        if payload.target_kb_id is None:
+            await db.rollback()
+            await knowledge_base.delete_database(target_kb_id)
+        raise
     return _source_dict(source)
 
 
@@ -1611,16 +1747,34 @@ async def check_source(source_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=getattr(exc, "status_code", None) or 422, detail=str(exc)) from exc
     try:
         node = await client.get_node(source.wiki_root_token)
+        if getattr(source, "scan_scope", "root") == "space":
+            await client.list_nodes(node.space_id)
     except FeishuUserOAuthError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
+    except FeishuPermissionError as exc:
+        detail = SPACE_PERMISSION_DETAIL if getattr(source, "scan_scope", "root") == "space" else {
+            "code": "FEISHU_ROOT_PERMISSION_DENIED",
+            "message": "无法读取链接页面，请确认授权管理员有权访问该页面，并已为应用开通知识库读取权限",
+        }
+        raise HTTPException(status_code=424, detail=detail) from exc
     except FeishuClientError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         await client.aclose()
-    return {"status": "ok", "source_id": source_id, "root_title": node.title}
+    try:
+        await name_feishu_target(source, node.title or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if getattr(source, "name", None) == "飞书知识库" and node.title:
+        source.name = node.title[:255]
+        await db.flush()
+    return {
+        "status": "ok", "source_id": source_id, "root_title": node.title,
+        "scan_scope": getattr(source, "scan_scope", "root") or "root",
+    }
 
 
 SPACE_PERMISSION_DETAIL = {
@@ -1929,11 +2083,12 @@ async def list_source_runs(source_id: str, db: AsyncSession = Depends(get_db)):
     runs = list(result.scalars())
     items = []
     for run in runs:
+        processing_counts = await _run_processing_counts(db, run)
         task = await tasker.find_task_by_payload(
             task_type="feishu_scan",
             payload_match={"run_id": run.run_id},
         )
-        items.append(_run_dict(run, task.to_dict() if task else None))
+        items.append(_run_dict(run, task.to_dict() if task else None, processing_counts))
     return {"items": items}
 
 
@@ -1943,11 +2098,12 @@ async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
     run = result.scalar_one_or_none()
     if run is None:
         raise HTTPException(status_code=404, detail="Feishu sync run not found")
+    processing_counts = await _run_processing_counts(db, run)
     task = await tasker.find_task_by_payload(
         task_type="feishu_scan",
         payload_match={"run_id": run.run_id},
     )
-    return _run_dict(run, task.to_dict() if task else None)
+    return _run_dict(run, task.to_dict() if task else None, processing_counts)
 
 
 @feishu_knowledge.get("/sources/{source_id}/materials")
@@ -2446,7 +2602,7 @@ async def _run_processing_worker(
             if quality_version is not None:
                 quality_params = dict(quality_version.processing_params or {})
                 quality_params["content_quality"] = quality
-                if parsed_content.strip():
+                if parsed_content.strip() or quality_params.get("reprocess_requested_at"):
                     quality_item = await quality_session.scalar(
                         select(FeishuSourceItem).where(FeishuSourceItem.item_id == quality_version.item_id)
                     )
@@ -2497,6 +2653,15 @@ async def _run_processing_worker(
                 version_id,
                 file_id=existing_file_id,
             )
+            if (material.processing_params or {}).get("reprocess_requested_at"):
+                await session.execute(
+                    update(FeishuCrossDocumentRelation).where(
+                        FeishuCrossDocumentRelation.status == "open",
+                        or_(FeishuCrossDocumentRelation.source_version_id == version_id,
+                            FeishuCrossDocumentRelation.target_version_id == version_id),
+                    ).values(status="invalidated", human_decision="REPROCESSED",
+                             human_comment="素材重新加工，等待重新检查")
+                )
             await backfill_legacy_governance_reviews(session, version_ids=[version_id])
             await KnowledgeUnitService(session).ensure_for_version(version_id)
     except asyncio.CancelledError as exc:
@@ -2628,6 +2793,24 @@ async def _enqueue_comparison(version_id: str, *, operator_id: str | None = None
         coroutine=run_comparison,
     )
     return task
+
+
+async def _recover_pending_comparisons() -> int:
+    """Restore comparison callbacks lost on restart, including pruned task records."""
+    async with pg_manager.get_async_session_context() as session:
+        versions = list(await session.scalars(
+            select(FeishuMaterialVersion)
+            .where(FeishuMaterialVersion.processing_status.in_(CrossDocumentComparisonService.CANDIDATE_STATUSES))
+            .order_by(FeishuMaterialVersion.created_at.asc())
+        ))
+    recovered = 0
+    for version in versions:
+        comparison = (version.processing_params or {}).get("comparison") or {}
+        if comparison.get("status") not in {"queued", "running"}:
+            continue
+        await _enqueue_comparison(version.version_id, operator_id="system-recovery")
+        recovered += 1
+    return recovered
 
 
 async def _run_comparison_backfill_worker(
@@ -2808,6 +2991,26 @@ async def retry_material(
     return {"version_id": material.version_id, "status": material.processing_status, "task_id": task.id}
 
 
+@feishu_knowledge.post("/materials/{version_id}/reprocess", status_code=202)
+async def reprocess_material(
+    version_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        material = await FeishuReviewService(db).reprocess(version_id, operator_id=current_user.uid)
+        await db.commit()
+        try:
+            task = await _enqueue_processing(version_id, operator_id=current_user.uid)
+        except Exception as exc:
+            await FeishuReviewService(db).mark_processing_queue_failed(version_id, message=str(exc))
+            await db.commit()
+            raise
+    except Exception as exc:
+        _raise_action_error(exc)
+    return {"version_id": material.version_id, "status": material.processing_status, "task_id": task.id}
+
+
 @feishu_knowledge.post("/materials/{version_id}/reindex", status_code=202)
 async def reindex_material(
     version_id: str,
@@ -2847,6 +3050,8 @@ async def _apply_action(
         return await reject_material(version_id, RejectRequest(reason=reason), db=db, current_user=user)
     if action == "retry":
         return await retry_material(version_id, db=db, current_user=user)
+    if action == "reprocess":
+        return await reprocess_material(version_id, db=db, current_user=user)
     if action == "reindex":
         return await reindex_material(version_id, db=db, current_user=user)
     if action == "confirm_removal":

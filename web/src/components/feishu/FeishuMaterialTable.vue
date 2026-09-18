@@ -12,6 +12,9 @@
         <a-button size="small" :disabled="writeDisabled || !canBatch('retry')" @click="emitBatch('retry')">
           重试
         </a-button>
+        <a-button size="small" :disabled="writeDisabled || !canBatch('reprocess')" @click="emitBatch('reprocess')">
+          重新加工
+        </a-button>
         <a-button size="small" :disabled="writeDisabled || !canBatch('reindex')" @click="emitBatch('reindex')">
           重新解析并重建索引
         </a-button>
@@ -105,6 +108,9 @@
                     </a-menu-item>
                     <a-menu-item key="retry" :disabled="!canPerformAction(record, 'retry')">
                       重试
+                    </a-menu-item>
+                    <a-menu-item key="reprocess" :disabled="!canPerformAction(record, 'reprocess')">
+                      重新加工
                     </a-menu-item>
                     <a-menu-item key="reindex" :disabled="!canPerformAction(record, 'reindex')">
                       重新解析并重建索引
@@ -246,6 +252,11 @@ function canPerformAction(material, action) {
   if (action === 'reject') return material.review_status === 'pending'
   if (action === 'retry') {
     return ['parse_failed', 'publish_failed'].includes(material.processing_status)
+  }
+  if (action === 'reprocess') {
+    return material.review_status === 'pending' &&
+      ['parsed', 'awaiting_review'].includes(material.processing_status) &&
+      material.source_validity === 'valid' && !material.active && Boolean(material.source_object_path)
   }
   if (action === 'reindex') {
     return (

@@ -11,11 +11,11 @@ hero:
     alt: 善达信息
   actions:
     - theme: brand
-      text: 开始使用
-      link: /guide/overview
+      text: 善达知枢使用手册
+      link: /guide/zhishu-manual
     - theme: alt
-      text: 进入知识加工指南
-      link: /guide/knowledge-processing
+      text: 企业知识助手使用手册
+      link: /guide/knowledge-assistant
 
 features:
   - title: 资料接入
@@ -27,8 +27,13 @@ features:
   - title: 正式知识发布
     details: 只将确认有效的内容发布为正式知识，保留来源、处理记录和版本关系。
   - title: 可信知识问答
-    details: 知识助手只使用已发布内容回答，并提供可核对的引用来源与简洁、详细两种模式。
+    details: 知识助手只使用已发布内容回答，并提供可核对的引用来源与企业技能调用。
 ---
+
+## 在线访问
+
+- **善达企业知识助手**：[http://assit.quickdone.cn/](http://assit.quickdone.cn/)
+- **善达知枢（管理端）**：[http://manager.assit.quickdone.cn/](http://manager.assit.quickdone.cn/)
 
 <div class="home-path">
   <strong>推荐阅读顺序</strong>
