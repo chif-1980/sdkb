@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.product_chat.repository import ProductChatRepository
 from yuxi.product_chat.source_policy_service import ProductSourcePolicyService
+from yuxi.agents.models import system_chat_model_spec
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.utils import logger
 
@@ -345,8 +346,7 @@ class AnswerService:
             model = None
 
             if mode == "DETAILED":
-                database_info = await self._knowledge_base.get_database_info(scope.kb_id)
-                model_spec = database_info.get("llm_model_spec") if isinstance(database_info, dict) else None
+                model_spec = system_chat_model_spec()
                 model = self._model_selector(model_spec)
                 evidence = ()
                 async for investigation_event in self._investigate_evidence(
@@ -383,8 +383,7 @@ class AnswerService:
                     result = replace(result, prompt_version=DETAILED_PROMPT_VERSION)
             else:
                 if model is None:
-                    database_info = await self._knowledge_base.get_database_info(scope.kb_id)
-                    model_spec = database_info.get("llm_model_spec") if isinstance(database_info, dict) else None
+                    model_spec = system_chat_model_spec()
                     model = self._model_selector(model_spec)
                 yield AnswerProgress("COMPOSING", "正在整理结论和可核验来源")
                 system_prompt = DETAILED_SYSTEM_PROMPT if mode == "DETAILED" else SYSTEM_PROMPT

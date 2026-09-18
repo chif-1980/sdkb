@@ -69,7 +69,8 @@ async def call(query: str = Body(...), meta: dict = Body(None), current_user: Us
     if "request_id" not in meta or not meta.get("request_id"):
         meta["request_id"] = str(uuid.uuid4())
 
-    model = select_model(model_spec=meta.get("model_spec") or meta.get("model") or conf.default_model)
+    conf.refresh()
+    model = select_model(model_spec=conf.fast_model)
 
     response = await model.call(query)
     logger.debug({"query": query, "response": response.content})

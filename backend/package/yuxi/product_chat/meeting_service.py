@@ -11,7 +11,7 @@ from langgraph.graph import END, START, StateGraph
 
 from sqlalchemy import select
 
-from yuxi.config import config
+from yuxi.agents.models import system_chat_model_spec
 from yuxi.models import select_model
 from yuxi.models.providers.cache import model_cache
 from yuxi.models.providers.service import get_all_model_providers
@@ -91,20 +91,53 @@ async def update_progress(record_id, stage, message, completed=None, total=None)
     await append_run_stream_event(record_id, "progress", progress)
 
 
+class MeetingOutputError(ValueError):
+    def __init__(self, truncated=False):
+        self.code = "MODEL_OUTPUT_TRUNCATED" if truncated else "MODEL_OUTPUT_INVALID"
+        reason = "模型返回的纪要被截断" if truncated else "模型返回的纪要格式不正确"
+        super().__init__(f"{reason}，自动重试后仍未通过。已保存分段结果，可重试继续，无需更换链接或重新上传。")
+
+
 async def call_json(model, instruction, data):
-    response = await model.call(
-        [
-            {"role": "system", "content": RULES + "\n" + instruction},
-            {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
-        ]
-    )
-    raw = response.content.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
-    result = json.loads(raw)
-    if not isinstance(result, dict):
-        raise ValueError("会议分析返回格式不正确，请重试。")
-    return result
+    correction = ""
+    for attempt in range(2):
+        response = await model.call(
+            [
+                {"role": "system", "content": RULES + "\n" + instruction + correction},
+                {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
+            ]
+        )
+        raw = response.content.strip()
+        metadata = getattr(response, "metadata", {}) or {}
+        finish_reason = metadata.get("finish_reason") or metadata.get("stop_reason")
+        truncated = finish_reason in {"length", "max_tokens"}
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
+        parse_error = None
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            result = None
+            parse_error = exc
+        if isinstance(result, dict) and not truncated:
+            return result
+        # Record diagnostics only; meeting text and model output may contain private information.
+        logger.warning(
+            "meeting_json_invalid attempt={} finish_reason={} chars={} parse_error={} position={}",
+            attempt + 1,
+            finish_reason,
+            len(raw),
+            parse_error.msg if parse_error else "not_object_or_truncated",
+            parse_error.pos if parse_error else None,
+        )
+        if attempt == 1:
+            raise MeetingOutputError(truncated) from None
+        correction = (
+            "\n上次输出格式无效或不完整。请基于同一份材料重新生成完整 JSON 对象，"
+            "字符串内的换行、双引号和反斜杠必须正确转义，不要附加解释。"
+        )
+        if truncated:
+            correction += "压缩重复叙述以确保输出完整，但不得遗漏议题、明确决定、行动项或其原文引用。"
 
 
 async def call_cited_json(model, instruction, data, allowed):
@@ -179,7 +212,9 @@ async def _analyze(record_id):
     # The graph owns phase transitions; sources and every completed segment are
     # committed to Postgres, so worker retries resume without rereading a long meeting.
     sources, chunks, notes, result, formal = [], [], [], {}, {}
-    model = select_model(config.default_model)
+    model = select_model(system_chat_model_spec())
+    if model.info.get("provider_type") not in {"anthropic", "gemini"}:
+        model.model = model.model.bind(response_format={"type": "json_object"})
 
     async def read_sources(state):
         nonlocal sources, chunks, notes, result, formal
@@ -435,8 +470,12 @@ async def process_meeting_run(ctx, record_id: str):
             type(exc).__name__,
             str(exc) if type(exc) is ValueError else "",
         )
-        code = exc.code if isinstance(exc, MeetingSourceError) else "ANALYSIS_FAILED"
-        message = str(exc) if isinstance(exc, MeetingSourceError) else "会议分析或引用校验失败，请重试。"
+        code = exc.code if isinstance(exc, (MeetingSourceError, MeetingOutputError)) else "ANALYSIS_FAILED"
+        message = (
+            str(exc)
+            if isinstance(exc, (MeetingSourceError, MeetingOutputError))
+            else "会议分析或引用校验失败，请重试。"
+        )
         if type(exc).__name__ in {"PermissionDeniedError", "AuthenticationError", "NotFoundError"}:
             code, message = "MODEL_UNAVAILABLE", "当前模型不可用或未获授权，请联系管理员检查模型配置后重试。"
         elif type(exc).__name__ == "RateLimitError":
@@ -449,7 +488,13 @@ async def process_meeting_run(ctx, record_id: str):
                 return
             record.state = "failed"
             record.error = {"code": code, "message": message}
-            record.progress = {**record.progress, "status": "FAILED", "message": message}
+            record.progress = {
+                **record.progress,
+                "status": "FAILED",
+                "message": message,
+                "failedStep": record.progress.get("message"),
+                "updatedAt": utc_isoformat(),
+            }
             record.updated_at = utc_now_naive()
             answer = await db.scalar(select(ProductMessage).where(ProductMessage.message_id == record.message_id))
             answer.content = message

@@ -4,6 +4,7 @@ from typing import Any
 
 import json_repair
 
+from yuxi.agents.models import system_chat_model_spec
 from yuxi.models.chat import select_model
 
 from .base import GraphExtractor
@@ -31,8 +32,6 @@ class LLMGraphExtractor(GraphExtractor):
     extractor_type = "llm"
 
     def validate_options(self) -> None:
-        if not self.options.get("model_spec"):
-            raise ValueError("LLM 抽取器需要 model_spec")
         if self.options.get("prompt"):
             raise ValueError("LLM 图谱抽取器不支持自定义完整 Prompt，请使用 schema 配置抽取约束")
         concurrency_count = self.options.get("concurrency_count", 1)
@@ -48,7 +47,7 @@ class LLMGraphExtractor(GraphExtractor):
     async def extract(self, text: str, *, chunk_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         self.validate_options()
         model = select_model(
-            model_spec=self.options["model_spec"],
+            model_spec=system_chat_model_spec(),
             timeout=60.0,
             model_params=self.options.get("model_params") or {},
         )

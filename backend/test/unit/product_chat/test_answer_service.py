@@ -22,6 +22,12 @@ from yuxi.product_chat.source_policy_service import ProductKnowledgeScope
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def unified_model(monkeypatch):
+    monkeypatch.setattr("yuxi.agents.models.sys_config.refresh", lambda: None)
+    monkeypatch.setattr("yuxi.agents.models.sys_config.default_model", "unified:chat")
+
+
 PUBLISHED_AT = datetime(2026, 8, 16, 8, 0, tzinfo=UTC)
 
 
@@ -236,8 +242,8 @@ async def test_supported_answer_uses_only_revalidated_evidence_in_retrieval_orde
     assert repository.calls == [("source-1", ("file-1", "file-stale"))]
     assert repository.history_calls == [("conversation-1", 7, 6)]
     assert knowledge.content_calls == [("kb-1", "file-1")]
-    assert knowledge.info_calls == ["kb-1"]
-    assert selector.calls == ["provider:model-1"]
+    assert knowledge.info_calls == []
+    assert selector.calls == ["unified:chat"]
     assert len(model.calls) == 1
     expected_evidence = json.dumps(
         [
@@ -632,7 +638,7 @@ async def test_evidence_from_trusted_feishu_and_lark_domains_is_usable(source_ur
 
     assert result.status == "SUPPORTED"
     assert result.citations[0].source_url == source_url
-    assert selector.calls == ["provider:model-1"]
+    assert selector.calls == ["unified:chat"]
     assert len(model.calls) == 1
 
 

@@ -5,6 +5,7 @@ import aiofiles
 import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from yuxi import config, get_version
+from yuxi.models.providers.assignments import validate_model_assignments
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
 
@@ -63,6 +64,7 @@ async def discovery():
 @system.get("/config")
 async def get_config(current_user: User = Depends(get_required_user)):
     """获取系统配置"""
+    config.refresh()
     return config.dump_config()
 
 
@@ -74,10 +76,13 @@ async def update_config_single(key=Body(...), value=Body(...), current_user: Use
     if not config.can_update(key):
         raise HTTPException(status_code=400, detail=f"配置项不可修改: {key}")
     try:
-        config.set_value(key, value)
+        validate_model_assignments({key: value})
+        config.update_and_save({key: value})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    config.save()
+    except Exception as exc:
+        logger.error(f"配置保存失败: {type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="配置保存失败，未应用更改，请重试") from exc
     return config.dump_config()
 
 
@@ -85,10 +90,13 @@ async def update_config_single(key=Body(...), value=Body(...), current_user: Use
 async def update_config_batch(items: dict = Body(...), current_user: User = Depends(get_admin_user)) -> dict:
     """批量更新配置项"""
     try:
-        config.update(items)
+        validate_model_assignments(items)
+        config.update_and_save(items)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    config.save()
+    except Exception as exc:
+        logger.error(f"配置保存失败: {type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="配置保存失败，未应用更改，请重试") from exc
     return config.dump_config()
 
 

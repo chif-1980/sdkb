@@ -78,6 +78,16 @@ class MeetingRepository:
             parent = await self.require(request.meeting_id, user.id)
             if parent.conversation_id != conversation_id:
                 raise ProductChatNotFoundError()
+        resume_notes = []
+        if (
+            parent
+            and parent.state in {"failed", "cancelled"}
+            and parent.sources
+            and request.content == parent.input["content"]
+            and request.attachment_ids == parent.input.get("attachmentIds", [])
+            and request.history_meeting_ids == parent.input.get("historyMeetingIds", [])
+        ):
+            resume_notes = parent.input.get("chunkNotes", [])
         for history_id in request.history_meeting_ids:
             history = await self.require(history_id, user.id)
             if not history.result:
@@ -112,6 +122,7 @@ class MeetingRepository:
                 "historyMeetingIds": request.history_meeting_ids,
                 "parentId": parent.id if parent else None,
                 "previousResult": parent.result if parent else None,
+                "chunkNotes": resume_notes,
             },
             sources=parent.sources if parent else [],
             progress={

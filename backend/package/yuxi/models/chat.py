@@ -6,8 +6,9 @@ from yuxi.utils import logger
 
 
 class GeneralResponse:
-    def __init__(self, content):
+    def __init__(self, content, metadata=None):
         self.content = content
+        self.metadata = metadata or {}
         self.is_full = False
 
 
@@ -30,7 +31,7 @@ class LangChainChatAdapter:
             if stream:
                 return self._stream_response(messages)
             response = await self.model.ainvoke(messages)
-            return GeneralResponse(response.text)
+            return GeneralResponse(response.text, response.response_metadata)
         except Exception as exc:
             logger.error(
                 "model_call_failed model_id={} error_type={}",

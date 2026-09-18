@@ -202,16 +202,27 @@ def test_refresh_keeps_memory_value_when_redis_unavailable(tmp_path, monkeypatch
     assert redis.get_keys == [RUNTIME_CONFIG_REDIS_KEY]
 
 
-def test_save_keeps_base_toml_when_runtime_snapshot_write_fails(tmp_path, monkeypatch: pytest.MonkeyPatch):
-    redis = _FakeRedis(set_error=RuntimeError("redis unavailable"))
+@pytest.mark.parametrize("failure", ["disk", "redis", "validation"])
+def test_failed_update_preserves_disk_and_runtime_config(tmp_path, monkeypatch, failure):
+    redis = _FakeRedis()
     _patch_runtime_redis(monkeypatch, redis)
     cfg = Config(save_dir=str(tmp_path))
-    cfg.default_model = "test-provider:file-chat"
-
-    cfg.save()
-
-    base_config = tomli.loads((tmp_path / "config" / "base.toml").read_text())
-    assert base_config["default_model"] == "test-provider:file-chat"
+    cfg.update_and_save({"default_model": "p:old"})
+    snapshot = redis.data[RUNTIME_CONFIG_REDIS_KEY]
+    if failure == "disk":
+        def fail_write(*args):
+            raise OSError("disk unavailable")
+        monkeypatch.setattr(Config, "_write_config_file", fail_write)
+    elif failure == "redis":
+        redis.set_error = RuntimeError("redis unavailable")
+    changes = {"default_model": "p:new"}
+    if failure == "validation":
+        changes["default_ocr_engine"] = "invalid"
+    with pytest.raises((OSError, RuntimeError, ValueError)):
+        cfg.update_and_save(changes)
+    assert cfg.default_model == "p:old"
+    assert tomli.loads((tmp_path / "config" / "base.toml").read_text())["default_model"] == "p:old"
+    assert redis.data[RUNTIME_CONFIG_REDIS_KEY] == snapshot
 
 
 def test_start_runtime_sync_is_idempotent(tmp_path):

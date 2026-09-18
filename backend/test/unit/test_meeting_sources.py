@@ -6,7 +6,7 @@ import pytest
 from docx import Document
 
 from yuxi.product_chat.meeting_export import export_docx
-from yuxi.product_chat.meeting_service import call_cited_json, transcript_chunks, validate_citations
+from yuxi.product_chat.meeting_service import call_cited_json, call_json, transcript_chunks, validate_citations
 from yuxi.product_chat.meeting_sources import (
     MeetingSourceError,
     PublicResolver,
@@ -154,3 +154,148 @@ def test_docx_input_keeps_paragraph_table_order_and_export_saved_body(tmp_path):
     text = "\n".join(p.text for p in exported.paragraphs)
     assert "编辑后的会议" in text and "版本 2" in text
     assert "[S1-P3] 未提供 | P3" in text and "最后确认下周再讨论" in text
+
+
+@pytest.mark.parametrize("invalid", ['{"body":"unfinished', '{"body":"raw\nnewline"}', "[]", ""])
+async def test_malformed_json_retries_once_with_original_evidence(invalid):
+    from unittest.mock import AsyncMock
+
+    model = SimpleNamespace(
+        call=AsyncMock(
+            side_effect=[
+                SimpleNamespace(content=invalid),
+                SimpleNamespace(content='{"body":"依据 [S1-P1]"}'),
+            ]
+        )
+    )
+    evidence = {"transcript": [{"id": "S1-P1", "text": "只是建议"}]}
+    result = await call_cited_json(model, "整理纪要", evidence, {"S1-P1"})
+    assert result["body"] == "依据 [S1-P1]"
+    assert model.call.await_count == 2
+    for call in model.call.call_args_list:
+        assert json.loads(call.args[0][1]["content"])["transcript"] == evidence["transcript"]
+
+
+async def test_repeated_invalid_json_has_specific_failure_and_bounded_retry():
+    from unittest.mock import AsyncMock
+
+    model = SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(content='{"body":')))
+    with pytest.raises(ValueError) as failure:
+        await call_json(model, "整理纪要", {})
+    assert failure.value.code == "MODEL_OUTPUT_INVALID"
+    assert "无需更换链接" in str(failure.value)
+    assert model.call.await_count == 2
+
+
+async def test_truncated_output_is_not_accepted_even_if_json_parses():
+    from unittest.mock import AsyncMock
+
+    model = SimpleNamespace(
+        call=AsyncMock(
+            return_value=SimpleNamespace(
+                content='{"body":"partial"}',
+                metadata={"finish_reason": "length"},
+            )
+        )
+    )
+    with pytest.raises(ValueError) as failure:
+        await call_json(model, "整理纪要", {})
+    assert failure.value.code == "MODEL_OUTPUT_TRUNCATED"
+    assert model.call.await_count == 2
+
+
+async def test_model_connection_failure_is_not_misreported_as_json_error():
+    from unittest.mock import AsyncMock
+
+    model = SimpleNamespace(call=AsyncMock(side_effect=TimeoutError("upstream timeout")))
+    with pytest.raises(TimeoutError):
+        await call_json(model, "整理纪要", {})
+    assert model.call.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "state,changed,resume",
+    [
+        ("failed", False, True),
+        ("cancelled", False, True),
+        ("completed", False, False),
+        ("failed", True, False),
+    ],
+)
+async def test_retry_reuses_notes_only_for_unchanged_incomplete_meeting(monkeypatch, state, changed, resume):
+    from unittest.mock import AsyncMock, Mock
+    from yuxi.product_chat.meeting_repository import MeetingRepository, ProductChatRepository
+    from yuxi.product_chat.schemas import SendMessageRequest
+
+    db = SimpleNamespace(
+        scalar=AsyncMock(return_value=None), execute=AsyncMock(), flush=AsyncMock(), add_all=Mock(), add=Mock()
+    )
+    conversation = SimpleNamespace(id=1, status="ACTIVE", title="会议")
+    monkeypatch.setattr(ProductChatRepository, "require_conversation", AsyncMock(return_value=conversation))
+    notes = [{"summary": "只是提议 [S1-P1]"}]
+    parent = SimpleNamespace(
+        id="parent",
+        conversation_id="conversation",
+        state=state,
+        sources=[{"title": "已读取资料"}],
+        result=None,
+        input={"content": "原始请求", "chunkNotes": notes},
+    )
+    repo = MeetingRepository(db)
+    monkeypatch.setattr(repo, "require", AsyncMock(return_value=parent))
+    record = await repo.create(
+        "conversation",
+        SimpleNamespace(id=1),
+        SendMessageRequest(
+            content="修改后的请求" if changed else "原始请求",
+            meetingId="parent",
+            skillId="MEETING_ANALYSIS",
+        ),
+    )
+    assert record.input["chunkNotes"] == (notes if resume else [])
+    assert parent.input["chunkNotes"] == notes
+
+
+async def test_chat_adapter_preserves_finish_reason_for_truncation_check():
+    from unittest.mock import AsyncMock
+    from yuxi.models.chat import LangChainChatAdapter
+
+    upstream = SimpleNamespace(
+        ainvoke=AsyncMock(
+            return_value=SimpleNamespace(
+                text="partial",
+                response_metadata={"finish_reason": "length"},
+            )
+        )
+    )
+    result = await LangChainChatAdapter(upstream, model_name="test").call("hello")
+    assert result.metadata["finish_reason"] == "length"
+
+
+async def test_worker_persists_specific_format_failure_and_last_step(monkeypatch):
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+    from yuxi.product_chat import meeting_service as service
+
+    record = SimpleNamespace(
+        state="running", progress={"message": "核对决定", "updatedAt": "old"}, error=None, message_id="msg"
+    )
+    message = SimpleNamespace(content="")
+    db = SimpleNamespace(get=AsyncMock(return_value=record), scalar=AsyncMock(return_value=message))
+
+    @asynccontextmanager
+    async def session():
+        yield db
+
+    monkeypatch.setattr(service.pg_manager, "get_async_session_context", session)
+    monkeypatch.setattr(service, "_analyze", AsyncMock(side_effect=service.MeetingOutputError()))
+    monkeypatch.setattr(service, "has_cancel_signal", AsyncMock(return_value=False))
+    event = AsyncMock()
+    monkeypatch.setattr(service, "append_run_stream_event", event)
+    await service.process_meeting_run({}, "meeting")
+    assert record.state == "failed"
+    assert record.error["code"] == "MODEL_OUTPUT_INVALID"
+    assert record.progress["failedStep"] == "核对决定"
+    assert record.progress["updatedAt"] != "old"
+    assert message.content == record.error["message"]
+    assert event.call_args.args[1] == "failed"

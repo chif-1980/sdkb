@@ -4,50 +4,7 @@
       <div class="section-title">默认项配置</div>
       <div class="settings-panel">
         <template v-if="userStore.isSuperAdmin">
-          <div class="setting-row two-cols">
-            <div class="col-item">
-              <div class="setting-label">{{ items?.default_model?.des || '默认对话模型' }}</div>
-              <div class="setting-content">
-                <ModelSelectorComponent
-                  @select-model="handleChatModelSelect"
-                  :model_spec="configStore.config?.default_model"
-                  placeholder="请选择默认模型"
-                />
-              </div>
-            </div>
-            <div class="col-item">
-              <div class="setting-label">{{ items?.fast_model?.des }}</div>
-              <div class="setting-content">
-                <ModelSelectorComponent
-                  @select-model="handleFastModelSelect"
-                  :model_spec="configStore.config?.fast_model"
-                  placeholder="请选择模型"
-                />
-              </div>
-            </div>
-          </div>
-          <div class="setting-row two-cols">
-            <div class="col-item">
-              <div class="setting-label">{{ items?.embed_model?.des }}</div>
-              <div class="setting-content">
-                <EmbeddingModelSelector
-                  :value="configStore.config?.embed_model"
-                  @change="handleChange('embed_model', $event)"
-                  style="width: 100%"
-                />
-              </div>
-            </div>
-            <div class="col-item">
-              <div class="setting-label">{{ items?.reranker?.des }}</div>
-              <div class="setting-content">
-                <RerankModelSelector
-                  :value="configStore.config?.reranker"
-                  @change="handleChange('reranker', $event)"
-                  style="width: 100%"
-                />
-              </div>
-            </div>
-          </div>
+          <p class="section-description">模型已统一移至「智能体管理 → 模型供应商」配置。</p>
           <div class="setting-row two-cols">
             <div class="col-item">
               <div class="setting-label">
@@ -88,20 +45,6 @@
             <a-switch
               :checked="configStore.config?.enable_content_guard_llm"
               @change="handleChange('enable_content_guard_llm', $event)"
-            />
-          </div>
-          <div
-            class="card card-select"
-            v-if="
-              configStore.config?.enable_content_guard &&
-              configStore.config?.enable_content_guard_llm
-            "
-          >
-            <span class="label">{{ items?.content_guard_llm_model?.des }}</span>
-            <ModelSelectorComponent
-              @select-model="handleContentGuardModelSelect"
-              :model_spec="configStore.config?.content_guard_llm_model"
-              placeholder="请选择模型"
             />
           </div>
         </div>
@@ -184,9 +127,6 @@ import { computed, h } from 'vue'
 import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
 import { Globe } from 'lucide-vue-next'
-import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
-import EmbeddingModelSelector from '@/components/EmbeddingModelSelector.vue'
-import RerankModelSelector from '@/components/RerankModelSelector.vue'
 
 const configStore = useConfigStore()
 const userStore = useUserStore()
@@ -204,24 +144,6 @@ const ocrEngineOptions = [
 
 const handleChange = (key, e) => {
   configStore.setConfigValue(key, e)
-}
-
-const handleChatModelSelect = (spec) => {
-  if (typeof spec === 'string' && spec) {
-    configStore.setConfigValue('default_model', spec)
-  }
-}
-
-const handleFastModelSelect = (spec) => {
-  if (typeof spec === 'string' && spec) {
-    configStore.setConfigValue('fast_model', spec)
-  }
-}
-
-const handleContentGuardModelSelect = (spec) => {
-  if (typeof spec === 'string' && spec) {
-    configStore.setConfigValue('content_guard_llm_model', spec)
-  }
 }
 
 const openLink = (url) => {

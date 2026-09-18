@@ -309,11 +309,7 @@
           </div>
         </a-form-item>
         <a-form-item label="模型">
-          <ModelSelectorComponent
-            :model_spec="graphConfigForm.model_spec"
-            placeholder="选择抽取模型"
-            @select-model="(spec) => (graphConfigForm.model_spec = spec)"
-          />
+          <span>使用“智能体管理 → 模型供应商”中的统一业务模型。</span>
         </a-form-item>
         <a-form-item label="Schema">
           <a-textarea
@@ -348,7 +344,6 @@
 import { ref, computed, watch, nextTick, onUnmounted, reactive } from 'vue'
 import { useDatabaseStore } from '@/stores/database'
 import { useTaskerStore } from '@/stores/tasker'
-import { useConfigStore } from '@/stores/config'
 import {
   RefreshCw,
   Settings,
@@ -366,7 +361,6 @@ import { getKbTypeLabel } from '@/utils/kb_utils'
 import { unifiedApi } from '@/apis/graph_api'
 import { graphBuildApi } from '@/apis/knowledge_api'
 import { Modal, message } from 'ant-design-vue'
-import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import { useGraph } from '@/composables/useGraph'
 
 const GRAPH_BUILD_TASK_TYPE = 'knowledge_graph_index'
@@ -382,7 +376,6 @@ const props = defineProps({
 
 const store = useDatabaseStore()
 const taskerStore = useTaskerStore()
-const configStore = useConfigStore()
 
 const kbId = computed(() => store.kbId)
 const kbType = computed(() => store.database.kb_type)
@@ -502,7 +495,6 @@ watch(
 )
 const graphConfigForm = reactive({
   extractor_type: 'llm',
-  model_spec: '',
   schema: '',
   concurrency_count: 50,
   model_params_text: ''
@@ -582,7 +574,6 @@ const fillGraphConfigForm = () => {
   const config = graphBuildStatus.value?.config
   const options = config?.extractor_options || {}
   graphConfigForm.extractor_type = 'llm'
-  graphConfigForm.model_spec = options.model_spec || configStore.config?.default_model || ''
   graphConfigForm.schema = options.schema || ''
   graphConfigForm.concurrency_count = Number(options.concurrency_count || 50)
   graphConfigForm.model_params_text = options.model_params
@@ -602,7 +593,6 @@ const selectExtractorType = (option) => {
 
 const buildExtractorOptions = () => {
   return {
-    model_spec: graphConfigForm.model_spec,
     schema: graphConfigForm.schema.trim(),
     concurrency_count: graphConfigForm.concurrency_count || 50,
     model_params: parseModelParams()

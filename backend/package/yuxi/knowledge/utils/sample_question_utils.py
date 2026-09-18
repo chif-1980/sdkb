@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from yuxi import config
+from yuxi.agents.models import system_chat_model_spec
 from yuxi.knowledge.factory import KnowledgeBaseFactory
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.models import select_model
@@ -98,7 +98,7 @@ async def generate_database_sample_questions(kb_id: str, count: int = 10) -> dic
     files_info = build_sample_question_file_list(all_files)
     logger.info(f"开始生成知识库问题，知识库: {db_name}, 文件数量: {len(files_info)}, 问题数量: {count}")
 
-    model = select_model(model_spec=config.default_model)
+    model = select_model(model_spec=system_chat_model_spec())
     messages = [
         {"role": "system", "content": SAMPLE_QUESTIONS_SYSTEM_PROMPT},
         {"role": "user", "content": build_sample_questions_user_message(db_name, files_info, count)},

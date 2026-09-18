@@ -424,3 +424,31 @@ async def test_milvus_graph_service_get_stats_empty_kb_id():
     service = MilvusGraphService()
     result = await service.get_stats(kb_id=None)
     assert result == {"total_nodes": 0, "total_edges": 0, "entity_types": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("options", [{}, {"model_spec": "legacy:graph-model"}])
+async def test_graph_extractor_follows_updated_system_model(monkeypatch, options):
+    from yuxi.agents import models
+    from yuxi.knowledge.graphs.extractors import llm
+
+    current = {"model": "provider:first"}
+    cfg = SimpleNamespace(default_model="stale:model")
+    cfg.refresh = lambda: setattr(cfg, "default_model", current["model"])
+    monkeypatch.setattr(models, "sys_config", cfg)
+    used = []
+
+    async def call(prompt, stream=False):
+        assert "张三任职于公司" in prompt
+        return SimpleNamespace(content='{"relations": []}')
+
+    def select_model(**kwargs):
+        used.append(kwargs["model_spec"])
+        return SimpleNamespace(call=call)
+
+    monkeypatch.setattr(llm, "select_model", select_model)
+    extractor = LLMGraphExtractor(options)
+    assert await extractor.extract("张三任职于公司") == {"relations": []}
+    current["model"] = "provider:second"
+    await extractor.extract("张三任职于公司")
+    assert used == ["provider:first", "provider:second"]

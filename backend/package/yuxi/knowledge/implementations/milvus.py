@@ -21,6 +21,7 @@ from pymilvus import (
     utility,
 )
 
+from yuxi import config
 from yuxi.knowledge.base import FileStatus, KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.dispatcher import chunk_markdown
 from yuxi.knowledge.chunking.ragflow_like.nlp import count_tokens
@@ -264,6 +265,8 @@ class MilvusRetrievalConfig:
 def _retrieval_config_options() -> list[dict[str, Any]]:
     options = []
     for config_field in fields(MilvusRetrievalConfig):
+        if config_field.name == "reranker_model":
+            continue
         metadata = dict(config_field.metadata)
         options_provider = metadata.pop("options_provider", None)
         default = None if config_field.default is MISSING else config_field.default
@@ -1103,11 +1106,11 @@ class MilvusKB(KnowledgeBase):
                 return retrieved_chunks[:final_top_k]
 
             # 使用重排序模型
-            reranker_model = merged_kwargs.get("reranker_model")
+            config.refresh()
+            reranker_model = config.reranker
             if not reranker_model:
                 raise ValueError(
-                    "Reranker model must be specified when use_reranker=True. "
-                    "Please provide reranker_model in query parameters."
+                    "请在模型供应商页面配置检索重排模型"
                 )
 
             try:

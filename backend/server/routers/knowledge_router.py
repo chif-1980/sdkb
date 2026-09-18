@@ -9,7 +9,8 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
-from yuxi import config
+
+from yuxi.agents.models import system_chat_model_spec
 from yuxi.knowledge.chunking.ragflow_like.presets import get_chunk_preset_options
 from yuxi.knowledge.factory import KnowledgeBaseFactory
 from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_TASK_TYPE, MilvusGraphService
@@ -2050,7 +2051,7 @@ async def generate_description(
     """).strip()
 
     try:
-        model = select_model(model_spec=config.default_model)
+        model = select_model(model_spec=system_chat_model_spec())
         response = await model.call(prompt)
         description = response.content.strip()
         logger.debug(f"Generated description: {description}")

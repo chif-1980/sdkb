@@ -14,6 +14,11 @@ from yuxi.services.input_message_service import (
 )
 
 
+@pytest.fixture(autouse=True)
+def unified_model(monkeypatch):
+    monkeypatch.setattr("yuxi.agents.models.system_chat_model_spec", lambda: "system-default-model")
+
+
 def _chat_input(content: str, image_content: str | None = None):
     return build_chat_input_message(content, image_content)
 
@@ -710,7 +715,7 @@ async def test_create_agent_run_persists_input_before_enqueue(monkeypatch: pytes
     assert db.added[0].run_id == db.created_run.id
     assert db.added[0].request_id == "req-1"
     assert db.enqueued == [("process_agent_run", db.created_run.id, f"run:{db.created_run.id}")]
-    assert db.created_run_kwargs["input_payload"] == {"model_spec": "agent-default-model"}
+    assert db.created_run_kwargs["input_payload"] == {"model_spec": "system-default-model"}
     assert "model_spec" not in db.added[0].extra_metadata
     assert db.added[0].extra_metadata["raw_message"]["type"] == "human"
     assert db.added[0].extra_metadata["raw_message"]["content"] == "hello"
@@ -1301,42 +1306,12 @@ async def test_cancel_agent_run_view_cascades_children(monkeypatch: pytest.Monke
     assert signals == [("child-1", True), ("child-2", True), ("parent-run", True)]
 
 
-def test_resolve_agent_run_model_spec_rejects_unknown_explicit_model(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(agent_run_service.model_cache, "get_model_info", lambda spec: None)
-    with pytest.raises(agent_run_service.HTTPException) as exc:
-        agent_run_service.resolve_agent_run_model_spec("nope", SimpleNamespace(config_json={}), _FakeBackend())
-    assert exc.value.status_code == 422
-
-
-def test_resolve_agent_run_model_spec_rejects_non_chat_explicit_model(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        agent_run_service.model_cache,
-        "get_model_info",
-        lambda spec: SimpleNamespace(model_type="embedding"),
-    )
-    with pytest.raises(agent_run_service.HTTPException) as exc:
-        agent_run_service.resolve_agent_run_model_spec("embed-1", SimpleNamespace(config_json={}), _FakeBackend())
-    assert exc.value.status_code == 422
-
-
-def test_resolve_agent_run_model_spec_strips_explicit_chat_model(monkeypatch: pytest.MonkeyPatch):
-    seen = []
-
-    def fake_get_model_info(spec):
-        seen.append(spec)
-        return SimpleNamespace(model_type="chat")
-
-    monkeypatch.setattr(agent_run_service.model_cache, "get_model_info", fake_get_model_info)
-
-    assert (
-        agent_run_service.resolve_agent_run_model_spec(
-            " gpt-x ",
-            SimpleNamespace(config_json={}),
-            _FakeBackend(),
-        )
-        == "gpt-x"
-    )
-    assert seen == ["gpt-x"]
+@pytest.mark.parametrize("legacy_spec", [None, "nope", "embed-1", " old:chat "])
+def test_resolve_agent_run_model_spec_uses_unified_assignment(monkeypatch, legacy_spec):
+    monkeypatch.setattr("yuxi.agents.models.system_chat_model_spec", lambda: "unified:chat")
+    assert agent_run_service.resolve_agent_run_model_spec(
+        legacy_spec, SimpleNamespace(config_json={"context": {"model": "old:agent"}}), _FakeBackend()
+    ) == "unified:chat"
 
 
 def _patch_agent_run_creation(
@@ -1411,12 +1386,7 @@ def _patch_agent_run_creation(
 
 
 @pytest.mark.asyncio
-async def test_create_chat_run_persists_validated_model_spec(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        agent_run_service.model_cache,
-        "get_model_info",
-        lambda spec: SimpleNamespace(model_type="chat"),
-    )
+async def test_create_chat_run_ignores_old_client_model_spec(monkeypatch: pytest.MonkeyPatch):
     db = _patch_agent_run_creation(monkeypatch)
 
     await agent_run_service.create_agent_run_view(
@@ -1429,7 +1399,7 @@ async def test_create_chat_run_persists_validated_model_spec(monkeypatch: pytest
         model_spec="claude-x",
     )
 
-    assert db.created_run_kwargs["input_payload"]["model_spec"] == "claude-x"
+    assert db.created_run_kwargs["input_payload"]["model_spec"] == "system-default-model"
 
 
 @pytest.mark.asyncio
@@ -1445,7 +1415,7 @@ async def test_create_chat_run_with_image_persists_multimodal_message_type(monke
         db=db,
     )
 
-    assert db.created_run_kwargs["input_payload"] == {"model_spec": "agent-default-model"}
+    assert db.created_run_kwargs["input_payload"] == {"model_spec": "system-default-model"}
     assert db.added[0].message_type == "multimodal_image"
     assert db.added[0].image_content == "base64-image"
     raw_message = db.added[0].extra_metadata["raw_message"]
@@ -1455,7 +1425,7 @@ async def test_create_chat_run_with_image_persists_multimodal_message_type(monke
 
 
 @pytest.mark.asyncio
-async def test_create_chat_run_snapshots_agent_configured_model_spec(monkeypatch: pytest.MonkeyPatch):
+async def test_create_chat_run_ignores_old_agent_configured_model_spec(monkeypatch: pytest.MonkeyPatch):
     db = _patch_agent_run_creation(
         monkeypatch,
         agent_config_json={"context": {"model": "agent-config-model"}},
@@ -1471,17 +1441,12 @@ async def test_create_chat_run_snapshots_agent_configured_model_spec(monkeypatch
         model_spec=None,
     )
 
-    assert db.created_run_kwargs["input_payload"]["model_spec"] == "agent-config-model"
+    assert db.created_run_kwargs["input_payload"]["model_spec"] == "system-default-model"
     assert "model_spec" not in db.added[0].extra_metadata
 
 
 @pytest.mark.asyncio
 async def test_create_chat_run_snapshots_system_default_when_agent_model_empty(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        agent_run_service,
-        "resolve_chat_model_spec",
-        lambda model_spec: str(model_spec).strip() if str(model_spec or "").strip() else "system-default-model",
-    )
     db = _patch_agent_run_creation(
         monkeypatch,
         agent_config_json={"context": {"model": ""}},

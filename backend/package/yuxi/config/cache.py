@@ -55,7 +55,7 @@ def _load_snapshot() -> dict[str, Any] | None:
     return snapshot if isinstance(snapshot, dict) else None
 
 
-def save_runtime_config(config: Any) -> None:
+def save_runtime_config(config: Any, *, strict: bool = False) -> None:
     try:
         with sync_redis_client(_runtime_config_redis_config()) as redis_client:
             redis_client.set(
@@ -64,6 +64,8 @@ def save_runtime_config(config: Any) -> None:
             )
     except Exception as e:
         logger.warning(f"Failed to save runtime config to Redis: {e}")
+        if strict:
+            raise
 
 
 def refresh_runtime_config(config: Any) -> None:

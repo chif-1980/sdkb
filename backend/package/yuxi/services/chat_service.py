@@ -202,11 +202,10 @@ def _json_safe(value: Any) -> Any:
 
 
 def _apply_model_override(input_context: dict, meta: dict | None) -> None:
-    """对话级模型覆盖：meta.model_spec 优先于智能体配置的 model。值已在创建 run 时校验。"""
-    model_spec = (meta or {}).get("model_spec")
-    model_spec = model_spec.strip() if isinstance(model_spec, str) else model_spec
-    if model_spec:
-        input_context["model"] = model_spec
+    """旧客户端参数保持兼容，运行时使用模型供应商中的统一分配。"""
+    from yuxi.agents.models import system_chat_model_spec
+
+    input_context["model"] = system_chat_model_spec()
 
 
 def _apply_subagent_runtime_context(input_context: dict, meta: dict | None) -> None:

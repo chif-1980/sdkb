@@ -8,6 +8,12 @@ from yuxi.utils import get_docker_safe_url
 from yuxi.utils.logging_config import logger
 
 
+def system_chat_model_spec() -> str:
+    """运行入口统一读取当前对话模型，旧会话和智能体配置不再覆盖。"""
+    sys_config.refresh()
+    return resolve_chat_model_spec(None)
+
+
 def resolve_chat_model_spec(model_spec: str | None, *, fallback: str | None = None) -> str:
     """解析空模型配置，不吞掉已经配置但无效的模型值。
 

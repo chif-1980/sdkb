@@ -13,7 +13,7 @@ def test_milvus_retrieval_config_exposes_graph_and_dependencies():
     assert by_key["graph_max_nodes"]["default"] == 10000
     assert by_key["graph_max_nodes"]["depend_on"] == ("use_graph_retrieval", True)
     assert by_key["graph_top_k"]["depend_on"] == ("use_graph_retrieval", True)
-    assert by_key["reranker_model"]["depend_on"] == ("use_reranker", True)
+    assert "reranker_model" not in by_key
 
 
 def test_graph_ppr_ranks_chunk_nodes_from_seed_entities():

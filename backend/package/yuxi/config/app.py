@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import tomli
@@ -113,8 +114,7 @@ class Config(BaseModel):
 
     def save(self) -> None:
         if not self._config_file:
-            logger.warning("Config file path not set")
-            return
+            raise ValueError("Config file path not set")
 
         logger.info(f"Saving config to {self._config_file}")
         user_modified = {}
@@ -125,13 +125,35 @@ class Config(BaseModel):
             if current_value != field_info.default:
                 user_modified[field_name] = current_value
 
+        previous = self._config_file.read_bytes() if self._config_file.exists() else None
+        self._write_config_file(tomli_w.dumps(user_modified).encode("utf-8"))
         try:
-            with open(self._config_file, "wb") as f:
-                tomli_w.dump(user_modified, f)
-            logger.info(f"Config saved to {self._config_file}")
-            runtime_cache.save_runtime_config(self)
-        except Exception as e:
-            logger.error(f"Failed to save config to {self._config_file}: {e}")
+            runtime_cache.save_runtime_config(self, strict=True)
+        except Exception:
+            if previous is None:
+                self._config_file.unlink(missing_ok=True)
+            else:
+                self._write_config_file(previous)
+            raise
+        logger.info(f"Config saved to {self._config_file}")
+
+    def _write_config_file(self, content: bytes) -> None:
+        # 写入失败时保留上一份可用配置，不截断正在使用的文件。
+        with NamedTemporaryFile(dir=self._config_file.parent, delete=False) as output:
+            temporary = Path(output.name)
+            try:
+                output.write(content)
+                output.flush()
+                temporary.replace(self._config_file)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def update_and_save(self, items: dict[str, Any]) -> None:
+        self.refresh()
+        candidate = self.model_copy()
+        candidate.update(items)
+        candidate.save()
+        self.update(items)
 
     def dump_config(self) -> dict[str, Any]:
         config_dict = self.model_dump()

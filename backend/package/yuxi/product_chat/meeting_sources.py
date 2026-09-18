@@ -207,10 +207,10 @@ async def read_meeting_link(url: str, *, model=None, on_progress=None) -> dict:
                 source["summaryNotice"] = "平台总结未能读取，分析依据为原始转写。"
             return source
     if model is None:
-        from yuxi.config import config
+        from yuxi.agents.models import system_chat_model_spec
         from yuxi.models import select_model
 
-        model = select_model(config.default_model)
+        model = select_model(system_chat_model_spec())
     from yuxi.product_chat.meeting_web_reader import read_public_meeting
 
     return await read_public_meeting(url, model, on_progress=on_progress)

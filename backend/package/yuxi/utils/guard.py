@@ -49,13 +49,6 @@ class ContentGuard:
         if not self.keywords:
             self.keywords = ["贩毒"]
 
-        # 从配置读取LLM模型设置
-        self.enable_llm = config.enable_content_guard_llm
-        if self.enable_llm and config.content_guard_llm_model:
-            self.llm_model = select_model(model_spec=config.content_guard_llm_model)
-        else:
-            self.llm_model = None
-
     async def check(self, text: str) -> bool:
         """
         Checks if the text contains any sensitive keywords.
@@ -66,7 +59,8 @@ class ContentGuard:
         if keywords_result := await self.check_with_keywords(text):
             return keywords_result
 
-        if self.llm_model:
+        config.refresh()
+        if config.enable_content_guard_llm:
             return await self.check_with_llm(text)
 
         return False
@@ -97,14 +91,16 @@ class ContentGuard:
         if not text:
             return False
 
-        if not self.enable_llm or self.llm_model is None:
+        config.refresh()
+        if not config.enable_content_guard_llm:
             logger.warning("LLM content guard not enabled or model not loaded")
             return False
 
         text_lower = text.lower()
 
         prompt = PROMPT_TEMPLATE.format(content=text_lower)
-        response = await self.llm_model.call(prompt)
+        model = select_model(model_spec=config.content_guard_llm_model)
+        response = await model.call(prompt)
         logger.debug(f"LLM response: {response.content}")
         return True if "不合规" in response.content else False
 

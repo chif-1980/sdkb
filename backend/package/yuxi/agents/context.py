@@ -174,8 +174,9 @@ class BaseContext:
         metadata={
             "name": "智能体模型",
             "options": [],
-            "description": "智能体的驱动模型，留空时使用系统默认模型。",
+            "description": "使用模型供应商页面统一配置的对话模型。",
             "kind": "llm",
+            "configurable": False,
         },
     )
 
@@ -512,6 +513,9 @@ async def prepare_agent_runtime_context(
 ) -> BaseContext:
     """准备 Agent 运行时上下文，主要是根据 context 中的 uid 加载用户可访问的资源列表，并进行规范化处理。"""
     schema = context_schema or type(context)
+    from yuxi.agents.models import system_chat_model_spec
+
+    context.model = system_chat_model_spec()
     uid = str(getattr(context, "uid", "") or "").strip()
     if not uid:
         return context

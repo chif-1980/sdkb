@@ -20,6 +20,7 @@ import { modelIcons } from '@/utils/modelIcon'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 import ExtensionCardGrid from '@/components/extensions/ExtensionCardGrid.vue'
+import ModelAssignmentsPanel from './ModelAssignmentsPanel.vue'
 
 const configStore = useConfigStore()
 const loading = ref(false)
@@ -695,6 +696,7 @@ defineExpose({
 
 <template>
   <div class="model-provider-manage-panel">
+    <ModelAssignmentsPanel :providers="providers" />
     <PageShoulder v-model:search="searchQuery" search-placeholder="搜索供应商...">
       <template #actions>
         <a-button type="primary" class="lucide-icon-btn" @click="openCreateProviderModal">

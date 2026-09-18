@@ -1,16 +1,11 @@
-from __future__ import annotations
+import pytest
 
 from yuxi.services import chat_service as svc
 
 
-def test_apply_model_override_sets_model_from_meta():
+@pytest.mark.parametrize("meta", [{"model_spec": "user-pick"}, {"request_id": "r1"}, None])
+def test_legacy_overrides_use_unified_model(monkeypatch, meta):
+    monkeypatch.setattr("yuxi.agents.models.system_chat_model_spec", lambda: "unified:chat")
     input_context = {"model": "agent-default"}
-    svc._apply_model_override(input_context, {"model_spec": "user-pick"})
-    assert input_context["model"] == "user-pick"
-
-
-def test_apply_model_override_noop_without_model_spec():
-    input_context = {"model": "agent-default"}
-    svc._apply_model_override(input_context, {"request_id": "r1"})
-    svc._apply_model_override(input_context, None)
-    assert input_context["model"] == "agent-default"
+    svc._apply_model_override(input_context, meta)
+    assert input_context["model"] == "unified:chat"

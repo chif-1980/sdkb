@@ -27,8 +27,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
-from yuxi.agents.models import resolve_chat_model_spec
-from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -86,21 +84,10 @@ class AgentRunWaitTimeout(Exception):
 
 
 def resolve_agent_run_model_spec(model_spec: str | None, agent_item, agent_backend) -> str:
-    """解析本次 run 实际使用的模型：显式覆盖优先，否则配置模型，最后系统默认模型。"""
-    normalized = model_spec.strip() if isinstance(model_spec, str) else None
-    if normalized:
-        info = model_cache.get_model_info(normalized)
-        if not info or info.model_type != "chat":
-            raise HTTPException(status_code=422, detail=f"未找到可用聊天模型: '{normalized}'")
-        return normalized
+    """旧客户端的模型覆盖参数保留兼容，实际调用使用统一对话模型。"""
+    from yuxi.agents.models import system_chat_model_spec
 
-    context = agent_backend.context_schema()
-    config_json = getattr(agent_item, "config_json", None) or {}
-    config_context = config_json.get("context") if isinstance(config_json, dict) else {}
-    if isinstance(config_context, dict):
-        context.update_from_dict(config_context)
-
-    return resolve_chat_model_spec(getattr(context, "model", None))
+    return system_chat_model_spec()
 
 
 def _build_run_response(run) -> dict:
