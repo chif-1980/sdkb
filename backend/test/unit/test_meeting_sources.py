@@ -85,6 +85,7 @@ def test_followup_keeps_explicit_actions_separate_from_knowledge_suggestions():
             "assignee": None,
             "assigneeSuggestion": "张工",
             "dueDate": None,
+            "dueDateSuggestion": None,
             "status": "OPEN",
             "sourceRefs": ["S1-P2"],
         }

@@ -135,6 +135,22 @@ class FeishuClient:
         data = self._as_mapping(payload.get("data"), "data")
         return dict(self._as_mapping(data.get("department"), "department"))
 
+    async def list_contact_pages(self, path: str, params: dict[str, str]) -> list[dict]:
+        """Read every directory page; never silently present a partial page as the full directory."""
+        items, seen = [], set()
+        params = {**params, "page_size": "50"}
+        while True:
+            payload = await self._get(path, params=params)
+            data = self._as_mapping(payload.get("data"), "data")
+            items.extend(data.get("items") or [])
+            if not data.get("has_more"):
+                return items
+            token = data.get("page_token")
+            if not token or token in seen:
+                raise ValueError("通讯录分页未完整返回")
+            seen.add(token)
+            params["page_token"] = token
+
     async def list_nodes(self, space_id: str, parent_node_token: str | None = None) -> list[FeishuNode]:
         """List nodes in a Wiki space, optionally below one parent node.
 

@@ -1224,3 +1224,26 @@ async def test_any_server_error_retries_with_bounded_backoff() -> None:
     assert attempts == 2
     assert delays == [1.0]
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_contact_pagination_reads_all_pages_and_rejects_loop():
+    requests = []
+    def handler(request):
+        requests.append(request)
+        second = request.url.params.get("page_token") == "next"
+        return httpx.Response(200, json={"code": 0, "data": {
+            "items": [{"user_id": "second" if second else "first"}],
+            "has_more": not second, "page_token": "next",
+        }})
+    client = _client(handler)
+    items = await client.list_contact_pages("/open-apis/contact/v3/users/find_by_department", {"department_id": "0"})
+    assert [item["user_id"] for item in items] == ["first", "second"]
+    assert requests[1].url.params["department_id"] == "0"
+    await client._client.aclose()
+    client = _client(lambda request: httpx.Response(200, json={"code": 0, "data": {
+        "items": [], "has_more": True, "page_token": "repeated",
+    }}))
+    with pytest.raises(ValueError, match="分页"):
+        await client.list_contact_pages("/open-apis/contact/v3/departments/0/children", {})
+    await client._client.aclose()

@@ -1,0 +1,141 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi import HTTPException
+
+from yuxi.product_chat import meeting_directory as directory
+from yuxi.product_chat.meeting_service import build_followup
+
+
+@pytest.mark.asyncio
+async def test_directory_includes_non_login_members_and_deduplicates_departments(monkeypatch):
+    client = SimpleNamespace(
+        get_employee=AsyncMock(return_value={"open_id": "current-open"}),
+        list_contact_pages=AsyncMock(
+            side_effect=[
+                [{"open_department_id": "sales", "parent_department_id": "0", "name": "销售部"}],
+                [{"user_id": "member", "name": "张三", "en_name": "Sam", "status": {}}],
+                [
+                    {"user_id": "member", "name": "张三", "status": {}},
+                    {"user_id": "left", "name": "离职员工", "status": {"is_resigned": True}},
+                ],
+            ]
+        ),
+        aclose=AsyncMock(),
+    )
+    monkeypatch.setattr(directory, "FeishuClient", lambda: client)
+    db = SimpleNamespace(
+        scalar=AsyncMock(
+            return_value=SimpleNamespace(
+                feishu_user_id="current",
+                feishu_open_id="current-open",
+                tenant_key="tenant-a",
+            )
+        ),
+        scalars=AsyncMock(return_value=[]),
+    )
+    result = await directory.load_meeting_directory(db, 1)
+    assert result["departments"][1]["parentId"] == "0"
+    assert result["users"] == [
+        {
+            "userId": None,
+            "feishuUserId": "member",
+            "displayName": "张三",
+            "englishName": "Sam",
+            "departmentIds": ["0", "sales"],
+        }
+    ]
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_directory_rejects_application_from_another_tenant(monkeypatch):
+    client = SimpleNamespace(
+        get_employee=AsyncMock(return_value={"open_id": "another-tenant"}),
+        list_contact_pages=AsyncMock(),
+        aclose=AsyncMock(),
+    )
+    monkeypatch.setattr(directory, "FeishuClient", lambda: client)
+    db = SimpleNamespace(
+        scalar=AsyncMock(
+            return_value=SimpleNamespace(
+                feishu_user_id="current",
+                feishu_open_id="current-open",
+                tenant_key="tenant-a",
+            )
+        )
+    )
+    with pytest.raises(HTTPException) as exc:
+        await directory.load_meeting_directory(db, 1)
+    assert exc.value.status_code == 403
+    client.list_contact_pages.assert_not_called()
+    client.aclose.assert_awaited_once()
+
+
+def test_ambiguous_deadline_is_preserved_without_inventing_date():
+    result = build_followup(
+        {"actionItems": [{"title": "测试", "dueDate": "下周"}]}, coordinator_id=1, coordinator_name="上传者"
+    )
+    assert result["tasks"][0]["dueDate"] is None
+    assert result["tasks"][0]["dueDateSuggestion"] == "下周"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("feishu_id,allowed", [("member", True), ("foreign-member", False)])
+async def test_assignment_checks_directory_and_allows_employee_without_local_account(monkeypatch, feishu_id, allowed):
+    from contextlib import asynccontextmanager
+
+    from server.routers import product_meeting_router as router
+
+    record = SimpleNamespace(
+        state="completed",
+        version=1,
+        result={
+            "followup": {
+                "tasks": [{"id": "t1", "title": "核对资料", "sourceRefs": ["S1-P1"]}],
+            }
+        },
+    )
+    db = object()
+
+    @asynccontextmanager
+    async def session():
+        yield db
+
+    save = AsyncMock()
+    monkeypatch.setattr(router.pg_manager, "get_async_session_context", session)
+    monkeypatch.setattr(router, "require_meeting", AsyncMock(return_value=record))
+    monkeypatch.setattr(
+        router,
+        "load_meeting_directory",
+        AsyncMock(
+            return_value={
+                "users": [
+                    {"userId": None, "feishuUserId": "member", "displayName": "张三"},
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(router, "MeetingRepository", lambda _: SimpleNamespace(save_result=save))
+    monkeypatch.setattr(router, "serialize_meeting", lambda _: {})
+    patch = router.MeetingFollowupEdit(
+        version=1,
+        tasks=[
+            router.FollowupTaskEdit(
+                id="t1",
+                title="核对资料",
+                assigneeFeishuUserId=feishu_id,
+            )
+        ],
+    )
+    if allowed:
+        await router.edit_meeting_followup("MT-test", patch, SimpleNamespace(id=1, username="上传者"))
+        task = save.await_args.args[1]["followup"]["tasks"][0]
+        assert task["assignee"] == {"userId": None, "feishuUserId": "member", "displayName": "张三"}
+        assert task["sourceRefs"] == ["S1-P1"]
+    else:
+        with pytest.raises(HTTPException) as exc:
+            await router.edit_meeting_followup("MT-test", patch, SimpleNamespace(id=1, username="上传者"))
+        assert exc.value.status_code == 422
+        save.assert_not_awaited()

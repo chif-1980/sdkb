@@ -859,3 +859,44 @@ async def test_solution_stream_separates_runtime_progress_from_answer_deltas(mon
     assert 'executive_summary' not in body
     assert "旧的需求事件" not in body
     assert body.index("event: delta") < body.index("event: complete")
+
+
+@pytest.mark.asyncio
+async def test_answer_validation_failure_resets_preview_and_is_not_saved_as_insufficient(monkeypatch):
+    from yuxi.product_chat.answer_service import AnswerDelta, AnswerGenerationError, AnswerProgress
+
+    class Repository:
+        def __init__(self, db):
+            pass
+
+        async def require_conversation(self, *args):
+            return SimpleNamespace(conversation_id="CONV-VALIDATION")
+
+        async def append_exchange(self, *args, **kwargs):
+            pytest.fail("Invalid generation must not be persisted as an answer")
+
+    class Service:
+        def __init__(self, **kwargs):
+            pass
+
+        async def answer_events(self, *args, **kwargs):
+            yield AnswerDelta("未核验预览")
+            yield AnswerProgress("COMPOSING", "校验失败", reset_answer=True)
+            raise AnswerGenerationError("UNKNOWN_CITATION")
+
+    monkeypatch.setattr(product_chat_router.pg_manager, "get_async_session_context", lambda: _SessionContext())
+    monkeypatch.setattr(product_chat_router, "ProductChatRepository", Repository)
+    monkeypatch.setattr(product_chat_router, "AnswerService", Service)
+    response = await product_chat_router.stream_message(
+        "CONV-VALIDATION", product_chat_router.SendMessageRequest(content="系统架构图"),
+        SimpleNamespace(id=1),
+    )
+    body = "".join([chunk async for chunk in response.body_iterator])
+    assert '"resetAnswer": true' in body
+    assert "ANSWER_CITATION_INVALID" in body
+    assert "event: complete" not in body
+    assert "暂无足够可靠资料" not in body
+    error_response = product_chat_router._knowledge_unavailable(
+        "CONV-VALIDATION", AnswerGenerationError("INVALID_JSON")
+    )
+    assert json.loads(error_response.body)["error"]["code"] == "ANSWER_GENERATION_FAILED"

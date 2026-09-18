@@ -18,7 +18,9 @@ from sqlalchemy import select
 from server.routers.product_api_route import ProductApiRoute
 from server.utils.auth_middleware import get_product_user
 from yuxi.governance.lifecycle_service import KnowledgeLifecycleService
-from yuxi.product_chat.answer_service import AnswerDelta, AnswerProgress, AnswerService, GroundedAnswer
+from yuxi.product_chat.answer_service import (
+    AnswerDelta, AnswerGenerationError, AnswerProgress, AnswerService, GroundedAnswer,
+)
 from yuxi.product_chat.citation_service import CitationResolutionError
 from yuxi.product_chat.material_service import ProductMaterialService
 from yuxi.product_chat.meeting_repository import MeetingRepository, serialize_meeting
@@ -183,12 +185,10 @@ def _knowledge_unavailable(conversation_id: str, error: Exception) -> JSONRespon
     )
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={
-            "error": {
-                "code": "KNOWLEDGE_SERVICE_UNAVAILABLE",
-                "message": "知识服务暂时不可用，请稍后重试",
-            }
-        },
+        content={"error": error.detail if isinstance(error, AnswerGenerationError) else {
+            "code": "KNOWLEDGE_SERVICE_UNAVAILABLE",
+            "message": "知识服务暂时不可用，请稍后重试",
+        }},
     )
 
 
@@ -1745,7 +1745,10 @@ async def stream_message(
                 if isinstance(event, AnswerProgress):
                     yield _sse_event(
                         "progress",
-                        {"stage": event.stage, "message": event.message},
+                        {
+                            "stage": event.stage, "message": event.message,
+                            **({"resetAnswer": True} if event.reset_answer else {}),
+                        },
                     )
                 elif isinstance(event, AnswerDelta):
                     yield _sse_event("delta", {"content": event.content})
@@ -1786,6 +1789,8 @@ async def stream_message(
                 "error",
                 {"code": "CONVERSATION_NOT_FOUND", "message": "会话不存在"},
             )
+        except AnswerGenerationError as exc:
+            yield _sse_event("error", exc.detail)
         except Exception as exc:
             logger.error(
                 "product_chat_stream_failed conversation_id={} error_type={}",

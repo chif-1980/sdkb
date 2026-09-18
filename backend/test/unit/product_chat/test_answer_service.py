@@ -13,6 +13,8 @@ from yuxi.product_chat.answer_service import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
     AnswerDelta,
+    AnswerGenerationError,
+    AnswerProgress,
     AnswerService,
     GroundedAnswer,
 )
@@ -820,20 +822,16 @@ async def test_conflicting_answer_keeps_model_citation_order_and_deduplicates_id
         "non-string-status",
     ],
 )
-async def test_invalid_model_payloads_fall_back_to_exact_insufficient(model_content):
+async def test_invalid_model_payloads_retry_once_then_raise_generation_error(model_content):
     service, *_rest, model, _selector = _service(
         chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1"}}],
         published={"file-1": _published_material("file-1")},
         model_content=model_content,
     )
 
-    result = await service.answer("问题", object(), "conversation-1")
-
-    assert result.status == "INSUFFICIENT"
-    assert result.content == INSUFFICIENT_TEXT
-    assert result.citations == ()
-    assert result.model_version == "model-1"
-    assert len(model.calls) == 1
+    with pytest.raises(AnswerGenerationError):
+        await service.answer("问题", object(), "conversation-1")
+    assert len(model.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -858,11 +856,8 @@ async def test_conflicting_answer_requires_at_least_two_valid_citations():
         model_content=payload,
     )
 
-    result = await service.answer("标准版支持多少人？", object(), "conversation-1")
-
-    assert result.status == "INSUFFICIENT"
-    assert result.content == INSUFFICIENT_TEXT
-    assert result.citations == ()
+    with pytest.raises(AnswerGenerationError):
+        await service.answer("标准版支持多少人？", object(), "conversation-1")
 
 
 @pytest.mark.asyncio
@@ -896,5 +891,45 @@ async def test_retrieval_and_model_failures_propagate():
         published={"file-1": _published_material("file-1")},
         model_error=RuntimeError("model unavailable"),
     )
-    with pytest.raises(RuntimeError, match="model unavailable"):
+    with pytest.raises(AnswerGenerationError, match="MODEL_REQUEST_FAILED"):
         await service.answer("问题", object(), "conversation-1")
+
+
+@pytest.mark.asyncio
+async def test_invalid_answer_is_regenerated_once_with_same_evidence_and_preview_reset():
+    service, _policy, knowledge, _repo, model, _selector = _service(
+        chunks=[{"content": "系统由数据层支撑应用层。", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": _published_material("file-1")},
+    )
+    responses = [
+        '{"status":"SUPPORTED","citation_ids":["E1"],"answer":"错误预览[E1]。后文使用伪造引用[E99]"}',
+        json.dumps({"status": "SUPPORTED", "citation_ids": ["E1"], "answer": "正确答案。[E1]"}),
+    ]
+    async def call(messages, stream=None):
+        model.calls.append((messages, stream))
+        async def chunks():
+            yield SimpleNamespace(content=responses[len(model.calls) - 1])
+        return chunks()
+    model.call = call
+    events = [event async for event in service.answer_events("系统架构图", object(), "conversation-1")]
+    assert len(model.calls) == 2
+    assert len(knowledge.query_calls) == 1
+    assert model.calls[0][0][:2] == model.calls[1][0][:2]
+    resets = [event for event in events if isinstance(event, AnswerProgress) and event.reset_answer]
+    assert len(resets) == 1
+    assert events[-1].status == "SUPPORTED"
+    assert events[-1].content == "正确答案。[1]"
+    assert events[-1].citations[0].evidence_id == "E1"
+
+
+@pytest.mark.asyncio
+async def test_access_denied_model_call_is_not_retried_or_reported_as_insufficient():
+    class Denied(Exception):
+        status_code = 403
+    service, *_rest, model, _selector = _service(
+        chunks=[{"content": "正式内容", "metadata": {"file_id": "file-1"}}],
+        published={"file-1": _published_material("file-1")}, model_error=Denied(),
+    )
+    with pytest.raises(AnswerGenerationError, match="MODEL_REQUEST_FAILED"):
+        await service.answer("问题", object(), "conversation-1")
+    assert len(model.calls) == 1

@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from dataclasses import asdict
+from datetime import date
 
 from langgraph.graph import END, START, StateGraph
 
@@ -61,6 +62,10 @@ def build_followup(result: dict, *, coordinator_id: int, coordinator_name: str) 
                 continue
             assignee_name = str(raw.get("assigneeName") or raw.get("assignee") or "").strip()
             due_date = str(raw.get("dueDate") or raw.get("deadline") or "").strip()
+            try:
+                exact_date = date.fromisoformat(due_date).isoformat() if due_date else None
+            except ValueError:
+                exact_date = None
             tasks.append(
                 {
                     "id": f"task-{index}",
@@ -71,7 +76,10 @@ def build_followup(result: dict, *, coordinator_id: int, coordinator_name: str) 
                         if assignee_name and assignee_name not in {"未明确", "待确认"}
                         else None
                     ),
-                    "dueDate": due_date if due_date and due_date not in {"未明确", "待确认"} else None,
+                    "dueDate": exact_date,
+                    "dueDateSuggestion": (
+                        due_date if due_date and not exact_date and due_date not in {"未明确", "待确认"} else None
+                    ),
                     "status": "OPEN",
                     "sourceRefs": _reference_ids(str(raw.get("evidence") or raw.get("source") or "")),
                 }

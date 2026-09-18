@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from datetime import date
+import re
 from uuid import uuid4
 from urllib.parse import quote
 from typing import Literal
@@ -15,14 +17,14 @@ from server.routers.product_api_route import ProductApiRoute
 from server.utils.auth_middleware import get_product_user
 from yuxi.product_chat.meeting_repository import MeetingRepository, serialize_meeting
 from yuxi.product_chat.meeting_service import enqueue_meeting
+from yuxi.product_chat.meeting_directory import load_meeting_directory
 from yuxi.product_chat.repository import ProductChatNotFoundError
 from yuxi.product_chat.schemas import SendMessageRequest
 from yuxi.services.run_queue_service import publish_cancel_signal
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.postgres.models_product import (
-    AuthorizationStatus,
-    FeishuUserBinding,
+    ProductConversation,
     MeetingRecord,
     MeetingRevision,
     ProductMessage,
@@ -54,7 +56,8 @@ class FollowupTaskEdit(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=1000)
     assigneeUserId: str | None = Field(default=None, max_length=32)
-    dueDate: str | None = Field(default=None, max_length=80)
+    assigneeFeishuUserId: str | None = Field(default=None, max_length=128)
+    dueDate: date | None = None
     status: Literal["OPEN", "IN_PROGRESS", "DONE"] = "OPEN"
 
 
@@ -148,6 +151,34 @@ async def list_meetings(user: User = Depends(get_product_user)):
         }
 
 
+@product_meeting.get("/chat/meeting-activity")
+async def meeting_activity(user: User = Depends(get_product_user)):
+    async with pg_manager.get_async_session_context() as db:
+        rows = await db.execute(
+            select(MeetingRecord, ProductConversation.title)
+            .join(
+                ProductConversation,
+                ProductConversation.conversation_id == MeetingRecord.conversation_id,
+            )
+            .where(ProductConversation.owner_user_id == user.id)
+            .order_by(MeetingRecord.updated_at.desc())
+            .limit(100)
+        )
+        return {
+            "tasks": [
+                {
+                    "id": r.id,
+                    "conversationId": r.conversation_id,
+                    "title": (r.result or {}).get("title") or title or "会议纪要",
+                    "state": r.state,
+                    "progress": r.progress,
+                    "updatedAt": serialize_meeting(r, include_sources=False)["updatedAt"],
+                }
+                for r, title in rows
+            ]
+        }
+
+
 @product_meeting.get("/chat/meetings/{meeting_id}")
 async def get_meeting(meeting_id: str, user: User = Depends(get_product_user)):
     async with pg_manager.get_async_session_context() as db:
@@ -163,38 +194,11 @@ async def get_meeting(meeting_id: str, user: User = Depends(get_product_user)):
         }
 
 
-async def _tenant_directory(db, user_id: int) -> list[dict]:
-    binding = await db.scalar(
-        select(FeishuUserBinding).where(
-            FeishuUserBinding.user_id == user_id,
-            FeishuUserBinding.authorization_status == AuthorizationStatus.ACTIVE,
-        )
-    )
-    if binding is None:
-        return []
-    rows = await db.scalars(
-        select(FeishuUserBinding)
-        .where(
-            FeishuUserBinding.tenant_key == binding.tenant_key,
-            FeishuUserBinding.authorization_status == AuthorizationStatus.ACTIVE,
-        )
-        .order_by(FeishuUserBinding.display_name.asc(), FeishuUserBinding.user_id.asc())
-    )
-    return [
-        {
-            "userId": str(item.user_id),
-            "feishuUserId": item.feishu_user_id,
-            "displayName": item.display_name,
-        }
-        for item in rows
-    ]
-
-
 @product_meeting.get("/chat/meetings/{meeting_id}/followup-directory")
 async def meeting_followup_directory(meeting_id: str, user: User = Depends(get_product_user)):
     async with pg_manager.get_async_session_context() as db:
         await require_meeting(db, meeting_id, user)
-        return {"users": await _tenant_directory(db, user.id)}
+        return await load_meeting_directory(db, user.id)
 
 
 @product_meeting.patch("/chat/meetings/{meeting_id}/followup")
@@ -207,8 +211,13 @@ async def edit_meeting_followup(
         record = await require_meeting(db, meeting_id, user, lock=True, writable=True)
         if record.state != "completed" or record.version != patch.version or not record.result:
             raise HTTPException(409, "会议跟进版本已变化，请重新加载后再修改。")
-        directory = await _tenant_directory(db, user.id)
-        directory_by_id = {item["userId"]: item for item in directory}
+        directory = (
+            await load_meeting_directory(db, user.id)
+            if any(t.assigneeUserId or t.assigneeFeishuUserId for t in patch.tasks)
+            else {"users": []}
+        )
+        directory_by_id = {item["userId"]: item for item in directory["users"] if item["userId"]}
+        directory_by_feishu = {item["feishuUserId"]: item for item in directory["users"]}
         existing = record.result.get("followup") or {}
         existing_tasks = {str(item.get("id")): item for item in existing.get("tasks", []) if isinstance(item, dict)}
         updated_tasks = []
@@ -217,8 +226,12 @@ async def edit_meeting_followup(
             if previous is None:
                 raise HTTPException(422, f"未知的会议任务：{task.id}")
             assignee = None
-            if task.assigneeUserId:
-                assignee = directory_by_id.get(task.assigneeUserId)
+            if task.assigneeUserId or task.assigneeFeishuUserId:
+                assignee = (
+                    directory_by_feishu.get(task.assigneeFeishuUserId)
+                    if task.assigneeFeishuUserId
+                    else directory_by_id.get(task.assigneeUserId)
+                )
                 if assignee is None:
                     raise HTTPException(422, "任务负责人必须来自当前飞书企业目录。")
                 assignee = {
@@ -232,7 +245,13 @@ async def edit_meeting_followup(
                     "title": task.title.strip(),
                     "assignee": assignee,
                     "assigneeSuggestion": previous.get("assigneeSuggestion"),
-                    "dueDate": task.dueDate.strip() if task.dueDate and task.dueDate.strip() else None,
+                    "dueDate": task.dueDate.isoformat() if task.dueDate else None,
+                    "dueDateSuggestion": previous.get("dueDateSuggestion")
+                    or (
+                        previous.get("dueDate")
+                        if previous.get("dueDate") and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", previous["dueDate"])
+                        else None
+                    ),
                     "status": task.status,
                     "sourceRefs": list(previous.get("sourceRefs") or []),
                 }
