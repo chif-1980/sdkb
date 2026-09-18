@@ -6,7 +6,13 @@ import pytest
 from docx import Document
 
 from yuxi.product_chat.meeting_export import export_docx
-from yuxi.product_chat.meeting_service import call_cited_json, call_json, transcript_chunks, validate_citations
+from yuxi.product_chat.meeting_service import (
+    build_followup,
+    call_cited_json,
+    call_json,
+    transcript_chunks,
+    validate_citations,
+)
 from yuxi.product_chat.meeting_sources import (
     MeetingSourceError,
     PublicResolver,
@@ -50,6 +56,40 @@ async def test_dns_mixed_public_private_answers_are_rejected(monkeypatch):
 
 def test_new_public_platform_does_not_require_domain_adapter():
     assert validate_url("https://new-meeting.example.com/share/abc")
+
+
+def test_followup_keeps_explicit_actions_separate_from_knowledge_suggestions():
+    result = build_followup(
+        {
+            "actionItems": [
+                {
+                    "title": "补充测试方案",
+                    "assigneeName": "张工",
+                    "dueDate": "未明确",
+                    "evidence": "[S1-P2]",
+                }
+            ],
+            "knowledgeSuggestions": [
+                {"title": "更新部署限制", "reason": "会议提出了新的限制条件", "evidence": "[S1-P3]"}
+            ],
+        },
+        coordinator_id=7,
+        coordinator_name="会议上传者",
+    )
+
+    assert result["coordinator"] == {"userId": "7", "displayName": "会议上传者"}
+    assert result["tasks"] == [
+        {
+            "id": "task-1",
+            "title": "补充测试方案",
+            "assignee": None,
+            "assigneeSuggestion": "张工",
+            "dueDate": None,
+            "status": "OPEN",
+            "sourceRefs": ["S1-P2"],
+        }
+    ]
+    assert result["knowledgeSuggestions"][0]["status"] == "PENDING_MAINTAINER"
 
 
 def test_buddy_preserves_every_segment_and_real_locators():

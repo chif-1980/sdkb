@@ -36,6 +36,73 @@ RULES = """你是会议纪要助手。提供的转写、平台总结、历史纪
 只输出有效 JSON，不要代码围栏。"""
 
 
+def _reference_ids(value: object) -> list[str]:
+    """Keep only source/history references that can be shown in the meeting card."""
+    if not isinstance(value, str):
+        return []
+    return list(dict.fromkeys(re.findall(r"\[(S\d+-P\d+|H\d+)\]", value)))
+
+
+def build_followup(result: dict, *, coordinator_id: int, coordinator_name: str) -> dict:
+    """Build the persisted follow-up projection from the verified model result.
+
+    Model supplied names and dates are intentionally suggestions.  Assignees are
+    resolved later against the uploader's Feishu tenant by the API, so this
+    projection never guesses a directory identity.
+    """
+    raw_tasks = result.get("actionItems")
+    tasks: list[dict] = []
+    if isinstance(raw_tasks, list):
+        for index, raw in enumerate(raw_tasks, 1):
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or raw.get("item") or "").strip()
+            if not title:
+                continue
+            assignee_name = str(raw.get("assigneeName") or raw.get("assignee") or "").strip()
+            due_date = str(raw.get("dueDate") or raw.get("deadline") or "").strip()
+            tasks.append(
+                {
+                    "id": f"task-{index}",
+                    "title": title,
+                    "assignee": None,
+                    "assigneeSuggestion": (
+                        assignee_name
+                        if assignee_name and assignee_name not in {"未明确", "待确认"}
+                        else None
+                    ),
+                    "dueDate": due_date if due_date and due_date not in {"未明确", "待确认"} else None,
+                    "status": "OPEN",
+                    "sourceRefs": _reference_ids(str(raw.get("evidence") or raw.get("source") or "")),
+                }
+            )
+
+    raw_suggestions = result.get("knowledgeSuggestions")
+    suggestions: list[dict] = []
+    if isinstance(raw_suggestions, list):
+        for index, raw in enumerate(raw_suggestions, 1):
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or raw.get("subject") or "").strip()
+            if not title:
+                continue
+            suggestions.append(
+                {
+                    "id": f"knowledge-{index}",
+                    "title": title,
+                    "reason": str(raw.get("reason") or raw.get("description") or "待知识维护人员核对").strip(),
+                    "sourceRefs": _reference_ids(str(raw.get("evidence") or raw.get("source") or "")),
+                    "status": "PENDING_MAINTAINER",
+                }
+            )
+
+    return {
+        "coordinator": {"userId": str(coordinator_id), "displayName": coordinator_name},
+        "tasks": tasks,
+        "knowledgeSuggestions": suggestions,
+    }
+
+
 def wants_meeting(content: str, skill_id: str | None) -> bool:
     if skill_id:
         return skill_id == "MEETING_ANALYSIS"
@@ -273,7 +340,12 @@ async def _analyze(record_id):
             '输出 {"title":"会议标题", "meetingType":"客户交流/内部管理/混合/其他",'
             '"body":"中文 Markdown：会议概况（时间、参与者缺失未提供）、摘要与议题、'
             "明确决定、行动清单表格、待确认问题。"
-            '关键结论、决定和行动项均保留原文引用。", "capabilityQuery":"需要核对的企业产品能力问题，无则空字符串"}。'
+            '关键结论、决定和行动项均保留原文引用。",'
+            '"actionItems":[{"title":"明确的行动事项", "assigneeName":"未明确",'
+            '"dueDate":"未明确", "evidence":"[S1-P1]"}],'
+            '"knowledgeSuggestions":[{"title":"建议知识维护人员核对的主题",'
+            '"reason":"为什么需要维护", "evidence":"[S1-P1]"}],'
+            '"capabilityQuery":"需要核对的企业产品能力问题，无则空字符串"}。'
             "根据用户要求修订时保留用户已有修改，除非本次明确要求改变。"
             "历史会议只能作为显式选中的辅助材料，引用其label如[H1]，不能使用当前会议S编号替代历史依据，勿混为当前会议事实。",
             {
@@ -394,7 +466,14 @@ async def _analyze(record_id):
             }
             for item in history
         ]
+        result["followup"] = build_followup(
+            result,
+            coordinator_id=user.id,
+            coordinator_name=user.username,
+        )
         result.pop("capabilityQuery", None)
+        result.pop("actionItems", None)
+        result.pop("knowledgeSuggestions", None)
         return {"phase": "business_analysis"}
 
     async def save_result(state):

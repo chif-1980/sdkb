@@ -4,7 +4,7 @@
   <p><strong>企业知识治理与可信知识助手平台</strong></p>
   <p>让企业资料从接入、加工、审核到发布形成可追溯闭环，并以可核对的引用支撑每一次回答。</p>
 
-  [![Version](https://img.shields.io/badge/version-v0.4.0-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.4.0)
+  [![Version](https://img.shields.io/badge/version-v0.5.0-0f766e)](https://github.com/chif-1980/sdkb/tree/v0.5.0-meeting-followup)
   [![License](https://img.shields.io/badge/license-MIT-475569)](LICENSE)
   [![Docs](https://img.shields.io/badge/docs-在线文档-2563eb)](https://chif-1980.github.io/sdkb/)
 
@@ -77,7 +77,7 @@
 
 ## 当前版本
 
-`v0.4.0` 新增会议纪要与通用公开链接读取、自动保存和 Word 导出，集中管理双产品模型用途，并完善分析失败重试及知识治理。会议跟进与任务分配将作为后续功能开发。
+`v0.5.0` 在会议纪要基础上增加会议跟进：上传者自动成为跟进负责人，行动项可关联当前飞书企业成员并维护期限与状态；知识更新建议交由知识维护人员处理，并保留会议结果版本控制。
 
 ## 开源说明
 

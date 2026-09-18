@@ -4,6 +4,7 @@ import asyncio
 import json
 from uuid import uuid4
 from urllib.parse import quote
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -19,7 +20,13 @@ from yuxi.product_chat.schemas import SendMessageRequest
 from yuxi.services.run_queue_service import publish_cancel_signal
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
-from yuxi.storage.postgres.models_product import MeetingRecord, MeetingRevision, ProductMessage
+from yuxi.storage.postgres.models_product import (
+    AuthorizationStatus,
+    FeishuUserBinding,
+    MeetingRecord,
+    MeetingRevision,
+    ProductMessage,
+)
 from yuxi.utils.datetime_utils import utc_now_naive
 
 product_meeting = APIRouter(route_class=ProductApiRoute)
@@ -34,6 +41,26 @@ async def require_meeting(db, meeting_id, user, **kwargs):
         return await MeetingRepository(db).require(meeting_id, user.id, **kwargs)
     except ProductChatNotFoundError:
         raise HTTPException(404, "会议不存在或无权访问") from None
+
+
+class MeetingEdit(BaseModel):
+    version: int = Field(ge=1)
+    body: str = Field(min_length=1, max_length=200000)
+    title: str = Field(min_length=1, max_length=512)
+    meetingType: str = Field(max_length=80)
+
+
+class FollowupTaskEdit(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=1000)
+    assigneeUserId: str | None = Field(default=None, max_length=32)
+    dueDate: str | None = Field(default=None, max_length=80)
+    status: Literal["OPEN", "IN_PROGRESS", "DONE"] = "OPEN"
+
+
+class MeetingFollowupEdit(BaseModel):
+    version: int = Field(ge=1)
+    tasks: list[FollowupTaskEdit] = Field(default_factory=list, max_length=100)
 
 
 async def start_meeting(conversation_id, request, user):
@@ -136,11 +163,87 @@ async def get_meeting(meeting_id: str, user: User = Depends(get_product_user)):
         }
 
 
-class MeetingEdit(BaseModel):
-    version: int = Field(ge=1)
-    body: str = Field(min_length=1, max_length=200000)
-    title: str = Field(min_length=1, max_length=512)
-    meetingType: str = Field(max_length=80)
+async def _tenant_directory(db, user_id: int) -> list[dict]:
+    binding = await db.scalar(
+        select(FeishuUserBinding).where(
+            FeishuUserBinding.user_id == user_id,
+            FeishuUserBinding.authorization_status == AuthorizationStatus.ACTIVE,
+        )
+    )
+    if binding is None:
+        return []
+    rows = await db.scalars(
+        select(FeishuUserBinding)
+        .where(
+            FeishuUserBinding.tenant_key == binding.tenant_key,
+            FeishuUserBinding.authorization_status == AuthorizationStatus.ACTIVE,
+        )
+        .order_by(FeishuUserBinding.display_name.asc(), FeishuUserBinding.user_id.asc())
+    )
+    return [
+        {
+            "userId": str(item.user_id),
+            "feishuUserId": item.feishu_user_id,
+            "displayName": item.display_name,
+        }
+        for item in rows
+    ]
+
+
+@product_meeting.get("/chat/meetings/{meeting_id}/followup-directory")
+async def meeting_followup_directory(meeting_id: str, user: User = Depends(get_product_user)):
+    async with pg_manager.get_async_session_context() as db:
+        await require_meeting(db, meeting_id, user)
+        return {"users": await _tenant_directory(db, user.id)}
+
+
+@product_meeting.patch("/chat/meetings/{meeting_id}/followup")
+async def edit_meeting_followup(
+    meeting_id: str,
+    patch: MeetingFollowupEdit,
+    user: User = Depends(get_product_user),
+):
+    async with pg_manager.get_async_session_context() as db:
+        record = await require_meeting(db, meeting_id, user, lock=True, writable=True)
+        if record.state != "completed" or record.version != patch.version or not record.result:
+            raise HTTPException(409, "会议跟进版本已变化，请重新加载后再修改。")
+        directory = await _tenant_directory(db, user.id)
+        directory_by_id = {item["userId"]: item for item in directory}
+        existing = record.result.get("followup") or {}
+        existing_tasks = {str(item.get("id")): item for item in existing.get("tasks", []) if isinstance(item, dict)}
+        updated_tasks = []
+        for task in patch.tasks:
+            previous = existing_tasks.get(task.id)
+            if previous is None:
+                raise HTTPException(422, f"未知的会议任务：{task.id}")
+            assignee = None
+            if task.assigneeUserId:
+                assignee = directory_by_id.get(task.assigneeUserId)
+                if assignee is None:
+                    raise HTTPException(422, "任务负责人必须来自当前飞书企业目录。")
+                assignee = {
+                    "userId": assignee["userId"],
+                    "feishuUserId": assignee["feishuUserId"],
+                    "displayName": assignee["displayName"],
+                }
+            updated_tasks.append(
+                {
+                    "id": task.id,
+                    "title": task.title.strip(),
+                    "assignee": assignee,
+                    "assigneeSuggestion": previous.get("assigneeSuggestion"),
+                    "dueDate": task.dueDate.strip() if task.dueDate and task.dueDate.strip() else None,
+                    "status": task.status,
+                    "sourceRefs": list(previous.get("sourceRefs") or []),
+                }
+            )
+        followup = {
+            "coordinator": existing.get("coordinator") or {"userId": str(user.id), "displayName": user.username},
+            "tasks": updated_tasks,
+            "knowledgeSuggestions": list(existing.get("knowledgeSuggestions") or []),
+        }
+        await MeetingRepository(db).save_result(record, {**record.result, "followup": followup}, editor=user.id)
+        return {"meeting": serialize_meeting(record)}
 
 
 @product_meeting.patch("/chat/meetings/{meeting_id}")
