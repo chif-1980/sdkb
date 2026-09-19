@@ -39,7 +39,8 @@ export default defineConfig({
         text: '产品使用手册',
         items: [
           { text: '善达知枢 · 管理员与审核人员', link: '/guide/zhishu-manual' },
-          { text: '企业知识助手 · 员工', link: '/guide/knowledge-assistant' }
+          { text: '企业知识助手 · 员工', link: '/guide/knowledge-assistant' },
+          { text: '会议管理与跟进', link: '/guide/zhishu-manual#meeting-management' }
         ]
       },
       {
