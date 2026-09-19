@@ -7,6 +7,10 @@ import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
+    { path: '/auth/feishu/callback', component: () => import('../views/FeishuCallbackView.vue'), meta: { requiresAuth: false } },
+    { path: '/feishu-account', component: AppLayout, children: [
+      { path: '', component: () => import('../views/FeishuAccountView.vue'), meta: { requiresAuth: true } }
+    ] },
     {
       path: '/',
       name: 'main',
@@ -86,6 +90,14 @@ const router = createRouter({
           component: () => import('../views/FeishuKnowledgeView.vue'),
           meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
         }
+      ]
+    },
+    {
+      path: '/meeting-management',
+      component: AppLayout,
+      children: [
+        { path: '', name: 'MeetingManagement', component: () => import('../views/MeetingManagementView.vue'), meta: { requiresAuth: true, requiresAdmin: true } },
+        { path: ':id', name: 'MeetingManagementDetail', component: () => import('../views/MeetingManagementDetail.vue'), meta: { requiresAuth: true, requiresAdmin: true } }
       ]
     },
     {

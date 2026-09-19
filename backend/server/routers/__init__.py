@@ -52,8 +52,10 @@ if not _LITE_MODE:
     from server.routers.knowledge_eval_router import evaluation
     from server.routers.knowledge_router import knowledge
     from server.routers.product_auth_router import product_auth
+    from server.routers.feishu_manager_auth_router import manager_auth
     from server.routers.product_chat_router import product_chat
     from server.routers.product_meeting_router import product_meeting
+    from server.routers.meeting_management_router import meeting_management
     from server.routers.product_citation_router import product_citation
 
     # 知识库与图谱能力依赖较重，LITE 模式下跳过这组接口。
@@ -64,6 +66,8 @@ if not _LITE_MODE:
     router.include_router(evaluation)  # /api/evaluation/* 知识库评估
     router.include_router(graph)  # /api/graph/* 图谱查询与管理
     router.include_router(product_auth)  # /api/auth/feishu/* 与 /api/session 产品登录边界
+    router.include_router(manager_auth)
     router.include_router(product_chat)  # /api/chat/conversations/* 企业助手会话与消息
     router.include_router(product_meeting)
+    router.include_router(meeting_management)
     router.include_router(product_citation)  # /api/citations/* 企业助手引用解析

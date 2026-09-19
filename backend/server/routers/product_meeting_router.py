@@ -1,6 +1,7 @@
 """Meeting API; delegates ownership, revisions and execution to product services."""
 
 import asyncio
+from copy import deepcopy
 import json
 from datetime import UTC, date, datetime, time
 import re
@@ -8,7 +9,7 @@ from uuid import uuid4
 from urllib.parse import quote
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -39,9 +40,9 @@ def sse(event, data):
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def require_meeting(db, meeting_id, user, **kwargs):
+async def require_meeting(db, meeting_id, user, *, owner_id=None, **kwargs):
     try:
-        return await MeetingRepository(db).require(meeting_id, user.id, **kwargs)
+        return await MeetingRepository(db).require(meeting_id, owner_id if owner_id is not None else user.id, **kwargs)
     except ProductChatNotFoundError:
         raise HTTPException(404, "会议不存在或无权访问") from None
 
@@ -66,7 +67,7 @@ class FollowupTaskEdit(BaseModel):
 class MeetingFollowupEdit(BaseModel):
     version: int = Field(ge=1)
     tasks: list[FollowupTaskEdit] = Field(default_factory=list, max_length=100)
-    action: Literal["SAVE", "CONFIRM", "IGNORE"] = "SAVE"
+    action: Literal["SAVE", "CONFIRM", "RESEND", "IGNORE"] = "SAVE"
     taskId: str | None = Field(default=None, min_length=1, max_length=80)
 
 
@@ -139,20 +140,21 @@ async def meeting_stream(meeting_id, user):
 
 
 @product_meeting.get("/chat/meetings")
-async def list_meetings(user: User = Depends(get_product_user)):
+async def list_meetings(
+    user: User = Depends(get_product_user),
+    q: str = Query(default="", max_length=200),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=50),
+    group_id: str | None = Query(default=None, alias="groupId", max_length=64),
+):
     async with pg_manager.get_async_session_context() as db:
-        rows = await MeetingRepository(db).list_owned(user.id)
-        return {
-            "meetings": [
-                {
-                    "id": r.id,
-                    "conversationId": r.conversation_id,
-                    "title": (r.result or {}).get("title", "会议纪要"),
-                    "createdAt": serialize_meeting(r, include_sources=False)["createdAt"],
-                }
-                for r in rows
-            ]
-        }
+        return await MeetingRepository(db).list_history(
+            user.id,
+            query=q.strip(),
+            offset=offset,
+            limit=limit,
+            group_id=group_id,
+        )
 
 
 @product_meeting.get("/chat/meeting-activity")
@@ -199,9 +201,9 @@ async def get_meeting(meeting_id: str, user: User = Depends(get_product_user)):
 
 
 @product_meeting.get("/chat/meetings/{meeting_id}/followup-directory")
-async def meeting_followup_directory(meeting_id: str, user: User = Depends(get_product_user)):
+async def meeting_followup_directory(meeting_id: str, user: User = Depends(get_product_user), *, owner_id=None):
     async with pg_manager.get_async_session_context() as db:
-        await require_meeting(db, meeting_id, user)
+        await require_meeting(db, meeting_id, user, owner_id=owner_id)
         return await load_meeting_directory(db, user.id)
 
 
@@ -211,8 +213,14 @@ async def edit_meeting_followup(
     patch: MeetingFollowupEdit,
     user: User = Depends(get_product_user),
 ):
+    return await update_meeting_followup(meeting_id, patch, user)
+
+
+async def update_meeting_followup(meeting_id, patch, user, *, owner_id=None, require_active_conversation=True):
     async with pg_manager.get_async_session_context() as db:
-        record = await require_meeting(db, meeting_id, user, lock=True, writable=True)
+        record = await require_meeting(
+            db, meeting_id, user, owner_id=owner_id, lock=True, writable=require_active_conversation
+        )
         if record.state != "completed" or record.version != patch.version or not record.result:
             raise HTTPException(409, "会议跟进版本已变化，请重新加载后再修改。")
         directory = (
@@ -250,10 +258,9 @@ async def edit_meeting_followup(
             previous = previous or {}
             normalized_due_date = task.dueDate.isoformat() if task.dueDate else None
             previous_assignee = previous.get("assignee") or {}
-            assignee_changed = (
-                previous_assignee.get("userId") != (assignee or {}).get("userId")
-                or previous_assignee.get("feishuUserId") != (assignee or {}).get("feishuUserId")
-            )
+            assignee_changed = previous_assignee.get("userId") != (assignee or {}).get(
+                "userId"
+            ) or previous_assignee.get("feishuUserId") != (assignee or {}).get("feishuUserId")
             task_changed = (
                 previous.get("title", "") != task.title.strip()
                 or previous.get("content", "") != task.content.strip()
@@ -261,14 +268,25 @@ async def edit_meeting_followup(
                 or previous.get("dueDate") != normalized_due_date
             )
             review_status = previous.get("reviewStatus") or "PENDING"
-            delivery = previous.get("delivery") or {
-                "notification": "NOT_SENT", "feishuTaskId": None, "messageId": None, "error": None,
+            delivery = deepcopy(previous.get("delivery")) or {
+                "notification": "NOT_SENT",
+                "feishuTaskId": None,
+                "messageId": None,
+                "chatId": None,
+                "error": None,
             }
-            if task_changed and review_status in {"CONFIRMED", "IGNORED", "DELIVERY_FAILED"}:
+            status_changed = previous.get("status", "OPEN") != task.status
+            if (task_changed or status_changed) and delivery.get("feishuTaskId"):
+                delivery["pendingUpdate"] = True
+                delivery["syncStatus"] = "PENDING"
+                if assignee_changed:
+                    delivery["notifyAssigneeChanged"] = True
+                review_status = "CONFIRMED"
+            elif task_changed and review_status in {"IGNORED", "DELIVERY_FAILED"}:
                 review_status = "PENDING"
-                delivery = {"notification": "NOT_SENT", "feishuTaskId": None, "messageId": None, "error": None}
             updated_tasks.append(
                 {
+                    **{key: previous[key] for key in ("extractionKey", "sourceMeetingId") if key in previous},
                     "id": task.id,
                     "title": task.title.strip(),
                     "content": task.content.strip(),
@@ -288,7 +306,7 @@ async def edit_meeting_followup(
                     "delivery": delivery,
                 }
             )
-        if patch.action in {"CONFIRM", "IGNORE"}:
+        if patch.action in {"CONFIRM", "RESEND", "IGNORE"}:
             if not patch.taskId:
                 raise HTTPException(422, "请指定要处理的会议待办。")
             if patch.taskId not in {task["id"] for task in updated_tasks}:
@@ -296,29 +314,72 @@ async def edit_meeting_followup(
         delivery_error = None
         if patch.action == "IGNORE":
             target = next(task for task in updated_tasks if task["id"] == patch.taskId)
-            if target["reviewStatus"] == "CONFIRMED" and target["delivery"].get("feishuTaskId"):
+            if target["delivery"].get("feishuTaskId"):
                 raise HTTPException(409, "该待办已经发送到飞书，如需修改请先编辑后重新确认。")
             for task in updated_tasks:
                 if task["id"] == patch.taskId:
                     task["reviewStatus"] = "IGNORED"
-        elif patch.action == "CONFIRM":
+        elif patch.action in {"CONFIRM", "RESEND"}:
             target = next(task for task in updated_tasks if task["id"] == patch.taskId)
             if not target["title"].strip():
                 raise HTTPException(422, "待办标题不能为空，请补充后再确认。")
-            if target["reviewStatus"] == "CONFIRMED" and target["delivery"].get("feishuTaskId"):
-                pass
+            already_sent = target["reviewStatus"] == "CONFIRMED" and target["delivery"].get("feishuTaskId")
+            if (
+                patch.action == "CONFIRM"
+                and already_sent
+                and not target["delivery"].get("pendingUpdate")
+                and target["delivery"].get("syncStatus") != "FAILED"
+            ):
+                # Older delivery records may have a message ID but no chat
+                # ID. Resolve it on confirmation so the UI can open the
+                # exact Feishu conversation without sending a duplicate.
+                message_id = (target.get("delivery") or {}).get("messageId")
+                chat_id = (target.get("delivery") or {}).get("chatId")
+                resolver = getattr(FeishuClient, "get_message_delivery", None)
+                updater = getattr(FeishuClient, "update_task", None)
+                if (message_id and not chat_id and resolver) or (updater and target.get("dueDate")):
+                    client = FeishuClient()
+                    try:
+                        if updater and target.get("dueDate"):
+                            await client.update_task(
+                                task_id=target["delivery"]["feishuTaskId"],
+                                due_timestamp=int(
+                                    datetime.combine(
+                                        date.fromisoformat(target["dueDate"]), time.max, tzinfo=UTC
+                                    ).timestamp()
+                                ),
+                            )
+                        if message_id and not chat_id and resolver:
+                            resolved = await client.get_message_delivery(message_id)
+                            target["delivery"]["messageId"] = resolved["messageId"]
+                            target["delivery"]["chatId"] = resolved["chatId"]
+                    except (FeishuClientError, ValueError):
+                        # Delivery already succeeded; inability to resolve the
+                        # optional deep link must not turn it into a failure.
+                        pass
+                    finally:
+                        await client.aclose()
             else:
                 assignee = target.get("assignee") or {}
-                recipient = assignee.get("feishuOpenId")
                 feishu_user_id = assignee.get("feishuUserId")
-                if not recipient or not feishu_user_id:
+                if not feishu_user_id:
                     raise HTTPException(422, "请先选择任务负责人，再确认并发送。")
                 client = None
                 previous_delivery = target.get("delivery") or {}
                 message_id = previous_delivery.get("messageId")
-                task_id = None
+                chat_id = previous_delivery.get("chatId")
+                # Keep the already-created Feishu task even when a later
+                # notification retry fails. The task and message have
+                # separate delivery lifecycles.
+                task_id = previous_delivery.get("feishuTaskId")
                 try:
                     client = FeishuClient()
+                    # CONFIRM sends the first notification. RESEND deliberately
+                    # sends a new notification while keeping the existing
+                    # idempotent Feishu task, so a missing chat message can be
+                    # recovered without creating duplicate tasks.
+                    if patch.action == "RESEND" or previous_delivery.get("notifyAssigneeChanged"):
+                        message_id = None
                     if not message_id:
                         message_lines = [
                             f"会议待办：{target['title']}",
@@ -331,46 +392,91 @@ async def edit_meeting_followup(
                             message_lines.append(f"依据：{'、'.join(target['sourceRefs'])}")
                         message_lines.append("请在飞书中确认并跟进。")
                         message = await client.send_text_message(
-                            open_id=recipient,
+                            # Use the tenant directory user ID for both the
+                            # message and the task. Open IDs are application
+                            # scoped and can point at a different identity
+                            # when multiple Feishu apps are connected.
+                            user_id=feishu_user_id,
                             text="\n".join(message_lines),
                         )
                         message_id = (
-                            (message.get("data") or {}).get("message_id")
-                            if isinstance(message, dict) else None
+                            (message.get("data") or {}).get("message_id") if isinstance(message, dict) else None
                         )
-                    created = await client.create_task(
-                        user_id=feishu_user_id,
-                        summary=target["title"],
-                        description=(
-                            f"{target.get('content') + chr(10) if target.get('content') else ''}"
-                            f"来源：{(record.result or {}).get('title') or '会议纪要'}"
-                            f"{chr(10) + '依据：' + '、'.join(target['sourceRefs']) if target.get('sourceRefs') else ''}"
-                        ),
-                        due_timestamp=(
-                            int(
-                                datetime.combine(
-                                    date.fromisoformat(target["dueDate"]), time.max, tzinfo=UTC
-                                ).timestamp()
-                            )
-                            if target.get("dueDate") else None
-                        ),
-                        client_token=f"meeting-{record.id}-{target['id']}",
-                    )
-                    task_id = (((created.get("data") or {}).get("task") or {}).get("guid")
-                               or ((created.get("data") or {}).get("task") or {}).get("id"))
+                        chat_id = (message.get("data") or {}).get("chat_id") if isinstance(message, dict) else None
+                        resolver = getattr(client, "get_message_delivery", None)
+                        if message_id and not chat_id and resolver:
+                            resolved = await resolver(message_id)
+                            chat_id = resolved.get("chatId")
+                    # Feishu's task API does not guarantee idempotency for a
+                    # repeated client_token after the first request. A resend
+                    # must therefore reuse the stored task instead of creating
+                    # another task for the same meeting item.
+                    if task_id and previous_delivery.get("pendingUpdate"):
+                        await client.edit_task(
+                            task_id=task_id,
+                            user_id=feishu_user_id,
+                            summary=target["title"],
+                            description=target.get("content") or "",
+                            due_timestamp=(
+                                int(
+                                    datetime.combine(
+                                        date.fromisoformat(target["dueDate"]),
+                                        time.max,
+                                        tzinfo=UTC,
+                                    ).timestamp()
+                                )
+                                if target.get("dueDate")
+                                else None
+                            ),
+                            completed=target["status"] == "DONE",
+                        )
+                    if not task_id:
+                        source_refs = target.get("sourceRefs") or []
+                        created = await client.create_task(
+                            user_id=feishu_user_id,
+                            summary=target["title"],
+                            description=(
+                                f"{target.get('content') + chr(10) if target.get('content') else ''}"
+                                f"来源：{(record.result or {}).get('title') or '会议纪要'}"
+                                f"{chr(10) + '依据：' + '、'.join(source_refs) if source_refs else ''}"
+                            ),
+                            due_timestamp=(
+                                int(
+                                    datetime.combine(
+                                        date.fromisoformat(target["dueDate"]), time.max, tzinfo=UTC
+                                    ).timestamp()
+                                )
+                                if target.get("dueDate")
+                                else None
+                            ),
+                            client_token=f"meeting-{record.id}-{target['id']}",
+                        )
+                        task_id = ((created.get("data") or {}).get("task") or {}).get("guid") or (
+                            (created.get("data") or {}).get("task") or {}
+                        ).get("id")
                     if not task_id:
                         raise FeishuClientError("飞书待办接口未返回任务编号")
                     target["reviewStatus"] = "CONFIRMED"
                     target["delivery"] = {
-                        "notification": "SENT", "feishuTaskId": task_id,
-                        "messageId": message_id, "error": None,
+                        "notification": "SENT",
+                        "feishuTaskId": task_id,
+                        "messageId": message_id,
+                        "chatId": chat_id,
+                        "error": None,
+                        "pendingUpdate": False,
+                        "syncStatus": "SYNCED",
                     }
                 except (FeishuClientError, ValueError) as exc:
                     delivery_error = "已确认但飞书通知或待办创建失败，请重试发送。"
-                    target["reviewStatus"] = "DELIVERY_FAILED"
+                    target["reviewStatus"] = "CONFIRMED"
                     target["delivery"] = {
-                        "notification": "FAILED", "feishuTaskId": task_id,
-                        "messageId": message_id, "error": str(exc)[:300],
+                        **previous_delivery,
+                        "notification": "SENT" if message_id else "FAILED",
+                        "feishuTaskId": task_id,
+                        "messageId": message_id,
+                        "chatId": chat_id,
+                        "error": str(exc)[:300],
+                        "syncStatus": "FAILED",
                     }
                 finally:
                     if client:
@@ -386,8 +492,14 @@ async def edit_meeting_followup(
 
 @product_meeting.patch("/chat/meetings/{meeting_id}")
 async def edit_meeting(meeting_id: str, patch: MeetingEdit, user: User = Depends(get_product_user)):
+    return await update_meeting_minutes(meeting_id, patch, user)
+
+
+async def update_meeting_minutes(meeting_id, patch, user, *, owner_id=None, require_active_conversation=True):
     async with pg_manager.get_async_session_context() as db:
-        record = await require_meeting(db, meeting_id, user, lock=True, writable=True)
+        record = await require_meeting(
+            db, meeting_id, user, owner_id=owner_id, lock=True, writable=require_active_conversation
+        )
         if record.state != "completed" or record.version != patch.version:
             raise HTTPException(409, "纪要版本已变化，请重新加载后再修改。")
         await MeetingRepository(db).save_result(
@@ -404,9 +516,9 @@ async def edit_meeting(meeting_id: str, patch: MeetingEdit, user: User = Depends
 
 
 @product_meeting.post("/chat/meetings/{meeting_id}/retry")
-async def retry_meeting(meeting_id: str, user: User = Depends(get_product_user)):
+async def retry_meeting(meeting_id: str, user: User = Depends(get_product_user), *, owner_id=None):
     async with pg_manager.get_async_session_context() as db:
-        record = await require_meeting(db, meeting_id, user, writable=True)
+        record = await require_meeting(db, meeting_id, user, owner_id=owner_id, writable=True)
         request = SendMessageRequest(
             content=record.input["content"],
             requestId=uuid4().hex,
@@ -416,13 +528,16 @@ async def retry_meeting(meeting_id: str, user: User = Depends(get_product_user))
             historyMeetingIds=record.input.get("historyMeetingIds", []),
         )
         conversation_id = record.conversation_id
-    new_id = await start_meeting(conversation_id, request, user)
+        retry_user = user if owner_id is None else await db.get(User, owner_id)
+        if retry_user is None:
+            raise HTTPException(404, "会议负责人不存在")
+    new_id = await start_meeting(conversation_id, request, retry_user)
     return {"runId": new_id, "conversationId": conversation_id}
 
 
-async def cancel_meeting(meeting_id, user):
+async def cancel_meeting(meeting_id, user, *, owner_id=None):
     async with pg_manager.get_async_session_context() as db:
-        record = await require_meeting(db, meeting_id, user, lock=True, writable=True)
+        record = await require_meeting(db, meeting_id, user, owner_id=owner_id, lock=True, writable=True)
         if record.state in {"pending", "running"}:
             record.state = "cancelled"
             record.updated_at = utc_now_naive()
@@ -434,11 +549,11 @@ async def cancel_meeting(meeting_id, user):
 
 
 @product_meeting.get("/chat/meetings/{meeting_id}/export")
-async def export_meeting(meeting_id: str, version: int, user: User = Depends(get_product_user)):
+async def export_meeting(meeting_id: str, version: int, user: User = Depends(get_product_user), *, owner_id=None):
     from yuxi.product_chat.meeting_export import export_docx
 
     async with pg_manager.get_async_session_context() as db:
-        record = await require_meeting(db, meeting_id, user)
+        record = await require_meeting(db, meeting_id, user, owner_id=owner_id)
         if not record.result or record.version != version:
             raise HTTPException(409, "导出版本已变化，请等待保存完成后重试。")
         data = await asyncio.to_thread(export_docx, record.result, record.sources, record.version)

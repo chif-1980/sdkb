@@ -73,6 +73,7 @@ class ProductAuthService:
         self._app_id = os.environ.get("FEISHU_APP_ID", "").strip()
         self._app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
         self._redirect_uri = os.environ.get("FEISHU_PRODUCT_REDIRECT_URI", "").strip()
+        self.manager_context = None
 
     async def create_login_url(self, return_path: str = _DEFAULT_RETURN_PATH) -> str:
         self._require_configuration(include_secret=False)
@@ -101,7 +102,8 @@ class ProductAuthService:
         return f"{FEISHU_QR_AUTHORIZE_URL}?{query}"
 
     async def complete_callback(self, code: str | None, state: str | None) -> tuple[User, str]:
-        await self._consume_state(state)
+        payload = await self._consume_state(state)
+        self.manager_context = payload.get("manager")
         self._require_configuration(include_secret=True)
         if not code:
             raise ProductAuthError("FEISHU_OAUTH_FAILED", 401)
@@ -407,7 +409,7 @@ class ProductAuthService:
             raise ProductAuthError("FEISHU_OAUTH_STATE_INVALID", 401)
         return payload
 
-    async def _create_state(self, return_path: str) -> str:
+    async def _create_state(self, return_path: str, *, manager: dict | None = None) -> str:
         normalized_return_path = self._normalize_return_path(return_path)
 
         for _ in range(3):
@@ -418,6 +420,7 @@ class ProductAuthService:
                     "state_hash": state_hash,
                     "return_path": normalized_return_path,
                     "expires_at": int(time.time()) + STATE_TTL_SECONDS,
+                    **({"manager": manager} if manager else {}),
                 },
                 separators=(",", ":"),
             )

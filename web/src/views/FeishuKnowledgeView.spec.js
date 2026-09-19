@@ -797,6 +797,42 @@ describe('FeishuKnowledgeView', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('复用成功后不再扫码，状态刷新失败=%s 也不重复授权', async (refreshFails) => {
+    let reused = false
+    let saved = null
+    apiAdminGet.mockImplementation((url) => {
+      if (url.endsWith('/sources')) return Promise.resolve({ items: saved ? [saved] : [] })
+      if (url.endsWith('/oauth/status')) {
+        if (reused && refreshFails) return Promise.reject(new Error('刷新失败'))
+        return Promise.resolve({ authorized: reused })
+      }
+      return Promise.resolve({ items: [], nodes: [] })
+    })
+    apiAdminPost.mockImplementation((url, payload) => {
+      if (url.endsWith('/sources')) {
+        saved = { ...payload, source_id: 'new-source', wiki_root_token: 'Abc123' }
+        return Promise.resolve(saved)
+      }
+      if (url.endsWith('/oauth/reuse')) {
+        reused = true
+        return Promise.resolve({ reused: true })
+      }
+      return Promise.resolve({ status: 'ok', root_title: '飞书目录' })
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="manage-sources"]').trigger('click')
+    await wrapper.get('[data-testid="source-url"]').setValue('https://team.feishu.cn/wiki/Abc123')
+    await wrapper.get('[data-testid="source-submit"]').trigger('click')
+    await flushPromises()
+    expect(reused).toBe(true)
+    expect(apiAdminPost.mock.calls.some(([url]) => url.endsWith('/oauth/authorize'))).toBe(false)
+    expect(QRCode.toDataURL).not.toHaveBeenCalled()
+    if (refreshFails) expect(message.warning).toHaveBeenCalledWith('授权已复用，页面状态刷新失败，请刷新后检查连接。')
+    else expect(apiAdminPost).toHaveBeenCalledWith('/api/feishu-knowledge/sources/new-source/check', {})
+    wrapper.unmount()
+  })
+
   it('无已有知识库时仍可自动创建，展开已有模式才阻止空目标', async () => {
     databaseApi.getDatabases.mockResolvedValue({ databases: [{ kb_id: 'readonly', name: 'Notion', kb_type: 'notion' }] })
     const wrapper = mountView()

@@ -33,6 +33,9 @@
             </div>
           </a-menu-item>
           <a-menu-divider />
+          <a-menu-item key="feishu-account" @click="router.push('/feishu-account')">
+            <span class="menu-text">飞书账号与授权</span>
+          </a-menu-item>
           <a-menu-item key="docs" @click="openDocs">
             <template #icon><BookOpen :size="16" /></template>
             <span class="menu-text">文档中心</span>

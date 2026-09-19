@@ -44,7 +44,33 @@ def _reference_ids(value: object) -> list[str]:
     return list(dict.fromkeys(re.findall(r"\[(S\d+-P\d+|H\d+)\]", value)))
 
 
-def build_followup(result: dict, *, coordinator_id: int, coordinator_name: str) -> dict:
+KNOWLEDGE_COMPARISON_STATUSES = {"COVERED", "NEEDS_UPDATE", "NEW_TOPIC", "UNVERIFIED"}
+KNOWLEDGE_COMPARISON_DEFAULT = "未能从当前可访问的正式知识中确认覆盖关系。"
+
+
+def _knowledge_review_by_index(review: object) -> dict[int, dict]:
+    if not isinstance(review, dict) or not isinstance(review.get("items"), list):
+        return {}
+    indexed: dict[int, dict] = {}
+    for item in review["items"]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if index > 0:
+            indexed[index] = item
+    return indexed
+
+
+def build_followup(
+    result: dict,
+    *,
+    coordinator_id: int,
+    coordinator_name: str,
+    knowledge_review: object = None,
+) -> dict:
     """Build the persisted follow-up projection from the verified model result.
 
     Model supplied names and dates are intentionally suggestions.  Assignees are
@@ -87,6 +113,15 @@ def build_followup(result: dict, *, coordinator_id: int, coordinator_name: str) 
             )
 
     raw_suggestions = result.get("knowledgeSuggestions")
+    reviewed_suggestions = _knowledge_review_by_index(knowledge_review)
+    comparison_default = (
+        knowledge_review.get("fallbackComparison") if isinstance(knowledge_review, dict) else None
+    ) or KNOWLEDGE_COMPARISON_DEFAULT
+    formal_ids = {
+        str(item.get("evidence_id"))
+        for item in (result.get("formalEvidence") or [])
+        if isinstance(item, dict) and item.get("evidence_id")
+    }
     suggestions: list[dict] = []
     if isinstance(raw_suggestions, list):
         for index, raw in enumerate(raw_suggestions, 1):
@@ -95,6 +130,13 @@ def build_followup(result: dict, *, coordinator_id: int, coordinator_name: str) 
             title = str(raw.get("title") or raw.get("subject") or "").strip()
             if not title:
                 continue
+            review = reviewed_suggestions.get(index) or {}
+            status = review.get("status") if review.get("status") in KNOWLEDGE_COMPARISON_STATUSES else "UNVERIFIED"
+            comparison = str(review.get("comparison") or "").strip() or comparison_default
+            comparison_refs = [
+                str(item) for item in (review.get("formalEvidenceIds") or [])
+                if str(item) in formal_ids
+            ]
             suggestions.append(
                 {
                     "id": f"knowledge-{index}",
@@ -102,6 +144,9 @@ def build_followup(result: dict, *, coordinator_id: int, coordinator_name: str) 
                     "reason": str(raw.get("reason") or raw.get("description") or "待知识维护人员核对").strip(),
                     "sourceRefs": _reference_ids(str(raw.get("evidence") or raw.get("source") or "")),
                     "status": "PENDING_MAINTAINER",
+                    "comparisonStatus": status,
+                    "comparison": comparison,
+                    "formalEvidenceIds": comparison_refs,
                 }
             )
 
@@ -384,9 +429,28 @@ async def _analyze(record_id):
     async def retrieve_knowledge(state):
         nonlocal sources, chunks, notes, result, formal
         await update_progress(record_id, "RETRIEVING", "业务分析：核对企业正式资料")
+        suggestions = result.get("knowledgeSuggestions")
+        suggestion_lines = []
+        if isinstance(suggestions, list):
+            for index, suggestion in enumerate(suggestions, 1):
+                if not isinstance(suggestion, dict):
+                    continue
+                title = str(suggestion.get("title") or "").strip()
+                reason = str(suggestion.get("reason") or "").strip()
+                if title:
+                    suggestion_lines.append(f"{index}. 标题：{title}\n   原因：{reason or '未提供'}")
         query = result.get("capabilityQuery")
+        if suggestion_lines:
+            comparison_query = (
+                "请核对企业正式知识是否已经覆盖以下会议提出的知识更新建议，并说明原有知识是否需要修改。"
+                "只使用当前用户有权限访问的正式知识，返回内容时给出可引用的正式资料依据。\n"
+                + "\n".join(suggestion_lines)
+            )
+            query = "\n\n".join(item for item in [query, comparison_query] if isinstance(item, str) and item.strip())
         formal = {"content": "未检索到可核验的企业能力依据，产品适配和承诺仍待确认。", "citations": []}
+        comparison_default = "未生成正式知识检索主题，尚未执行逐条比对。"
         if isinstance(query, str) and query.strip():
+            comparison_default = "已检索正式知识，但未获得足以支持逐条比对的可引用依据，暂不能判断是否已覆盖。"
             try:
                 async with pg_manager.get_async_session_context() as db:
                     answer = await AnswerService(db=db, read_session_factory=pg_manager.AsyncSession).answer(
@@ -399,6 +463,64 @@ async def _analyze(record_id):
                     "meeting_knowledge_check_failed meeting_id={} error_type={}", record_id, type(exc).__name__
                 )
                 formal["content"] = "企业正式资料暂时无法核对，产品能力和承诺均待确认。"
+                comparison_default = "正式知识检索失败，本次未完成逐条比对，请稍后重试。"
+        result["knowledgeReview"] = {"fallbackComparison": comparison_default}
+        if suggestion_lines and formal["citations"]:
+            allowed_evidence_ids = {
+                str(item.get("evidence_id"))
+                for item in formal["citations"]
+                if isinstance(item, dict) and item.get("evidence_id")
+            }
+            try:
+                review = await call_json(
+                    model,
+                    '根据每条会议知识更新建议和企业正式知识，输出严格 JSON：'
+                    '{"items":[{"index":1,"status":"COVERED|NEEDS_UPDATE|NEW_TOPIC|UNVERIFIED",'
+                    '"comparison":"基于正式知识的比较结论", "formalEvidenceIds":["E1"]}]}。'
+                    "每条建议必须返回一项，index 与输入序号一致。只能依据 formalKnowledge 判断："
+                    "COVERED 表示正式知识已覆盖且无需更新；NEEDS_UPDATE 表示已有相关知识但需要修改或补充；"
+                    "NEW_TOPIC 表示正式知识中未发现对应内容；UNVERIFIED 表示正式知识不足或无法判断。"
+                    "formalEvidenceIds 只能填写 formalKnowledge.citations 中真实存在的 evidence_id；"
+                    "没有依据时必须使用 UNVERIFIED，不得把会议建议直接当作正式事实。",
+                    {
+                        "suggestions": [
+                            {
+                                "index": index,
+                                "title": item.get("title"),
+                                "reason": item.get("reason"),
+                            }
+                            for index, item in enumerate(suggestions, 1)
+                            if isinstance(item, dict) and item.get("title")
+                        ],
+                        "formalKnowledge": formal,
+                    },
+                )
+                reviewed = _knowledge_review_by_index(review)
+                result["knowledgeReview"] = {
+                    "fallbackComparison": "已检索正式知识，但模型未返回本条建议的完整比对结论。",
+                    "items": [
+                        {
+                            "index": index,
+                            "status": item.get("status"),
+                            "comparison": item.get("comparison"),
+                            "formalEvidenceIds": [
+                                str(evidence_id)
+                                for evidence_id in (item.get("formalEvidenceIds") or [])
+                                if str(evidence_id) in allowed_evidence_ids
+                            ],
+                        }
+                        for index, item in reviewed.items()
+                    ]
+                }
+            except Exception as exc:
+                logger.warning(
+                    "meeting_knowledge_comparison_failed meeting_id={} error_type={}",
+                    record_id,
+                    type(exc).__name__,
+                )
+                result["knowledgeReview"]["fallbackComparison"] = (
+                    "已获得正式知识引用，但逐条比对生成失败，本次没有有效比对结论，请稍后重试。"
+                )
         return {"phase": "retrieve_knowledge"}
 
     async def verify_minutes(state):
@@ -480,6 +602,7 @@ async def _analyze(record_id):
             result,
             coordinator_id=user.id,
             coordinator_name=user.username,
+            knowledge_review=result.pop("knowledgeReview", None),
         )
         result.pop("capabilityQuery", None)
         result.pop("actionItems", None)

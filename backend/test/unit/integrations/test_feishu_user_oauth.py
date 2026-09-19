@@ -48,6 +48,9 @@ class FakeSession:
     async def flush(self) -> None:
         self.flush_count += 1
 
+    async def execute(self, statement):
+        return None
+
 
 def oauth_env() -> dict[str, str]:
     return {

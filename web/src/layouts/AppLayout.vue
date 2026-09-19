@@ -188,6 +188,7 @@ const mainList = computed(() => {
       icon: Workflow,
       activeIcon: Workflow
     })
+    items.push({ name: '会议管理', path: '/meeting-management', icon: ClipboardList, activeIcon: ClipboardList })
   }
 
   if (userStore.isSuperAdmin) {

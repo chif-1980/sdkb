@@ -226,6 +226,10 @@
                   </a-form-item>
                 </a-form>
 
+                <div v-if="feishuEnabled" class="third-party-login">
+                  <a-button block size="large" :loading="feishuLoading" @click="handleFeishuLogin">使用飞书账号登录</a-button>
+                  <p class="feishu-login-hint">与企业知识助手共用账号，管理权限由管理员分配。</p>
+                </div>
                 <!-- OIDC 登录选项  -->
                 <div v-if="oidcChecking || oidcEnabled" class="third-party-login">
                   <div class="divider">
@@ -294,6 +298,7 @@ import { useAgentStore } from '@/stores/agent'
 import { message } from 'ant-design-vue'
 import { healthApi } from '@/apis/system_api'
 import { authApi } from '@/apis/auth_api'
+import { feishuLoginConfig, startFeishuLogin } from '@/apis/feishuAuth'
 import {
   User as UserIcon,
   Lock as LockIcon,
@@ -518,6 +523,14 @@ const handleLogin = async () => {
   }
 }
 
+const feishuEnabled = ref(false), feishuLoading = ref(false)
+const handleFeishuLogin = async () => {
+  if (!ensureAgreementAccepted()) return
+  feishuLoading.value = true
+  try { await startFeishuLogin() } catch (error) { errorMessage.value = error.message }
+  finally { feishuLoading.value = false }
+}
+
 // 处理 OIDC 登录
 const handleOIDCLogin = async () => {
   if (!ensureAgreementAccepted()) {
@@ -645,6 +658,8 @@ onMounted(async () => {
   if (route.query.oidc_error) {
     errorMessage.value = String(route.query.oidc_error)
   }
+
+  try { feishuEnabled.value = (await feishuLoginConfig()).enabled } catch { feishuEnabled.value = false }
 
   // 首先检查服务器健康状态
   await checkServerHealth()
@@ -858,6 +873,12 @@ onUnmounted(() => {
 
 .third-party-login {
   margin-top: 16px;
+  .feishu-login-hint {
+    margin: 8px 0 0;
+    color: var(--gray-600);
+    font-size: 12px;
+    line-height: 1.6;
+  }
   .divider {
     position: relative;
     text-align: center;

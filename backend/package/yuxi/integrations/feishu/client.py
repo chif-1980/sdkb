@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import asyncio
 import json
 import math
@@ -366,17 +368,31 @@ class FeishuClient:
             file_name=self._download_filename(response.headers.get("content-disposition")),
         )
 
-    async def send_text_message(self, *, open_id: str, text: str) -> dict[str, Any]:
-        """Send a plain-text tenant message to one Feishu user."""
-        if not isinstance(open_id, str) or not open_id.strip():
-            raise ValueError("open_id must not be blank")
+    async def send_text_message(
+        self,
+        *,
+        open_id: str | None = None,
+        user_id: str | None = None,
+        text: str,
+    ) -> dict[str, Any]:
+        """Send a plain-text tenant message to one Feishu user.
+
+        ``user_id`` is preferred for tenant directory members because it is
+        stable across applications. ``open_id`` remains supported for the
+        existing notification integrations.
+        """
+        identifiers = [("user_id", user_id), ("open_id", open_id)]
+        provided = [(name, value) for name, value in identifiers if isinstance(value, str) and value.strip()]
+        if len(provided) != 1:
+            raise ValueError("provide exactly one non-blank user_id or open_id")
+        receive_id_type, receive_id = provided[0]
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must not be blank")
         response = await self._post_response(
             "/open-apis/im/v1/messages",
-            params={"receive_id_type": "open_id"},
+            params={"receive_id_type": receive_id_type},
             json_body={
-                "receive_id": open_id,
+                "receive_id": receive_id,
                 "msg_type": "text",
                 "content": json.dumps({"text": text}, ensure_ascii=False),
             },
@@ -385,12 +401,60 @@ class FeishuClient:
             payload = response.json()
         except ValueError:
             payload = None
-        if not isinstance(payload, dict) or payload.get("code", 0) != 0:
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            logger.warning(
+                "Feishu message API returned invalid response: code={}, message={}, request_id={}",
+                payload.get("code") if isinstance(payload, dict) else None,
+                payload.get("msg") if isinstance(payload, dict) else None,
+                self._request_id(response),
+            )
             raise FeishuApiError(
                 "Feishu message API returned an invalid response",
                 error=self._error_from_response(response),
             )
+        data = payload.get("data")
+        message_id = data.get("message_id") if isinstance(data, dict) else None
+        if not isinstance(message_id, str) or not message_id.strip():
+            logger.warning(
+                "Feishu message API returned no message ID: code={}, request_id={}",
+                payload.get("code"),
+                self._request_id(response),
+            )
+            raise FeishuApiError(
+                "Feishu message API did not return a message ID",
+                error=self._error_from_response(response),
+            )
+        logger.info(
+            "Feishu message accepted: message_id={}, chat_id={}, request_id={}",
+            message_id,
+            data.get("chat_id") if isinstance(data, dict) else None,
+            self._request_id(response),
+        )
         return payload
+
+    async def get_message_delivery(self, message_id: str) -> dict[str, str | None]:
+        """Return the chat and message identifiers for a sent message.
+
+        The send endpoint normally includes ``chat_id``. Some Feishu
+        responses omit it, so callers can use this small read-back to make
+        the delivery record actionable without sending another message.
+        """
+        if not isinstance(message_id, str) or not message_id.strip():
+            raise ValueError("message_id must not be blank")
+        payload = await self._get(f"/open-apis/im/v1/messages/{message_id}", params={})
+        data = payload.get("data") if isinstance(payload, dict) else None
+        items = data.get("items") if isinstance(data, dict) else None
+        item = items[0] if isinstance(items, list) and items else None
+        if not isinstance(item, dict):
+            raise FeishuApiError("Feishu message lookup returned no message")
+        resolved_message_id = item.get("message_id")
+        chat_id = item.get("chat_id")
+        if not isinstance(resolved_message_id, str) or not resolved_message_id.strip():
+            raise FeishuApiError("Feishu message lookup returned no message ID")
+        return {
+            "messageId": resolved_message_id,
+            "chatId": chat_id if isinstance(chat_id, str) and chat_id.strip() else None,
+        }
 
     async def create_task(
         self,
@@ -412,8 +476,13 @@ class FeishuClient:
             "members": [{"id": user_id, "type": "user", "role": "assignee"}],
         }
         if due_timestamp is not None:
-            body["due"] = {"timestamp": str(int(due_timestamp)), "is_all_day": True}
-        params = {"client_token": client_token} if client_token else None
+            # Feishu task timestamps are milliseconds since Unix epoch. The
+            # meeting service passes Unix seconds internally, so convert at
+            # this API boundary exactly once.
+            body["due"] = {"timestamp": str(int(due_timestamp) * 1000), "is_all_day": True}
+        params = {"user_id_type": "user_id"}
+        if client_token:
+            params["client_token"] = client_token
         response = await self._post_response(
             "/open-apis/task/v2/tasks",
             params=params,
@@ -423,11 +492,114 @@ class FeishuClient:
             payload = response.json()
         except ValueError:
             payload = None
-        if not isinstance(payload, dict) or payload.get("code", 0) != 0:
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            logger.warning(
+                "Feishu task API returned invalid response: code={}, message={}, request_id={}",
+                payload.get("code") if isinstance(payload, dict) else None,
+                payload.get("msg") if isinstance(payload, dict) else None,
+                self._request_id(response),
+            )
             raise FeishuApiError(
                 "Feishu task API returned an invalid response",
                 error=self._error_from_response(response),
             )
+        data = payload.get("data")
+        task = data.get("task") if isinstance(data, dict) else None
+        task_id = task.get("guid") or task.get("id") if isinstance(task, dict) else None
+        if not isinstance(task_id, str) or not task_id.strip():
+            logger.warning(
+                "Feishu task API returned no task ID: code={}, request_id={}",
+                payload.get("code"),
+                self._request_id(response),
+            )
+            raise FeishuApiError(
+                "Feishu task API did not return a task ID",
+                error=self._error_from_response(response),
+            )
+        logger.info(
+            "Feishu task accepted: task_id={}, request_id={}",
+            task_id,
+            self._request_id(response),
+        )
+        return payload
+
+    async def update_task(self, *, task_id: str, due_timestamp: int | None = None) -> dict[str, Any]:
+        """Update the due date of an existing Feishu task.
+
+        ``due_timestamp`` is accepted in Unix seconds to match
+        :meth:`create_task`; the Open API payload is sent in milliseconds.
+        """
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ValueError("task_id must not be blank")
+        if due_timestamp is None:
+            raise ValueError("due_timestamp must not be None")
+        body = {
+            "task": {"due": {"timestamp": str(int(due_timestamp) * 1000), "is_all_day": True}},
+            "update_fields": ["due"],
+        }
+        response = await self._patch_response(
+            f"/open-apis/task/v2/tasks/{task_id}",
+            params={"user_id_type": "user_id"},
+            json_body=body,
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            logger.warning(
+                "Feishu task update returned invalid response: code={}, message={}, request_id={}",
+                payload.get("code") if isinstance(payload, dict) else None,
+                payload.get("msg") if isinstance(payload, dict) else None,
+                self._request_id(response),
+            )
+            raise FeishuApiError(
+                "Feishu task update returned an invalid response",
+                error=self._error_from_response(response),
+            )
+        logger.info("Feishu task updated: task_id={}, request_id={}", task_id, self._request_id(response))
+        return payload
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        if not task_id or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+            raise ValueError("Invalid Feishu task ID")
+        payload = await self._get(f"/open-apis/task/v2/tasks/{task_id}", params={"user_id_type": "user_id"})
+        task = (payload.get("data") or {}).get("task")
+        if not isinstance(task, dict) or "completed_at" not in task:
+            raise FeishuClientError("飞书未返回完整任务状态")
+        return task
+
+    async def edit_task(
+        self, *, task_id: str, user_id: str, summary: str, description: str,
+        due_timestamp: int | None, completed: bool,
+    ) -> dict[str, Any]:
+        """Update one existing task and reconcile assignees, retaining its GUID."""
+        remote = await self.get_task(task_id)
+        fields = {
+            "summary": summary, "description": description,
+            "due": {"timestamp": str(int(due_timestamp) * 1000) if due_timestamp else "0", "is_all_day": True},
+            "completed_at": str(int(time.time() * 1000)) if completed else "0",
+        }
+        response = await self._patch_response(
+            f"/open-apis/task/v2/tasks/{task_id}", params={"user_id_type": "user_id"},
+            json_body={"task": fields, "update_fields": list(fields)},
+        )
+        payload = response.json()
+        if payload.get("code") != 0:
+            raise FeishuApiError("飞书任务修改失败", error=self._error_from_response(response))
+        assignees = {m["id"] for m in remote.get("members", []) if m.get("role") == "assignee"}
+        changes = []
+        if user_id not in assignees:
+            changes.append(("add_members", [user_id]))
+        if assignees - {user_id}:
+            changes.append(("remove_members", sorted(assignees - {user_id})))
+        for action, ids in changes:
+            response = await self._post_response(
+                f"/open-apis/task/v2/tasks/{task_id}/{action}", params={"user_id_type": "user_id"},
+                json_body={"members": [{"id": member, "type": "user", "role": "assignee"} for member in ids]},
+            )
+            if response.json().get("code") != 0:
+                raise FeishuApiError("飞书任务负责人修改失败", error=self._error_from_response(response))
         return payload
 
     async def _get(self, path: str, *, params: dict[str, str]) -> dict[str, Any]:
@@ -473,6 +645,14 @@ class FeishuClient:
             raise FeishuNotFoundError("Feishu resource not found", error=self._error_from_response(response))
         if response.is_error:
             error = self._error_from_response(response)
+            logger.warning(
+                "Feishu request failed: path={}, status={}, code={}, message={}, request_id={}",
+                path,
+                error.status_code,
+                error.code,
+                error.message,
+                error.request_id,
+            )
             if error.code in FEISHU_PERMISSION_ERROR_CODES:
                 raise FeishuPermissionError(error.message or "Feishu permission denied", error=error)
             raise FeishuApiError("Feishu request failed", error=error)
@@ -503,6 +683,52 @@ class FeishuClient:
             raise FeishuNotFoundError("Feishu resource not found", error=self._error_from_response(response))
         if response.is_error:
             error = self._error_from_response(response)
+            logger.warning(
+                "Feishu request failed: path={}, status={}, code={}, message={}, request_id={}",
+                path,
+                error.status_code,
+                error.code,
+                error.message,
+                error.request_id,
+            )
+            if error.code in FEISHU_PERMISSION_ERROR_CODES:
+                raise FeishuPermissionError(error.message or "Feishu permission denied", error=error)
+            raise FeishuApiError("Feishu request failed", error=error)
+        self._log_response(response)
+        return response
+
+    async def _patch_response(
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None,
+        json_body: dict[str, Any],
+    ) -> httpx.Response:
+        token, generation = await self._get_request_token()
+        response = await self._patch_with_retries(path, params=params, json_body=json_body, token=token)
+        if response.status_code == 401:
+            if self._token_provider is None:
+                self._invalidate_tenant_token(token, generation)
+            token, _ = await self._get_request_token(force_refresh=True)
+            response = await self._patch_with_retries(path, params=params, json_body=json_body, token=token)
+            if response.status_code == 401:
+                raise FeishuAuthenticationError(
+                    "Feishu authentication failed", error=self._error_from_response(response)
+                )
+        if response.status_code == 403:
+            raise FeishuPermissionError("Feishu permission denied", error=self._error_from_response(response))
+        if response.status_code == 404:
+            raise FeishuNotFoundError("Feishu resource not found", error=self._error_from_response(response))
+        if response.is_error:
+            error = self._error_from_response(response)
+            logger.warning(
+                "Feishu request failed: path={}, status={}, code={}, message={}, request_id={}",
+                path,
+                error.status_code,
+                error.code,
+                error.message,
+                error.request_id,
+            )
             if error.code in FEISHU_PERMISSION_ERROR_CODES:
                 raise FeishuPermissionError(error.message or "Feishu permission denied", error=error)
             raise FeishuApiError("Feishu request failed", error=error)
@@ -544,6 +770,40 @@ class FeishuClient:
             request_failed = False
             try:
                 response = await self._client.post(
+                    f"{FEISHU_OPEN_API_BASE_URL}{path}",
+                    params=params,
+                    headers=headers,
+                    json=json_body,
+                )
+            except httpx.HTTPError:
+                if attempt >= self._max_retries:
+                    request_failed = True
+                else:
+                    await self._sleep(self._backoff_delay(attempt))
+                    continue
+            if request_failed:
+                raise FeishuApiError("Feishu request failed")
+
+            if (response.status_code == 429 or 500 <= response.status_code < 600) and attempt < self._max_retries:
+                self._log_response(response)
+                await self._sleep(self._retry_delay(response, attempt))
+                continue
+            return response
+        raise FeishuApiError("Feishu request exhausted retries")
+
+    async def _patch_with_retries(
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None,
+        json_body: dict[str, Any],
+        token: str,
+    ) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {token}"}
+        for attempt in range(self._max_retries + 1):
+            request_failed = False
+            try:
+                response = await self._client.patch(
                     f"{FEISHU_OPEN_API_BASE_URL}{path}",
                     params=params,
                     headers=headers,

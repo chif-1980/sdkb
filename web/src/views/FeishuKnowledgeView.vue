@@ -208,6 +208,7 @@
                   </div>
                 </div>
                 <div class="tree-actions">
+                  <a-button v-if="!oauthStatus.authorized" :disabled="sourceActionsLocked" @click="reuseMyAuthorization(false)">复用我的飞书授权</a-button>
                   <a-tooltip :title="oauthStatus.authorized ? '重新扫码授权' : '扫码授权'">
                     <a-button
                       data-testid="oauth-qr-authorize"
@@ -713,7 +714,7 @@ async function createSource() {
     sources.value.unshift(created)
     sourceDialogOpen.value = false
     await selectSource(created.source_id, true)
-    await startQrOAuth()
+    if (!await reuseMyAuthorization(true)) await startQrOAuth()
   } catch (error) {
     sourceSetupError.value = feishuKnowledgeApi.getErrorMessage(error, '添加数据源失败')
   } finally {
@@ -1192,6 +1193,31 @@ async function startBrowserOAuth() {
     window.location.assign(validateAuthorizationUrl(response.authorization_url))
   } catch (error) {
     message.error(feishuKnowledgeApi.getErrorMessage(error, '发起飞书用户授权失败'))
+    authorizingUser.value = false
+  }
+}
+
+async function reuseMyAuthorization(quiet = false) {
+  if (!currentSource.value || authorizingUser.value || scanInProgress.value) return false
+  authorizingUser.value = true
+  let reused = false
+  try {
+    const result = await feishuKnowledgeApi.reuseOAuth(currentSource.value.source_id)
+    if (!result.reused) {
+      if (!quiet) message.info('没有可复用的授权，请使用飞书账号登录后重试，或补充扫码授权。')
+      return false
+    }
+    reused = true
+    await loadOAuthStatus()
+    await checkCurrentSource()
+    await loadTree(true)
+    message.success('已复用当前飞书身份的知识访问授权')
+    return true
+  } catch (error) {
+    message.warning(reused ? '授权已复用，页面状态刷新失败，请刷新后检查连接。'
+      : feishuKnowledgeApi.getErrorMessage(error, '已有授权不能访问此知识源，请补充授权'))
+    return reused
+  } finally {
     authorizingUser.value = false
   }
 }

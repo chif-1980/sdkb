@@ -1,0 +1,36 @@
+.meeting-page {
+  padding: 28px 32px; height: 100%; overflow: auto; color: var(--gray-900); background: var(--gray-10);
+  h1 {font-size: 24px; font-weight: 600; margin: 0 0 6px;}
+  h2 {font-size: 17px; margin: 0;}
+  p {color: var(--gray-600); margin: 0;}
+  small {display: block; color: var(--gray-600); font-size: 12px; margin-top: 5px; overflow-wrap: anywhere;}
+  .ant-btn {display: inline-flex; align-items: center; gap: 6px;}
+  .ant-alert {margin-bottom: 16px;}
+  .meeting-heading {display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px;}
+  .meeting-metrics {display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 20px 0;}
+  .meeting-metrics button {position: relative; display: flex; flex-direction: column; gap: 12px; text-align: left; padding: 18px 20px; background: var(--gray-0); border: 1px solid var(--gray-200); border-radius: 8px; cursor: pointer; color: inherit;}
+  .meeting-metrics button:hover {border-color: var(--main-500);}
+  .meeting-metrics span {font-size: 13px; color: var(--gray-600);}
+  .meeting-metrics strong {font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums;}
+  .meeting-metrics svg {position: absolute; right: 16px; bottom: 20px; color: var(--gray-500);}
+  .meeting-filters {display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 20px;}
+  .meeting-filters .ant-input-affix-wrapper {max-width: 360px;}
+  .meeting-filters .ant-select {min-width: 170px;}
+  .meeting-title-link {padding: 0; border: 0; background: none; text-align: left; color: var(--main-700); cursor: pointer; font: inherit; font-weight: 500; overflow-wrap: anywhere;}
+  .meeting-pagination {display: flex; justify-content: space-between; align-items: center; padding: 20px 0; color: var(--gray-600);}
+  .meeting-meta {display: flex; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 18px; font-size: 13px; color: var(--gray-600);}
+  .meeting-actions {display: flex; flex-wrap: wrap; gap: 8px;}
+  .meeting-panel {background: var(--gray-0); border: 1px solid var(--gray-200); border-radius: 8px; padding: 24px; margin-bottom: 16px; overflow-wrap: anywhere;}
+  .meeting-item {padding: 20px; margin-bottom: 14px; border: 1px solid var(--gray-200); border-radius: 8px; background: var(--gray-0);}
+  .meeting-item-header {display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 12px;}
+  .meeting-item h3 {font-size: 15px; font-weight: 600; margin: 0 0 8px;}
+  .meeting-form {display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 16px 0;}
+  .meeting-form label {display: flex; flex-direction: column; gap: 6px; color: var(--gray-600); font-size: 13px;}
+  .meeting-evidence {margin: 12px 0; padding: 12px 16px; border-left: 3px solid var(--main-400); background: var(--gray-50); white-space: pre-wrap;}
+  .meeting-source {display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0;}
+  .meeting-error {color: var(--color-error-700);}
+  .meeting-editor {display: flex; flex-direction: column; gap: 12px;}
+  .meeting-back {display: inline-flex; align-items: center; gap: 6px; margin-bottom: 20px; color: var(--gray-600); border: 0; background: none; cursor: pointer; padding: 0;}
+  :focus-visible {outline: 2px solid var(--main-500); outline-offset: 3px;}
+  @media(max-width: 900px) {padding: 20px 16px; .meeting-metrics {grid-template-columns: repeat(2, minmax(0,1fr));} .meeting-form {grid-template-columns: 1fr;} .meeting-heading {align-items: start; flex-direction: column;}}
+}

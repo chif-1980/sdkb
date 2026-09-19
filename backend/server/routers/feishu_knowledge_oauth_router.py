@@ -64,6 +64,20 @@ async def source_user_oauth_status(
         ) from exc
 
 
+@feishu_knowledge_oauth.post("/sources/{source_id}/oauth/reuse")
+async def reuse_source_user_oauth(
+    source_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_admin_user),
+):
+    try:
+        service = FeishuUserOAuthService(db=db)
+        reused = await service.reuse_authorization(source_id, current_user.id)
+        await db.commit()
+        return {"reused": reused}
+    except FeishuUserOAuthError as exc:
+        await db.rollback()
+        raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
 @feishu_knowledge_oauth.get("/oauth/callback")
 async def complete_source_user_oauth(
     code: str | None = None,

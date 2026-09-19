@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.integrations.feishu.client import FeishuClient
@@ -22,7 +22,9 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuProcessingEvent,
     FeishuSource,
     FeishuUserOAuthCredential,
+    FeishuSourceOAuthLink,
 )
+from yuxi.storage.postgres.models_product import FeishuUserBinding
 from yuxi.utils.datetime_utils import ensure_utc, utc_now
 
 FEISHU_AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
@@ -161,10 +163,17 @@ class FeishuUserOAuthService:
 
         cipher = FeishuTokenCipher.from_environ(self._environ)
         now = utc_now()
-        credential = await self._get_credential(source.source_id, for_update=True)
+        credential = await self._get_credential(source.source_id, for_update=True, resolve_link=False)
         if credential is None:
             credential = FeishuUserOAuthCredential(source_id=source.source_id)
             self._db.add(credential)
+        elif credential.feishu_open_id != self._optional_string(profile, "open_id"):
+            # Reauthorizing as someone else must not change other sources' identity.
+            await self._db.execute(
+                delete(FeishuSourceOAuthLink).where(
+                    FeishuSourceOAuthLink.credential_id == credential.id,
+                )
+            )
         credential.access_token_ciphertext = cipher.encrypt(access_token)
         credential.refresh_token_ciphertext = cipher.encrypt(refresh_token)
         credential.access_token_expires_at = now + timedelta(seconds=access_expires_in)
@@ -187,7 +196,55 @@ class FeishuUserOAuthService:
             )
         )
         await self._db.flush()
+        await self._db.execute(delete(FeishuSourceOAuthLink).where(FeishuSourceOAuthLink.source_id == source.source_id))
         return credential
+
+    async def reuse_authorization(self, source_id: str, user_id: int) -> bool:
+        """Only reuse the logged-in identity, checking live tenant and source access."""
+        source = await self._get_source(source_id)
+        if await self._get_credential(source_id) is not None:
+            return False  # Never silently switch an existing source's authorizer.
+        binding = await self._db.scalar(
+            select(FeishuUserBinding).where(
+                FeishuUserBinding.user_id == user_id,
+                FeishuUserBinding.authorization_status == "ACTIVE",
+            )
+        )
+        if not binding:
+            return False
+        candidates = list(
+            await self._db.scalars(
+                select(FeishuUserOAuthCredential)
+                .where(
+                    FeishuUserOAuthCredential.feishu_open_id == binding.feishu_open_id,
+                    FeishuUserOAuthCredential.authorization_status == "active",
+                    FeishuUserOAuthCredential.refresh_token_expires_at > utc_now(),
+                )
+                .order_by(FeishuUserOAuthCredential.updated_at.desc())
+            )
+        )
+        if not candidates:
+            return False
+        credential = candidates[0]
+        token = await self.get_access_token(credential.source_id)
+        profile = await self._fetch_profile(token)
+        if profile.get("open_id") != binding.feishu_open_id or profile.get("tenant_key") != binding.tenant_key:
+            raise FeishuUserOAuthError(
+                "FEISHU_IDENTITY_MISMATCH", 403, "已有授权与当前飞书身份或企业不一致，请重新授权"
+            )
+        await self._validate_source_access(source, token)
+        self._db.add(FeishuSourceOAuthLink(source_id=source_id, credential_id=credential.id, linked_by=str(user_id)))
+        self._db.add(
+            FeishuProcessingEvent(
+                source_id=source_id,
+                event_type="user_oauth_reused",
+                operator_id=str(user_id),
+                message="复用当前飞书身份的知识访问授权",
+                payload_json={"display_name": credential.display_name},
+            )
+        )
+        await self._db.flush()
+        return True
 
     async def get_authorization_status(self, source_id: str) -> dict[str, Any]:
         await self._get_source(source_id)
@@ -423,12 +480,26 @@ class FeishuUserOAuthService:
         source_id: str,
         *,
         for_update: bool = False,
+        resolve_link: bool = True,
     ) -> FeishuUserOAuthCredential | None:
         statement = select(FeishuUserOAuthCredential).where(FeishuUserOAuthCredential.source_id == source_id)
         if for_update:
             statement = statement.with_for_update()
         result = await self._db.execute(statement)
-        return result.scalar_one_or_none()
+        credential = result.scalar_one_or_none()
+        if credential is not None or not resolve_link:
+            return credential
+        statement = (
+            select(FeishuUserOAuthCredential)
+            .join(
+                FeishuSourceOAuthLink,
+                FeishuSourceOAuthLink.credential_id == FeishuUserOAuthCredential.id,
+            )
+            .where(FeishuSourceOAuthLink.source_id == source_id)
+        )
+        if for_update:
+            statement = statement.with_for_update(of=FeishuUserOAuthCredential)
+        return await self._db.scalar(statement)
 
     def _require_configuration(
         self,

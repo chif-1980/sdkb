@@ -154,6 +154,29 @@ async def test_send_text_message_uses_open_id_and_text_payload():
 
 
 @pytest.mark.asyncio
+async def test_get_message_delivery_reads_chat_id_for_existing_message():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == TENANT_TOKEN_PATH:
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        assert request.method == "GET"
+        assert request.url.path == "/open-apis/im/v1/messages/om_existing"
+        assert request.headers["authorization"] == "Bearer test-tenant-token"
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"items": [{"message_id": "om_existing", "chat_id": "oc_existing"}]}},
+        )
+
+    client = _client(handler)
+    result = await client.get_message_delivery("om_existing")
+    assert result == {"messageId": "om_existing", "chatId": "oc_existing"}
+    assert len(requests) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_create_task_uses_assignee_and_idempotency_token():
     requests: list[httpx.Request] = []
 
@@ -162,12 +185,13 @@ async def test_create_task_uses_assignee_and_idempotency_token():
         if request.url.path == TENANT_TOKEN_PATH:
             return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
         assert request.method == "POST"
+        assert request.url.params["user_id_type"] == "user_id"
         assert request.url.params["client_token"] == "meeting-m1-task-1"
         payload = json.loads(request.content)
         assert payload["summary"] == "核对资料"
         assert payload["description"] == "来源：会议"
         assert payload["members"] == [{"id": "ou_user", "type": "user", "role": "assignee"}]
-        assert payload["due"] == {"timestamp": "1798656000", "is_all_day": True}
+        assert payload["due"] == {"timestamp": "1798656000000", "is_all_day": True}
         return httpx.Response(200, json={"code": 0, "data": {"task": {"guid": "task-guid"}}})
 
     client = _client(handler)
@@ -179,7 +203,31 @@ async def test_create_task_uses_assignee_and_idempotency_token():
         client_token="meeting-m1-task-1",
     )
     assert result["data"]["task"]["guid"] == "task-guid"
-    assert len(requests) == 2
+    assert len(requests) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_update_task_sends_due_timestamp_in_milliseconds():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == TENANT_TOKEN_PATH:
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+        assert request.method == "PATCH"
+        assert request.url.path == "/open-apis/task/v2/tasks/task-guid"
+        assert request.url.params["user_id_type"] == "user_id"
+        assert json.loads(request.content) == {
+            "task": {"due": {"timestamp": "1798656000000", "is_all_day": True}},
+            "update_fields": ["due"],
+        }
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    client = _client(handler)
+    result = await client.update_task(task_id="task-guid", due_timestamp=1798656000)
+    assert result["code"] == 0
+    assert len(requests) == 1
     await client.aclose()
 
 
@@ -1277,3 +1325,71 @@ async def test_contact_pagination_reads_all_pages_and_rejects_loop():
     with pytest.raises(ValueError, match="分页"):
         await client.list_contact_pages("/open-apis/contact/v3/departments/0/children", {})
     await client._client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["message", "task"])
+@pytest.mark.parametrize("payload", [{"code": 999, "msg": "denied"}, {"data": {}}, {"code": 0, "data": {}}])
+async def test_delivery_rejects_business_error_or_missing_receipt(operation, payload):
+    client = _client(lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(FeishuApiError):
+            if operation == "message":
+                await client.send_text_message(user_id="member-1", text="test")
+            else:
+                await client.create_task(user_id="member-1", summary="test", description="test")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_message_uses_tenant_user_id():
+    def handler(request):
+        assert request.url.params["receive_id_type"] == "user_id"
+        assert json.loads(request.content)["receive_id"] == "member-1"
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_1"}})
+
+    client = _client(handler)
+    try:
+        await client.send_text_message(user_id="member-1", text="test")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_edit_task_reuses_guid_reassigns_and_clears_due():
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.method == "GET":
+            return httpx.Response(200, json={"code": 0, "data": {"task": {
+                "guid": "task-1", "completed_at": "0", "members": [{"id": "old", "role": "assignee"}],
+            }}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    client = _client(handler)
+    try:
+        await client.edit_task(task_id="task-1", user_id="new", summary="新标题", description="新说明",
+                               due_timestamp=None, completed=False)
+    finally:
+        await client.aclose()
+    patch = next(body for method, _, body in calls if method == "PATCH")
+    assert patch["task"]["due"]["timestamp"] == "0"
+    assert patch["task"]["completed_at"] == "0"
+    assert patch["task"]["summary"] == "新标题"
+    assert [path for method, path, _ in calls if method == "POST"] == [
+        "/open-apis/task/v2/tasks/task-1/add_members", "/open-apis/task/v2/tasks/task-1/remove_members",
+    ]
+    assert calls[-2][2]["members"][0]["id"] == "new"
+    assert calls[-1][2]["members"][0]["id"] == "old"
+
+
+@pytest.mark.asyncio
+async def test_task_read_does_not_report_success_for_incomplete_response():
+    client = _client(lambda _: httpx.Response(200, json={"code": 0, "data": {"task": {"guid": "task-1"}}}))
+    try:
+        with pytest.raises(feishu_client_module.FeishuClientError, match="完整任务状态"):
+            await client.get_task("task-1")
+    finally:
+        await client.aclose()

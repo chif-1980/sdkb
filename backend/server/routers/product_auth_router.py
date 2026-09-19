@@ -109,9 +109,19 @@ async def feishu_callback(
     service: ProductAuthService = Depends(get_product_auth_service),
 ) -> RedirectResponse:
     try:
-        _, session_token = await service.complete_callback(code=code, state=state)
+        user, session_token = await service.complete_callback(code=code, state=state)
+        if getattr(service, "manager_context", None):
+            from server.routers.feishu_manager_auth_router import manager_callback_response
+
+            return await manager_callback_response(service, user)
     except ProductAuthError as exc:
         error_query = urlencode({"error": exc.code})
+        context = getattr(service, "manager_context", None)
+        if context:
+            from server.routers.feishu_manager_auth_router import manager_origins
+
+            if context["origin"] in manager_origins():
+                return RedirectResponse(url=f"{context['origin']}/auth/feishu/callback#{error_query}", status_code=303)
         return RedirectResponse(url=f"/login?{error_query}", status_code=303)
 
     response = RedirectResponse(url="/chat", status_code=303)

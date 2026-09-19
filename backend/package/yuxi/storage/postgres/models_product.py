@@ -330,3 +330,48 @@ class MessageCitation(Base):
         Index("ix_message_citations_message_id", "message_id"),
         Index("ix_message_citations_version_id", "version_id"),
     )
+
+
+class ManagedMeeting(Base):
+    """Stable management identity. Only explicit reruns share this identity."""
+
+    __tablename__ = "managed_meetings"
+    id = Column(String(64), ForeignKey("product_meeting_records.id", ondelete="CASCADE"), primary_key=True)
+    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    tenant_key = Column(String(128), nullable=True, index=True)
+    latest_run_id = Column(String(64), nullable=False)
+    successful_run_id = Column(String(64), nullable=True)
+    title = Column(String(512), nullable=False, default="会议纪要")
+    meeting_type = Column(String(80), nullable=False, default="未提供")
+    meeting_date = Column(String(80), nullable=True)
+    archived = Column(Integer, nullable=False, default=0)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+
+class ManagedMeetingRun(Base):
+    __tablename__ = "managed_meeting_runs"
+    run_id = Column(String(64), ForeignKey("product_meeting_records.id", ondelete="CASCADE"), primary_key=True)
+    meeting_id = Column(String(64), ForeignKey("managed_meetings.id", ondelete="CASCADE"), nullable=False, index=True)
+
+
+class ManagedMeetingItem(Base):
+    """Durable human follow-up state, independent of model result snapshots."""
+
+    __tablename__ = "managed_meeting_items"
+    meeting_id = Column(String(64), ForeignKey("managed_meetings.id", ondelete="CASCADE"), primary_key=True)
+    kind = Column(String(16), primary_key=True)
+    item_id = Column(String(80), primary_key=True)
+    payload = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+
+class ManagedMeetingEvent(Base):
+    __tablename__ = "managed_meeting_events"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    meeting_id = Column(String(64), ForeignKey("managed_meetings.id", ondelete="CASCADE"), nullable=False, index=True)
+    actor_user_id = Column(Integer, nullable=True)
+    action = Column(String(40), nullable=False)
+    detail = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)

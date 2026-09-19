@@ -215,3 +215,52 @@ async def test_attachment_input_and_explicit_history_are_owned_and_saved(meeting
     assert second["state"] == "completed", second.get("error")
     assert second["result"]["selectedHistory"][0]["body"] == first["result"]["body"]
     assert second["result"]["selectedHistory"][0]["label"] == "H1"
+
+
+async def test_history_picker_groups_searches_paginates_and_isolates_owners(meeting_clients):
+    owner, stranger = meeting_clients
+    response = await owner.post("/api/chat/conversations", json={"title": "历史选择验收"})
+    assert response.status_code == 201
+    cid = response.json()["conversation"]["id"]
+    ids = []
+    async with pg_manager.get_async_session_context() as db:
+        for index in range(105):
+            question = ProductMessage(conversation_id=cid, role="USER", content="test")
+            answer = ProductMessage(conversation_id=cid, role="ASSISTANT", content="test", answer_status="INSUFFICIENT")
+            db.add_all([question, answer])
+            await db.flush()
+            mid = f"MT-{uuid4().hex}"
+            ids.append(mid)
+            db.add(
+                MeetingRecord(
+                    id=mid,
+                    conversation_id=cid,
+                    message_id=answer.message_id,
+                    user_message_id=question.message_id,
+                    request_id=uuid4().hex,
+                    state="completed",
+                    input={"parentId": ids[0]} if index == 104 else {},
+                    sources=[{"platform": "文字资料", "paragraphs": [{"text": "private"}]}],
+                    result={"title": "同名会议", "body": "独有验收关键词" if index == 0 else f"会议正文 {index}"},
+                )
+            )
+    response = await owner.get("/api/chat/meetings", params={"limit": 20})
+    assert response.status_code == 200, response.text
+    first = response.json()
+    assert first["total"] == 104
+    assert len(first["meetings"]) == 20 and first["nextOffset"] == 20
+    assert first["meetings"][0]["id"] == ids[-1]
+    assert first["meetings"][0]["versionCount"] == 2
+    assert "paragraphs" not in first["meetings"][0]
+    tail = (await owner.get("/api/chat/meetings", params={"offset": 100, "limit": 20})).json()
+    assert len(tail["meetings"]) == 4 and tail["nextOffset"] is None
+    search = (await owner.get("/api/chat/meetings", params={"q": "独有验收关键词"})).json()
+    assert search["total"] == 1 and search["meetings"][0]["id"] == ids[-1]
+    versions = (await owner.get("/api/chat/meetings", params={"groupId": ids[-1], "limit": 1})).json()
+    assert versions["total"] == 2 and versions["nextOffset"] == 1
+    older = (await owner.get("/api/chat/meetings", params={"groupId": ids[-1], "offset": 1})).json()
+    assert older["meetings"][0]["id"] == ids[0]
+    assert older["meetings"][0]["preview"] == "独有验收关键词"
+    assert (await stranger.get("/api/chat/meetings", params={"groupId": ids[-1]})).json()["meetings"] == []
+    assert (await stranger.get("/api/chat/meetings", params={"q": "独有验收关键词"})).json()["meetings"] == []
+    assert (await owner.get("/api/chat/meetings", params={"offset": -1})).status_code == 422

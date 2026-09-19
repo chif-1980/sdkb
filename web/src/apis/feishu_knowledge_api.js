@@ -72,6 +72,8 @@ export const feishuKnowledgeApi = {
   getOAuthStatus: (sourceId) =>
     apiAdminGet(`${BASE_URL}/sources/${encoded(sourceId)}/oauth/status`),
 
+  reuseOAuth: (sourceId) => apiAdminPost(`${BASE_URL}/sources/${encoded(sourceId)}/oauth/reuse`, {}),
+
   startOAuth: (sourceId, mode = 'redirect') =>
     apiAdminPost(`${BASE_URL}/sources/${encoded(sourceId)}/oauth/authorize`, { mode }),
 

@@ -196,7 +196,12 @@ async def lifespan(app: FastAPI):
 
     """)
     logger.info("Yuxi backend startup complete (%.1fs)", time.monotonic() - startup_started_at)
+    from yuxi.product_chat.meeting_task_sync import poll_task_statuses
+
+    meeting_sync_task = asyncio.create_task(poll_task_statuses(), name="meeting-task-readback")
     yield
+    meeting_sync_task.cancel()
+    await asyncio.gather(meeting_sync_task, return_exceptions=True)
     await tasker.shutdown()
     await retry_coordinator.stop()
     shutdown_sandbox_provider()

@@ -338,6 +338,16 @@ class FeishuUserOAuthCredential(Base):
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 
 
+class FeishuSourceOAuthLink(Base):
+    """Reuse one encrypted credential without copying rotating refresh tokens."""
+
+    __tablename__ = "feishu_source_oauth_links"
+    source_id = Column(String(64), ForeignKey("feishu_sources.source_id", ondelete="CASCADE"), primary_key=True)
+    credential_id = Column(Integer, ForeignKey("feishu_user_oauth_credentials.id", ondelete="CASCADE"), nullable=False)
+    linked_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now_naive)
+
+
 class FeishuSyncRun(Base):
     """一次飞书全量或增量扫描批次。"""
 

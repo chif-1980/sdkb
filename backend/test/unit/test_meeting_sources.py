@@ -82,6 +82,7 @@ def test_followup_keeps_explicit_actions_separate_from_knowledge_suggestions():
         {
             "id": "task-1",
             "title": "补充测试方案",
+            "content": "",
             "assignee": None,
             "assigneeSuggestion": "张工",
             "dueDate": None,
@@ -91,6 +92,87 @@ def test_followup_keeps_explicit_actions_separate_from_knowledge_suggestions():
         }
     ]
     assert result["knowledgeSuggestions"][0]["status"] == "PENDING_MAINTAINER"
+
+
+def test_followup_persists_formal_knowledge_comparison_and_filters_unknown_evidence():
+    result = build_followup(
+        {
+            "formalEvidence": [
+                {"evidence_id": "E1", "title": "交付规范", "excerpt": "...", "source_url": ""},
+            ],
+            "knowledgeSuggestions": [
+                {"title": "更新交付限制", "reason": "会议补充了限制条件", "evidence": "[S1-P3]"},
+                {"title": "新增验收说明", "reason": "正式知识未提及", "evidence": "[S1-P4]"},
+            ],
+        },
+        coordinator_id=7,
+        coordinator_name="会议上传者",
+        knowledge_review={
+            "items": [
+                {
+                    "index": 1,
+                    "status": "NEEDS_UPDATE",
+                    "comparison": "已有交付规范，但缺少会议中的限制条件。",
+                    "formalEvidenceIds": ["E1", "E99"],
+                },
+                {"index": 2, "status": "NEW_TOPIC", "comparison": "未找到对应正式知识。"},
+            ]
+        },
+    )
+
+    assert result["knowledgeSuggestions"] == [
+        {
+            "id": "knowledge-1",
+            "title": "更新交付限制",
+            "reason": "会议补充了限制条件",
+            "sourceRefs": ["S1-P3"],
+            "status": "PENDING_MAINTAINER",
+            "comparisonStatus": "NEEDS_UPDATE",
+            "comparison": "已有交付规范，但缺少会议中的限制条件。",
+            "formalEvidenceIds": ["E1"],
+        },
+        {
+            "id": "knowledge-2",
+            "title": "新增验收说明",
+            "reason": "正式知识未提及",
+            "sourceRefs": ["S1-P4"],
+            "status": "PENDING_MAINTAINER",
+            "comparisonStatus": "NEW_TOPIC",
+            "comparison": "未找到对应正式知识。",
+            "formalEvidenceIds": [],
+        },
+    ]
+
+
+def test_followup_defaults_knowledge_comparison_to_unverified():
+    result = build_followup(
+        {"knowledgeSuggestions": [{"title": "待核对主题", "reason": "会议提出"}]},
+        coordinator_id=7,
+        coordinator_name="会议上传者",
+    )
+
+    suggestion = result["knowledgeSuggestions"][0]
+    assert suggestion["comparisonStatus"] == "UNVERIFIED"
+    assert suggestion["comparison"] == "未能从当前可访问的正式知识中确认覆盖关系。"
+    assert suggestion["formalEvidenceIds"] == []
+
+
+@pytest.mark.parametrize("reason", [
+    "已检索正式知识，但未获得足以支持逐条比对的可引用依据，暂不能判断是否已覆盖。",
+    "正式知识检索失败，本次未完成逐条比对，请稍后重试。",
+    "已获得正式知识引用，但逐条比对生成失败，本次没有有效比对结论，请稍后重试。",
+])
+def test_followup_preserves_comparison_failure_reason_without_claiming_coverage(reason):
+    result = build_followup(
+        {"knowledgeSuggestions": [{"title": "待核对主题"}]},
+        coordinator_id=7,
+        coordinator_name="会议上传者",
+        knowledge_review={"fallbackComparison": reason},
+    )
+    suggestion = result["knowledgeSuggestions"][0]
+    assert suggestion["comparison"] == reason
+    assert suggestion["comparisonStatus"] == "UNVERIFIED"
+    assert suggestion["formalEvidenceIds"] == []
 
 
 def test_buddy_preserves_every_segment_and_real_locators():
@@ -266,6 +348,7 @@ async def test_model_connection_failure_is_not_misreported_as_json_error():
 async def test_retry_reuses_notes_only_for_unchanged_incomplete_meeting(monkeypatch, state, changed, resume):
     from unittest.mock import AsyncMock, Mock
     from yuxi.product_chat.meeting_repository import MeetingRepository, ProductChatRepository
+    from yuxi.product_chat.meeting_management import MeetingManagement
     from yuxi.product_chat.schemas import SendMessageRequest
 
     db = SimpleNamespace(
@@ -273,6 +356,8 @@ async def test_retry_reuses_notes_only_for_unchanged_incomplete_meeting(monkeypa
     )
     conversation = SimpleNamespace(id=1, status="ACTIVE", title="会议")
     monkeypatch.setattr(ProductChatRepository, "require_conversation", AsyncMock(return_value=conversation))
+    attach = AsyncMock()
+    monkeypatch.setattr(MeetingManagement, "attach", attach)
     notes = [{"summary": "只是提议 [S1-P1]"}]
     parent = SimpleNamespace(
         id="parent",
@@ -295,6 +380,7 @@ async def test_retry_reuses_notes_only_for_unchanged_incomplete_meeting(monkeypa
     )
     assert record.input["chunkNotes"] == (notes if resume else [])
     assert parent.input["chunkNotes"] == notes
+    attach.assert_awaited_once_with(record)
 
 
 async def test_chat_adapter_preserves_finish_reason_for_truncation_check():
