@@ -10,4 +10,17 @@ const labels = {
 export const label = value => labels[value] || value || '未提供'
 export const formatDate = value => value ? new Date(value).toLocaleString('zh-CN', {hour12:false}) : '未提供'
 export const stateColor = state => ({completed:'green', failed:'red', running:'blue', pending:'orange'})[state] || 'default'
+export const reviewTone = status => ({PENDING:'pending', CONFIRMED:'confirmed', IGNORED:'ignored', DELIVERY_FAILED:'failed'})[status] || 'unknown'
+export const executionTone = task => {
+  if ((task.reviewStatus || 'PENDING') === 'PENDING' && task.status === 'OPEN') return 'pending'
+  return ({OPEN:'open', IN_PROGRESS:'progress', DONE:'done', OVERDUE:'overdue'})[task.status] || 'unknown'
+}
 export const safeSourceUrl = value => /^https?:\/\//i.test(value || '') ? value : undefined
+
+// Extracted names/dates are evidence, not a confirmed Feishu assignment.
+export const taskAssigneeLabel = task => task.assignee?.displayName ||
+  (task.assigneeSuggestion ? `${task.assigneeSuggestion}（会议识别，待核对）` : '待分配')
+export const taskDeadlineLabel = task => task.dueDate ||
+  (task.dueDateSuggestion ? `${task.dueDateSuggestion}（会议识别，待核对）` : '未设期限')
+export const taskExecutionLabel = task => (task.reviewStatus || 'PENDING') === 'PENDING' && task.status === 'OPEN'
+  ? '待确认后跟进' : label(task.status)

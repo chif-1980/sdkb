@@ -9,8 +9,11 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 from markdown_it import MarkdownIt
 
+from yuxi.product_chat.meeting_content import meeting_body
+
 
 def export_docx(result: dict, sources: list[dict], version: int) -> bytes:
+    result = {**result, "body": meeting_body(result)}
     document = Document()
     section = document.sections[0]
     section.page_width, section.page_height = Cm(21), Cm(29.7)

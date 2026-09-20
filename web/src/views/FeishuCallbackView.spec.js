@@ -28,7 +28,7 @@ beforeEach(() => {
 async function render() {
   const wrapper = mount(FeishuCallbackView, { global: { stubs: {
     'a-spin': true, 'a-button': true,
-    'a-result': { props: ['subTitle'], template: '<div>{{ subTitle }}</div>' }
+    'a-result': { props: ['title', 'subTitle'], template: '<div>{{ title }} {{ subTitle }}</div>' }
   } } })
   await flushPromises()
   return wrapper
@@ -48,7 +48,9 @@ it('成功后载入当前身份并进入会议管理，清除回调凭证', asyn
 it('无管理权限时显示原因且不清除已有登录', async () => {
   window.history.replaceState(null, '', '/auth/feishu/callback#error=MANAGEMENT_ACCESS_REQUIRED')
   const wrapper = await render()
-  expect(wrapper.text()).toContain('尚无知枢管理权限')
+  expect(wrapper.text()).toContain('尚未开通管理权限')
+  expect(wrapper.text()).toContain('飞书身份验证成功，你的账号已登记')
+  expect(wrapper.text()).toContain('授权后重新登录')
   expect(mocks.finish).not.toHaveBeenCalled()
   expect(mocks.user.logout).not.toHaveBeenCalled()
   expect(sessionStorage.getItem('feishu_login_verifier')).toBeNull()

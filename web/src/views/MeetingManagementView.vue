@@ -37,11 +37,12 @@
         <template v-else-if="column.key === 'progress'">{{ record.completedTasks }} / {{ record.taskCount }} 已完成<small>{{ record.pendingTasks }} 待确认</small></template>
         <template v-else-if="column.key === 'meetingDate'">{{ record.meetingDate || '未提供' }}</template>
         <template v-else-if="column.key === 'knowledge'">{{ record.pendingKnowledge }} 待核对</template>
-        <template v-else-if="column.key === 'assignee'">{{ record.assignee?.displayName || '待分配' }}</template>
-        <template v-else-if="column.key === 'review'">{{ label(record.reviewStatus || 'PENDING') }}<small>{{ label(record.status) }}</small></template>
+        <template v-else-if="column.key === 'assignee'">{{ taskAssigneeLabel(record) }}</template>
+        <template v-else-if="column.key === 'review'"><span :class="['meeting-review-state', `is-${reviewTone(record.reviewStatus || 'PENDING')}`]"><span class="meeting-state-mark" aria-hidden="true" />{{ label(record.reviewStatus || 'PENDING') }}</span></template>
+        <template v-else-if="column.key === 'execution'"><span :class="['meeting-execution-state', `is-${executionTone(record)}`]"><span class="meeting-state-mark" aria-hidden="true" />{{ taskExecutionLabel(record) }}</span></template>
         <template v-else-if="column.key === 'knowledgeState'">{{ label(record.status) }}<small>{{ label(record.comparisonStatus) }}</small></template>
         <template v-else-if="column.key === 'sync'">{{ label(record.delivery?.syncStatus || 'NOT_SENT') }}</template>
-        <template v-else-if="column.key === 'dueDate'">{{ record.dueDate || '未设期限' }}</template>
+        <template v-else-if="column.key === 'dueDate'">{{ taskDeadlineLabel(record) }}</template>
         <template v-else-if="column.key === 'updatedAt'">{{ formatDate(record.updatedAt) }}</template>
       </template>
       <template #emptyText><a-empty :description="tab === 'meetings' ? '当前范围内暂无符合条件的会议' : '暂无待处理事项'" /></template>
@@ -50,11 +51,11 @@
   </main>
 </template>
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowUpRight, RefreshCw } from 'lucide-vue-next'
 import { listMeetings, meetingMetrics, meetingQueue } from '@/apis/meetingManagement'
-import { label, formatDate, stateColor } from '@/utils/meetingManagement'
+import { label, formatDate, stateColor, reviewTone, executionTone, taskAssigneeLabel, taskDeadlineLabel, taskExecutionLabel } from '@/utils/meetingManagement'
 const route = useRoute(), router = useRouter()
 const rows = ref([]), total = ref(0), loading = ref(false), error = ref(''), counts = ref({})
 const searchText = ref(route.query.q || ''), filterState = ref(route.query.state || ''), archived = ref(route.query.archived === 'true')
@@ -71,12 +72,12 @@ const statusOptions = computed(() => [{value: '', label: '全部状态'}, ...(ta
     ? ['PENDING','CONFIRMED','IGNORED','SYNC_FAILED','OVERDUE']
     : ['PENDING_MAINTAINER','PROCESSING','NEW_SOURCE_DRAFT','REVIEW_REQUESTED','COVERED','DEFERRED','REJECTED']).map(value => ({value, label: label(value)}))])
 const columns = computed(() => [
-  {title: tab.value === 'meetings' ? '会议' : '事项 / 来源会议', key: 'title', width: 330},
+  {title: tab.value === 'meetings' ? '会议' : '事项 / 来源会议', key: 'title', width: tab.value === 'TASK' ? 270 : 330},
         ...(tab.value === 'meetings' ? [
     {title: '上传人', key: 'ownerDisplayName', width: 120}, {title: '会议日期', key: 'meetingDate', width: 130}, {title: '分析状态', key: 'state', width: 150},
     {title: '待办进度', key: 'progress', width: 140}, {title: '知识建议', key: 'knowledge', width: 120}
   ] : tab.value === 'TASK' ? [
-    {title: '负责人', key: 'assignee', width: 120}, {title: '确认 / 执行', key: 'review', width: 150}, {title: '期限', key: 'dueDate', width: 120}, {title: '飞书同步', key: 'sync', width: 110}
+    {title: '负责人', key: 'assignee', width: 100}, {title: '确认状态', key: 'review', width: 100}, {title: '执行进度', key: 'execution', width: 135}, {title: '期限', key: 'dueDate', width: 125}, {title: '飞书同步', key: 'sync', width: 100}
   ] : [{title: '处理 / 比对', key: 'knowledgeState', width: 220}]),
   {title: '最近更新', key: 'updatedAt', width: 165}
 ])
@@ -99,6 +100,8 @@ function selectMetric(metric) { router.replace({query: {tab: metric.tab, state: 
 function goPage(value) { router.replace({query: {...route.query, page: value}}) }
 function open(row) { router.push({path: `/meeting-management/${row.meetingId || row.id}`, query: {back: route.fullPath, tab: tab.value === 'meetings' ? 'minutes' : tab.value}}) }
 watch(() => route.fullPath, () => { searchText.value = route.query.q || ''; filterState.value = route.query.state || ''; archived.value = route.query.archived === 'true'; load() })
-onMounted(load)
+function refreshCurrent() { if (!document.hidden && !loading.value) load() }
+onMounted(() => { load(); window.addEventListener('focus', refreshCurrent); document.addEventListener('visibilitychange', refreshCurrent) })
+onBeforeUnmount(() => { window.removeEventListener('focus', refreshCurrent); document.removeEventListener('visibilitychange', refreshCurrent) })
 </script>
 <style lang="less" src="@/assets/css/meeting-management.less"></style>

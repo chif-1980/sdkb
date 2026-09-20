@@ -19,6 +19,28 @@
   .meeting-title-link {padding: 0; border: 0; background: none; text-align: left; color: var(--main-700); cursor: pointer; font: inherit; font-weight: 500; overflow-wrap: anywhere;}
   .meeting-pagination {display: flex; justify-content: space-between; align-items: center; padding: 20px 0; color: var(--gray-600);}
   .meeting-meta {display: flex; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 18px; font-size: 13px; color: var(--gray-600);}
+  .meeting-review-state, .meeting-execution-state {display: inline-flex; align-items: center; gap: 6px; line-height: 1.35; white-space: nowrap; font-size: 13px; font-weight: 500;}
+  .meeting-review-state {color: var(--gray-700);}
+  .meeting-review-state.is-pending {color: var(--color-warning-900);}
+  .meeting-review-state.is-confirmed {color: var(--gray-600);}
+  .meeting-review-state.is-ignored, .meeting-review-state.is-unknown {color: var(--gray-600);}
+  .meeting-review-state.is-failed {color: var(--color-error-700);}
+  .meeting-state-mark {display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 15px; height: 15px; border: 1.5px solid currentColor; border-radius: 50%; font-size: 10px; font-weight: 700; line-height: 1;}
+  .meeting-review-state.is-pending .meeting-state-mark::after {content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor;}
+  .meeting-review-state.is-confirmed .meeting-state-mark::after {content: '✓';}
+  .meeting-review-state.is-ignored .meeting-state-mark::after {content: '–';}
+  .meeting-review-state.is-failed .meeting-state-mark::after {content: '!';}
+  .meeting-execution-state {color: var(--gray-600); font-weight: 500;}
+  .meeting-execution-state .meeting-state-mark {width: 7px; height: 7px; border: 0; border-radius: 50%; background: currentColor;}
+  .meeting-execution-state.is-pending {color: var(--gray-600);}
+  .meeting-execution-state.is-pending .meeting-state-mark {height: 2px; border-radius: 0;}
+  .meeting-execution-state.is-progress {color: var(--color-info-700);}
+  .meeting-execution-state.is-done {color: var(--color-success-900);}
+  .meeting-execution-state.is-overdue {color: var(--color-error-700);}
+  .meeting-execution-state.is-unknown {color: var(--gray-600);}
+  .meeting-execution-status {display: inline-flex; align-items: center; gap: 6px;}
+  .meeting-execution-status strong {font-weight: 500; color: var(--gray-600);}
+  .meeting-context-note {font-size: 13px; line-height: 1.7; margin-bottom: 16px;}
   .meeting-actions {display: flex; flex-wrap: wrap; gap: 8px;}
   .meeting-panel {background: var(--gray-0); border: 1px solid var(--gray-200); border-radius: 8px; padding: 24px; margin-bottom: 16px; overflow-wrap: anywhere;}
   .meeting-item {padding: 20px; margin-bottom: 14px; border: 1px solid var(--gray-200); border-radius: 8px; background: var(--gray-0);}

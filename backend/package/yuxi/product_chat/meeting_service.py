@@ -95,13 +95,12 @@ def build_followup(
             tasks.append(
                 {
                     "id": f"task-{index}",
+                    **({"targetTaskId": str(raw["taskId"])} if raw.get("taskId") else {}),
                     "title": title,
                     "content": str(raw.get("content") or raw.get("description") or raw.get("details") or "").strip(),
                     "assignee": None,
                     "assigneeSuggestion": (
-                        assignee_name
-                        if assignee_name and assignee_name not in {"未明确", "待确认"}
-                        else None
+                        assignee_name if assignee_name and assignee_name not in {"未明确", "待确认"} else None
                     ),
                     "dueDate": exact_date,
                     "dueDateSuggestion": (
@@ -133,10 +132,7 @@ def build_followup(
             review = reviewed_suggestions.get(index) or {}
             status = review.get("status") if review.get("status") in KNOWLEDGE_COMPARISON_STATUSES else "UNVERIFIED"
             comparison = str(review.get("comparison") or "").strip() or comparison_default
-            comparison_refs = [
-                str(item) for item in (review.get("formalEvidenceIds") or [])
-                if str(item) in formal_ids
-            ]
+            comparison_refs = [str(item) for item in (review.get("formalEvidenceIds") or []) if str(item) in formal_ids]
             suggestions.append(
                 {
                     "id": f"knowledge-{index}",
@@ -393,15 +389,18 @@ async def _analyze(record_id):
             model,
             '输出 {"title":"会议标题", "meetingType":"客户交流/内部管理/混合/其他",'
             '"body":"中文 Markdown：会议概况（时间、参与者缺失未提供）、摘要与议题、'
-            "明确决定、行动清单表格、待确认问题。"
+            "明确决定、待确认问题。行动项仅放 actionItems，不要在 body 重复生成行动清单或待办表格。"
             '关键结论、决定和行动项均保留原文引用。",'
             '"actionItems":[{"title":"明确的行动事项", "content":"执行要求或交付物，无则空",'
             '"assigneeName":"未明确",'
-            '"dueDate":"未明确", "evidence":"[S1-P1]"}],'
+            '"dueDate":"未明确", "evidence":"[S1-P1]", "taskId":"修改已有待办时填其原 id，新增则空"}],'
             '"knowledgeSuggestions":[{"title":"建议知识维护人员核对的主题",'
             '"reason":"为什么需要维护", "evidence":"[S1-P1]"}],'
             '"capabilityQuery":"需要核对的企业产品能力问题，无则空字符串"}。'
             "根据用户要求修订时保留用户已有修改，除非本次明确要求改变。"
+            "previousResult.followup.tasks 是现有待办。仅在用户要求修改某项待办时，"
+            "用 taskId 指定原 id 并输出完整修改建议；不要将修改项另建为新增任务。"
+            "未要求修改的已有任务无需重复输出；新发现的事项 taskId 为空。"
             "历史会议只能作为显式选中的辅助材料，引用其label如[H1]，不能使用当前会议S编号替代历史依据，勿混为当前会议事实。",
             {
                 "sources": [{"title": s["title"], "platform": s["platform"]} for s in sources],
@@ -420,6 +419,11 @@ async def _analyze(record_id):
             },
             allowed | {item["label"] for item in history},
         )
+        previous_tasks = ((record.input.get("previousResult") or {}).get("followup") or {}).get("tasks", [])
+        previous_ids = {str(task["id"]) for task in previous_tasks}
+        for task in result.get("actionItems", []):
+            if task.get("taskId") and str(task["taskId"]) not in previous_ids:
+                raise ValueError("AI 修改的待办编号不存在，请重试。")
         body = result.get("body")
         if not isinstance(body, str) or not body.strip():
             raise ValueError("纪要正文为空，请重试。")
@@ -474,7 +478,7 @@ async def _analyze(record_id):
             try:
                 review = await call_json(
                     model,
-                    '根据每条会议知识更新建议和企业正式知识，输出严格 JSON：'
+                    "根据每条会议知识更新建议和企业正式知识，输出严格 JSON："
                     '{"items":[{"index":1,"status":"COVERED|NEEDS_UPDATE|NEW_TOPIC|UNVERIFIED",'
                     '"comparison":"基于正式知识的比较结论", "formalEvidenceIds":["E1"]}]}。'
                     "每条建议必须返回一项，index 与输入序号一致。只能依据 formalKnowledge 判断："
@@ -510,7 +514,7 @@ async def _analyze(record_id):
                             ],
                         }
                         for index, item in reviewed.items()
-                    ]
+                    ],
                 }
             except Exception as exc:
                 logger.warning(
@@ -564,6 +568,9 @@ async def _analyze(record_id):
             if set(re.findall(r"\[(H\d+)\]", body)) - set(historical):
                 raise ValueError("纪要核对出现未选择的历史会议引用")
             checked.append(body)
+        result["actionItems"] = await verify_action_items(
+            model, result.get("actionItems", []), evidence, historical, record.input["content"]
+        )
         result["body"] = "\n\n".join(checked)
         validate_citations(result["body"], set(evidence) | set(historical))
         return {"phase": "verify_minutes"}
@@ -646,6 +653,38 @@ async def _analyze(record_id):
     graph.add_edge("business_analysis", "save_result")
     graph.add_edge("save_result", END)
     await graph.compile().ainvoke({"phase": "pending"})
+
+
+async def verify_action_items(model, items, evidence, historical, user_request):
+    """Check the authoritative tasks against originals, preserving their stable target IDs."""
+    checked = []
+    for offset in range(0, len(items), 6):
+        batch = items[offset : offset + 6]
+        refs = set(_reference_ids(json.dumps(batch, ensure_ascii=False)))
+        review = await call_cited_json(
+            model,
+            '逐项核对待办与原始转写，输出 {"actionItems":[{"title":"事项", "content":"要求",'
+            '"assigneeName":"负责人或待确认", "dueDate":"期限或待确认", "evidence":"[S1-P1]"}]}。'
+            "严格保留事项数量与顺序，不新增事项。原文没有明确负责人或日期时写待确认。"
+            "提议与历史安排不能写为已承诺的行动；依据不足时在内容中明确标为待确认。"
+            "用户明确补充或修改的内容须保留并标为用户补充，未由原文核实。"
+            "历史会议只作背景，不构成本次会议承诺。",
+            {
+                "actionItems": batch,
+                "originalEvidence": {ref: evidence[ref] for ref in refs if ref in evidence},
+                "selectedHistory": {ref: historical[ref] for ref in refs if ref in historical},
+                "userRequest": user_request,
+            },
+            refs & (set(evidence) | set(historical)),
+        )
+        updated = review.get("actionItems")
+        if not isinstance(updated, list) or len(updated) != len(batch):
+            raise ValueError("待办核对返回数量不一致，请重试。")
+        for original, item in zip(batch, updated, strict=True):
+            if not isinstance(item, dict) or not isinstance(item.get("title"), str) or not item["title"].strip():
+                raise ValueError("待办核对返回格式不正确，请重试。")
+            checked.append({**item, "taskId": original.get("taskId", "")})
+    return checked
 
 
 async def process_meeting_run(ctx, record_id: str):
