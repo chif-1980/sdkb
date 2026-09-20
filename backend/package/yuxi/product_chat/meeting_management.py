@@ -198,7 +198,7 @@ class MeetingManagement:
         """Backward-compatible alias for callers outside the management router."""
         return await self.backfill_scope(user_id)
 
-    async def project(self, record, result, *, editor=None, migration=False):
+    async def project(self, record, result, *, editor=None, migration=False, audit=None):
         managed = await self.attach(record)
         await self.db.refresh(managed, with_for_update=True)
         previous_id = managed.successful_run_id
@@ -260,7 +260,12 @@ class MeetingManagement:
         managed.updated_at = record.updated_at if migration else utc_now_naive()
         managed.version += 1
         if not migration:
-            self.event(managed.id, "EDIT" if editor else "ANALYSIS_COMPLETED", editor, {"runId": record.id})
+            self.event(
+                managed.id,
+                audit["action"] if audit else ("EDIT" if editor else "ANALYSIS_COMPLETED"),
+                editor,
+                {"runId": record.id, **(audit["detail"] if audit else {})},
+            )
         await self.db.flush()
         return result
 

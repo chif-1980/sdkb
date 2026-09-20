@@ -54,12 +54,26 @@
             <article v-for="task in tasks" :key="task.id" class="meeting-item">
               <div class="meeting-item-header"><div><h3>{{ task.title }}</h3><p>{{ task.content }}</p></div><span :class="['meeting-review-state', `is-${reviewTone(task.reviewStatus || 'PENDING')}`]"><span class="meeting-state-mark" aria-hidden="true" />{{ label(task.reviewStatus || 'PENDING') }}</span></div>
               <div class="meeting-meta"><span>负责人：{{ taskAssigneeLabel(task) }}</span><span>期限：{{ taskDeadlineLabel(task) }}</span><span class="meeting-execution-status"><strong>执行状态：</strong><span :class="['meeting-execution-state', `is-${executionTone(task)}`]"><span class="meeting-state-mark" aria-hidden="true" />{{ taskExecutionLabel(task) }}</span></span></div>
-              <small v-if="task.delivery?.feishuTaskId">飞书任务 {{ task.delivery.feishuTaskId }} · {{ label(task.delivery.syncStatus) }} · 最近读取 {{ formatDate(task.delivery.lastSyncedAt) }}</small>
+              <small v-if="task.delivery?.feishuTaskId">飞书任务 {{ task.delivery.feishuTaskId }} · {{ taskScheduleLabel(task.delivery) }} · 最近读取 {{ formatDate(task.delivery.lastSyncedAt) }}</small>
               <small v-if="(task.delivery?.error || task.delivery?.syncError)" class="meeting-error">{{ task.delivery.error || task.delivery.syncError }}</small>
+              <section v-if="task.delivery?.scheduleComparison" :class="['meeting-schedule-comparison', {'is-different': task.delivery.scheduleComparison.status !== 'MATCH'}]" aria-label="飞书安排核对">
+                <strong>{{ task.delivery.pendingUpdate || task.delivery.syncStatus === 'FAILED' ? '上次核对记录' : taskScheduleLabel(task.delivery) }}</strong>
+                <small>核对时间：{{ formatDate(task.delivery.scheduleCheckedAt) }}{{ task.delivery.pendingUpdate || task.delivery.syncStatus === 'FAILED' ? ' · 当前尚未重新核实' : '' }}</small>
+                <p v-if="task.delivery.scheduleComparison.status === 'UNVERIFIED'">{{ task.delivery.scheduleComparison.error }}</p>
+                <template v-if="task.delivery.scheduleComparison.status === 'DIFFERENT'">
+                  <dl>
+                    <div v-if="task.delivery.scheduleComparison.differences.includes('assignee')"><dt>负责人</dt><dd>本地：{{ task.delivery.scheduleComparison.localAssignees.map(member => member.name).join('、') || '未分配' }}</dd><dd>飞书：{{ task.delivery.scheduleComparison.remoteAssignees.map(member => member.name).join('、') || '未分配' }}</dd></div>
+                    <div v-if="task.delivery.scheduleComparison.differences.includes('dueDate')"><dt>截止日期</dt><dd>本地：{{ task.delivery.scheduleComparison.localDueDate || '未设期限' }}</dd><dd>飞书：{{ task.delivery.scheduleComparison.remoteDueDate || '未设期限' }}</dd></div>
+                  </dl>
+                  <p>仅提示差异，未改动双方安排。请核对原任务后决定如何调整。</p>
+                </template>
+                <a :href="`https://applink.feishu.cn/client/todo/detail?guid=${encodeURIComponent(task.delivery.feishuTaskId)}`" target="_blank" rel="noopener noreferrer">查看飞书原任务 ↗</a>
+              </section>
               <div class="meeting-source"><button v-for="ref in task.sourceRefs" :key="ref" class="meeting-title-link" @click="showTaskEvidence(task, ref)">{{ ref }}</button></div>
               <div class="meeting-actions" v-if="!data.meeting.archived">
                 <a-button :disabled="busy" @click="editTask(task)">修改</a-button>
-                <a-button :disabled="busy" @click="sendTask(task)">{{ task.delivery?.feishuTaskId ? '同步修改' : '确认并发送' }}</a-button>
+                <a-button v-if="needsReconciliation(task)" :disabled="busy" @click="openReconciliation(task)">核对飞书原任务</a-button>
+                <a-button v-else :disabled="busy" @click="sendTask(task)">{{ task.delivery?.feishuTaskId ? '同步修改' : '确认并发送' }}</a-button>
                 <a-button v-if="!task.delivery?.feishuTaskId && task.reviewStatus !== 'IGNORED'" :disabled="busy" @click="taskAction(task, 'IGNORE')">忽略</a-button>
               </div>
             </article>
@@ -83,7 +97,7 @@
             <section class="meeting-panel"><h2>分析版本</h2>
               <a-list :data-source="data.runs"><template #renderItem="{item}"><a-list-item><span>{{ formatDate(item.createdAt) }} · {{ label(item.state) }} · {{ item.version }} 次修订</span><a-button v-if="item.version" @click="viewVersion(item)">查看</a-button></a-list-item></template></a-list>
             </section>
-            <section class="meeting-panel"><h2>最近处理记录</h2><a-list :data-source="data.events"><template #renderItem="{item}"><a-list-item><div>{{ label(item.action) }}<small>{{ item.detail.reason || item.detail.message }}</small></div><small>{{ formatDate(item.createdAt) }}</small></a-list-item></template></a-list></section>
+            <section class="meeting-panel"><h2>最近处理记录</h2><a-list :data-source="data.events"><template #renderItem="{item}"><a-list-item><div>{{ label(item.action) }}<small v-if="item.detail.actorName">操作人：{{ item.detail.actorName }}</small><small v-if="item.detail.outcome === 'FAILED'">处理失败</small><small>{{ item.detail.reason || item.detail.message }}</small></div><small>{{ formatDate(item.createdAt) }}</small></a-list-item></template></a-list></section>
           </a-tab-pane>
         </a-tabs>
       </template>
@@ -96,6 +110,30 @@
         <a-form-item label="期限"><a-date-picker v-model:value="taskDraft.dueDate" value-format="YYYY-MM-DD" /></a-form-item>
         <a-form-item label="执行状态"><a-select v-model:value="taskDraft.status" :options="['OPEN','IN_PROGRESS','DONE'].map(value => ({value,label:label(value)}))" /></a-form-item>
         <a-alert v-if="directoryError" type="warning" :message="directoryError" />
+      </a-form>
+    </a-modal>
+    <a-modal v-model:open="reconcileModal" title="核对飞书原任务" class="meeting-reconciliation-modal" centered :width="640" :confirm-loading="reconcileBusy"
+      ok-text="确认恢复关联" cancel-text="取消" :ok-button-props="{disabled: !reconcilePreview || !reconcileReason.trim() || reconcileBusy}"
+      :cancel-button-props="{disabled: reconcileBusy}" :closable="!reconcileBusy" :keyboard="!reconcileBusy" :mask-closable="false" @ok="saveReconciliation">
+      <a-form layout="vertical">
+        <p>本地待办：{{ reconcileTask?.title }}</p>
+        <p class="meeting-context-note">从飞书原任务复制详情链接或任务编号。读取后核验来源，恢复关联不会新建待办或发送通知。</p>
+        <a-form-item label="飞书原任务链接或编号">
+          <a-input v-model:value="reconcileGuid" aria-label="飞书原任务链接或编号" :disabled="reconcileBusy" :maxlength="2000" placeholder="任务详情链接，或链接中的 guid" />
+        </a-form-item>
+        <a-button :disabled="!reconcileGuid.trim() || reconcileBusy" :loading="reconcileBusy" @click="readReconciliation">读取核对</a-button>
+        <a-alert v-if="reconcileError" type="error" show-icon :message="reconcileError" />
+        <section v-if="reconcilePreview" class="meeting-reconciliation-preview" aria-label="飞书任务核对结果">
+          <strong>来源核验通过 · {{ reconcilePreview.matchBasis }}</strong>
+          <p>{{ reconcilePreview.remote.title }}</p>
+          <p>{{ reconcilePreview.remote.content || '无补充说明' }}</p>
+          <p>飞书负责人：{{ reconcilePreview.remote.assigneeIds.map(assigneeName).join('、') || '未分配' }}</p>
+          <p>期限：{{ reconcilePreview.remote.dueDate || '未设期限' }} · {{ label(reconcilePreview.remote.status) }}</p>
+          <a-alert v-if="reconcilePreview.pendingUpdate" type="warning" show-icon message="本地安排与飞书任务有差异。恢复后保留本地修改，需另行点击“同步修改”才会更新飞书。" />
+          <a-form-item label="核对说明（必填，将记录到处理记录）">
+            <a-textarea v-model:value="reconcileReason" aria-label="核对说明" :disabled="reconcileBusy" :rows="3" :maxlength="2000" />
+          </a-form-item>
+        </section>
       </a-form>
     </a-modal>
     <a-modal v-model:open="decisionModal" title="处理知识建议" :confirm-loading="busy" @ok="saveDecision" :mask-closable="false">
@@ -119,8 +157,9 @@ import { message, Modal } from 'ant-design-vue'
 import { ArrowLeft } from 'lucide-vue-next'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { searchFormalKnowledge, getManagedMeeting, archiveMeeting, editMeetingMinutes, editMeetingTasks, getMeetingDirectory,
-  decideMeetingKnowledge, retryManagedMeeting, cancelManagedMeeting, syncMeetingTasks, downloadMeeting, getMeetingVersion } from '@/apis/meetingManagement'
-import { label, formatDate, stateColor, reviewTone, executionTone, safeSourceUrl, taskAssigneeLabel, taskDeadlineLabel, taskExecutionLabel } from '@/utils/meetingManagement'
+  decideMeetingKnowledge, retryManagedMeeting, cancelManagedMeeting, syncMeetingTasks, downloadMeeting, getMeetingVersion,
+  previewTaskReconciliation, confirmTaskReconciliation } from '@/apis/meetingManagement'
+import { label, formatDate, stateColor, reviewTone, executionTone, safeSourceUrl, taskAssigneeLabel, taskDeadlineLabel, taskExecutionLabel, taskScheduleLabel } from '@/utils/meetingManagement'
 const route = useRoute(), router = useRouter(), id = route.params.id
 const data = ref(null), loading = ref(false), busy = ref(false), error = ref('')
 const tab = ref(['TASK','KNOWLEDGE'].includes(route.query.tab) ? route.query.tab : 'minutes')
@@ -130,6 +169,38 @@ const editing = ref(false), draft = ref({}), taskModal = ref(false), taskDraft =
 const directoryOptions = ref([]), directoryLoading = ref(false), directoryError = ref('')
 const knowledgeOptions = ref([])
 const decisionModal = ref(false), decision = ref({}), decisionItem = ref(null)
+const reconcileModal = ref(false), reconcileTask = ref(null), reconcileGuid = ref(''), reconcileReason = ref('')
+const reconcilePreview = ref(null), reconcileError = ref(''), reconcileBusy = ref(false)
+let reconcileVersion = 0, reconcileRequest = 0
+watch(reconcileGuid, () => { reconcileRequest++; reconcilePreview.value = null; reconcileError.value = '' })
+function needsReconciliation(task) { return !task.delivery?.feishuTaskId && (task.delivery?.error || task.delivery?.notification === 'FAILED') }
+function assigneeName(userId) {
+  const assignee = reconcileTask.value?.assignee
+  return assignee?.feishuUserId === userId && assignee.displayName ? `${assignee.displayName}（${userId}）` : userId
+}
+function openReconciliation(task) {
+  reconcileRequest++; reconcileTask.value = task; reconcileVersion = current.value.version
+  reconcileGuid.value = ''; reconcileReason.value = ''; reconcilePreview.value = null; reconcileError.value = ''; reconcileModal.value = true
+}
+async function readReconciliation() {
+  const request = ++reconcileRequest
+  reconcileBusy.value = true; reconcileError.value = ''; reconcilePreview.value = null
+  try {
+    const response = await previewTaskReconciliation(id, reconcileTask.value.id, {version:reconcileVersion, feishuTaskId:reconcileGuid.value.trim()})
+    if (request === reconcileRequest) reconcilePreview.value = response
+  } catch(e) { if (request === reconcileRequest) reconcileError.value = e.message }
+  finally { reconcileBusy.value = false }
+}
+async function saveReconciliation() {
+  if (!reconcilePreview.value || !reconcileReason.value.trim() || reconcileBusy.value) return
+  reconcileBusy.value = true; reconcileError.value = ''
+  try {
+    await confirmTaskReconciliation(id, reconcileTask.value.id, {version:reconcileVersion, feishuTaskId:reconcilePreview.value.remote.id, reason:reconcileReason.value.trim()})
+    reconcileModal.value = false
+    await load()
+  } catch(e) { reconcileError.value = e.message; reconcilePreview.value = null }
+  finally { reconcileBusy.value = false }
+}
 const evidenceQuery = ref(''), evidence = ref([]), evidenceNotice = ref('')
 const previewOpen = ref(false), preview = ref(null), previewEvidence = ref([])
 async function load() { loading.value = true; error.value = ''; try {data.value = await getManagedMeeting(id)} catch(e) {error.value = e.message} finally {loading.value = false} }
@@ -172,9 +243,9 @@ async function showTaskEvidence(item, ref) {
 }
 async function viewVersion(item) {await run(async () => {preview.value = await getMeetingVersion(id,item.id); previewEvidence.value = []; previewOpen.value = true},false)}
 async function selectVersion(version) {await run(async () => {preview.value = await getMeetingVersion(id,preview.value.meeting.id,version)},false)}
-onBeforeRouteLeave(() => {if(editing.value || taskModal.value || decisionModal.value) {message.warning('请先保存或取消正在编辑的内容'); return false}})
+onBeforeRouteLeave(() => {if(editing.value || taskModal.value || decisionModal.value || reconcileModal.value) {message.warning('请先保存或取消正在编辑的内容'); return false}})
 function refreshCurrent() {
-  if (!document.hidden && !loading.value && !busy.value && !editing.value && !taskModal.value && !decisionModal.value) load()
+  if (!document.hidden && !loading.value && !busy.value && !editing.value && !taskModal.value && !decisionModal.value && !reconcileModal.value) load()
 }
 watch(tab, value => { if (value === 'TASK') refreshCurrent() })
 onMounted(() => { load(); window.addEventListener('focus', refreshCurrent); document.addEventListener('visibilitychange', refreshCurrent) })

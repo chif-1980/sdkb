@@ -101,6 +101,10 @@ class FeishuClient:
         self._max_retries = max_retries
         self._sleep = sleep
 
+    @property
+    def application_id(self) -> str:
+        return self._app_id
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
@@ -464,6 +468,7 @@ class FeishuClient:
         description: str = "",
         due_timestamp: int | None = None,
         client_token: str | None = None,
+        extra: str | None = None,
     ) -> dict[str, Any]:
         """Create a Feishu task assigned to one tenant user."""
         if not isinstance(user_id, str) or not user_id.strip():
@@ -482,7 +487,11 @@ class FeishuClient:
             body["due"] = {"timestamp": str(int(due_timestamp) * 1000), "is_all_day": True}
         params = {"user_id_type": "user_id"}
         if client_token:
-            params["client_token"] = client_token
+            # Task v2 accepts this in the body, not query parameters. This
+            # protects identical retries within Feishu's five-minute window.
+            body["client_token"] = client_token
+        if extra is not None:
+            body["extra"] = extra
         response = await self._post_response(
             "/open-apis/task/v2/tasks",
             params=params,
@@ -571,15 +580,18 @@ class FeishuClient:
 
     async def edit_task(
         self, *, task_id: str, user_id: str, summary: str, description: str,
-        due_timestamp: int | None, completed: bool,
+        due_timestamp: int | None, completed: bool | None,
     ) -> dict[str, Any]:
         """Update one existing task and reconcile assignees, retaining its GUID."""
         remote = await self.get_task(task_id)
         fields = {
             "summary": summary, "description": description,
             "due": {"timestamp": str(int(due_timestamp) * 1000) if due_timestamp else "0", "is_all_day": True},
-            "completed_at": str(int(time.time() * 1000)) if completed else "0",
         }
+        # Details edits must not overwrite completion changed by the assignee
+        # since our last read. Only an explicit local status edit writes it.
+        if completed is not None:
+            fields["completed_at"] = str(int(time.time() * 1000)) if completed else "0"
         response = await self._patch_response(
             f"/open-apis/task/v2/tasks/{task_id}", params={"user_id_type": "user_id"},
             json_body={"task": fields, "update_fields": list(fields)},

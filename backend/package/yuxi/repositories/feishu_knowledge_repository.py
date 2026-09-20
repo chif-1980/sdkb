@@ -402,6 +402,7 @@ class FeishuKnowledgeRepository:
             .where(
                 FeishuSourceItem.source_id == source_id,
                 FeishuSourceItem.source_validity == "valid",
+                FeishuSourceItem.publication_status == "ACTIVE",
                 FeishuMaterialVersion.processing_status == "published",
                 FeishuMaterialVersion.review_status == "approved",
                 FeishuMaterialVersion.published_at.is_not(None),

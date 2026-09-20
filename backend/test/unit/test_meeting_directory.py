@@ -148,6 +148,12 @@ async def test_confirm_sends_task_content_and_source_refs(monkeypatch):
 
     from server.routers import product_meeting_router as router
 
+    async def create_once(client, *, request, **kwargs):
+        created = await client.create_task(**request)
+        return created["data"]["task"]["guid"], request, False
+
+    monkeypatch.setattr(router, "create_task_once", create_once)
+
     record = SimpleNamespace(
         id="MT-test",
         state="completed",
@@ -236,7 +242,9 @@ async def test_confirm_sends_task_content_and_source_refs(monkeypatch):
         "chatId": None,
         "error": None,
         "pendingUpdate": False,
+        "pendingStatusUpdate": False,
         "syncStatus": "SYNCED",
+        "syncError": None,
     }
 
 
@@ -295,6 +303,10 @@ async def test_resend_reuses_existing_task_without_sending_robot_message(monkeyp
         async def create_task(self, **kwargs):
             self.task = kwargs
             return {"data": {"task": {"guid": "task_1"}}}
+
+        async def get_task(self, task_id):
+            assert task_id == "task_1"
+            return {"completed_at": "0"}
 
         async def aclose(self):
             return None
@@ -394,6 +406,7 @@ async def test_edit_confirmed_task_preserves_guid_and_updates_instead_of_recreat
     await router.edit_meeting_followup("MT-test", patch, SimpleNamespace(id=1, username="用户"))
     client.edit_task.assert_awaited_once()
     assert client.edit_task.await_args.kwargs["task_id"] == "existing-task"
+    assert client.edit_task.await_args.kwargs["completed"] is None
     client.create_task.assert_not_called()
     client.send_text_message.assert_not_called()
     saved = save.await_args.args[1]["followup"]["tasks"][0]

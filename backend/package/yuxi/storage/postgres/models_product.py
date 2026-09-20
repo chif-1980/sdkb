@@ -202,6 +202,22 @@ class MeetingRecord(Base):
     __table_args__ = (UniqueConstraint("conversation_id", "request_id", name="uq_meeting_request"),)
 
 
+class MeetingTaskCreation(Base):
+    """Durable external side effect, independent of the meeting transaction.
+
+    No foreign key: creation must commit while the caller locks the meeting,
+    and its receipt must survive deletion of local meeting history.
+    """
+
+    __tablename__ = "meeting_task_creations"
+
+    request_key = Column(String(80), primary_key=True)
+    app_id = Column(String(100), nullable=False)
+    request = Column(JSON, nullable=False)
+    feishu_task_id = Column(String(100), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+
 class MeetingRevision(Base):
     __tablename__ = "product_meeting_revisions"
 

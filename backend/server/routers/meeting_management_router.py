@@ -3,7 +3,7 @@
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
 from server.utils.auth_middleware import get_admin_user
@@ -217,7 +217,10 @@ async def detail(meeting_id: str, user=Depends(get_admin_user)):
                 {"id": r.id, "state": r.state, "version": r.version, "createdAt": iso(r.created_at), "error": r.error}
                 for r in runs
             ],
-            "events": [{"action": e.action, "detail": e.detail, "createdAt": iso(e.created_at)} for e in events],
+            "events": [
+                {"action": e.action, "actorUserId": e.actor_user_id, "detail": e.detail, "createdAt": iso(e.created_at)}
+                for e in events
+            ],
             "scope": "TENANT" if managed.tenant_key else "OWNED",
             "ownerDisplayName": owner_display_name,
         }
@@ -334,6 +337,106 @@ class KnowledgeDecision(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
     knowledgeUnitId: str | None = Field(default=None, max_length=128)
     draftContent: str | None = Field(default=None, max_length=20000)
+
+
+class TaskReconciliation(BaseModel):
+    version: int = Field(ge=1)
+    feishuTaskId: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+    @field_validator("feishuTaskId", mode="before")
+    @classmethod
+    def parse_task_link(cls, value):
+        from urllib.parse import urlsplit, parse_qs
+
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if "://" not in value:
+            return value
+        url = urlsplit(value)
+        if (url.scheme != "https" or url.netloc not in ("applink.feishu.cn", "applink.larksuite.com")
+                or url.path != "/client/todo/detail"):
+            raise ValueError("请输入任务编号，或包含 guid 的飞书任务详情链接")
+        guids = parse_qs(url.query).get("guid", [])
+        if len(guids) != 1:
+            raise ValueError("飞书任务链接缺少唯一的 guid，请填写任务编号")
+        return guids[0]
+
+
+class TaskReconciliationConfirm(TaskReconciliation):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+async def reconcile_task(meeting_id, item_id, patch, user, *, confirm=False):
+    from copy import deepcopy
+    from yuxi.integrations.feishu.client import FeishuClientError
+    from yuxi.product_chat.meeting_task_creation import inspect_task_reconciliation
+    from yuxi.utils.datetime_utils import utc_now_naive, utc_isoformat, UTC
+
+    async with pg_manager.get_async_session_context() as db:
+        managed = await require(db, meeting_id, user, writable=True)
+        record = await db.scalar(
+            select(MeetingRecord).where(MeetingRecord.id == managed.successful_run_id).with_for_update()
+        )
+        if not record or record.version != patch.version:
+            raise HTTPException(409, "会议版本已变化，请刷新后重新核对")
+        if confirm and not patch.reason.strip():
+            raise HTTPException(422, "请填写核对说明")
+        result = deepcopy(record.result)
+        target = next((t for t in result.get("followup", {}).get("tasks", []) if t["id"] == item_id), None)
+        if target is None:
+            raise HTTPException(404, "待办不存在")
+        try:
+            receipt, preview = await inspect_task_reconciliation(
+                db, record, target, patch.feishuTaskId, managed.owner_user_id
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except (FeishuClientError, TimeoutError) as exc:
+            raise HTTPException(502, "无法读取飞书原任务，请检查任务编号、应用权限后重试核对") from exc
+        if not confirm:
+            return preview
+        before = deepcopy(target)
+        delivery = target.get("delivery") or {}
+        if not delivery.get("pendingStatusUpdate"):
+            if preview["remote"]["status"] == "DONE":
+                target["status"] = "DONE"
+            elif target.get("status") == "DONE":
+                target["status"] = "OPEN"
+        now = utc_isoformat(utc_now_naive().replace(tzinfo=UTC))
+        target["reviewStatus"] = "CONFIRMED"
+        target["delivery"] = {
+            **delivery, "feishuTaskId": patch.feishuTaskId,
+            "notification": "SENT", "error": None, "syncError": None,
+            "pendingUpdate": preview["pendingUpdate"],
+            "syncStatus": "PENDING" if preview["pendingUpdate"] else "SYNCED",
+            "lastSyncedAt": now, "lastSyncAttemptAt": now,
+        }
+        receipt.feishu_task_id = patch.feishuTaskId
+        await MeetingRepository(db).save_result(record, result, editor=user.id, audit={
+            "action": "TASK_RECONCILE",
+            "detail": {
+                "taskId": item_id, "feishuTaskId": patch.feishuTaskId,
+                "actorName": user.username, "outcome": "SUCCESS", "reason": patch.reason.strip(),
+                "matchBasis": preview["matchBasis"],
+                "changes": [{"taskId": item_id, "before": before, "after": deepcopy(target)}],
+            },
+        })
+        return {"meeting": serialize_meeting(record), "pendingUpdate": preview["pendingUpdate"]}
+
+
+@meeting_management.post("/{meeting_id}/tasks/{item_id}/reconcile/preview")
+async def preview_task_reconciliation(
+    meeting_id: str, item_id: str, patch: TaskReconciliation, user=Depends(get_admin_user)
+):
+    return await reconcile_task(meeting_id, item_id, patch, user)
+
+
+@meeting_management.post("/{meeting_id}/tasks/{item_id}/reconcile")
+async def confirm_task_reconciliation(
+    meeting_id: str, item_id: str, patch: TaskReconciliationConfirm, user=Depends(get_admin_user)
+):
+    return await reconcile_task(meeting_id, item_id, patch, user, confirm=True)
 
 
 @meeting_management.patch("/{meeting_id}/knowledge/{item_id}")

@@ -75,6 +75,7 @@ class CitationService:
             item is not None
             and item.source_id == citation.source_id
             and item.source_validity == "valid"
+            and item.publication_status == "ACTIVE"
             and item.active_version_id == citation.version_id
             and version is not None
             and version.item_id == citation.item_id

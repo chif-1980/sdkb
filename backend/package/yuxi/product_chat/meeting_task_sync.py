@@ -2,6 +2,8 @@
 
 import asyncio
 from copy import deepcopy
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update
 
@@ -21,6 +23,7 @@ async def sync_tasks(db, record, user_id):
     if not eligible:
         return {"checked": 0, "failed": 0}
     changed, failures = len(eligible), 0
+    processed = set()
     client = None
     try:
         # Bound the whole meeting, including identity checks and client retries.
@@ -51,21 +54,20 @@ async def sync_tasks(db, record, user_id):
                     elif task.get("status") == "DONE":
                         task["status"] = "OPEN"
                     delivery.update(syncStatus="SYNCED", lastSyncedAt=now, syncError=None)
+                    delivery["scheduleComparison"] = compare_task_schedule(task, remote)
+                    delivery["scheduleCheckedAt"] = now
                 except (FeishuClientError, ValueError) as exc:
                     failures += 1
                     delivery.update(syncStatus="FAILED", syncError=str(exc)[:300])
+                processed.add(task["id"])
     except (FeishuClientError, ValueError, TimeoutError) as exc:
         # An identity failure or meeting timeout must be visible in both products.
         # Preserve last known business state and last successful read time.
-        result = deepcopy(record.result)
-        eligible = [
-            t
-            for t in result["followup"]["tasks"]
-            if (t.get("delivery") or {}).get("feishuTaskId") and not t["delivery"].get("pendingUpdate")
-        ]
-        failures = len(eligible)
         error = "飞书状态读取超时，将在后续同步中重试" if isinstance(exc, TimeoutError) else str(exc)[:300]
         for task in eligible:
+            if task["id"] in processed:
+                continue
+            failures += 1
             task["delivery"].update(
                 syncStatus="FAILED",
                 syncError=error,
@@ -76,11 +78,13 @@ async def sync_tasks(db, record, user_id):
             await client.aclose()
     previous = {t["id"]: t for t in record.result["followup"]["tasks"]}
     state_changed = any(
-        (task.get("status"), task["delivery"].get("syncStatus"), task["delivery"].get("syncError"))
+        (task.get("status"), task["delivery"].get("syncStatus"), task["delivery"].get("syncError"),
+         task["delivery"].get("scheduleComparison"))
         != (
             previous[task["id"]].get("status"),
             previous[task["id"]]["delivery"].get("syncStatus"),
             previous[task["id"]]["delivery"].get("syncError"),
+            previous[task["id"]]["delivery"].get("scheduleComparison"),
         )
         for task in eligible
     )
@@ -106,6 +110,52 @@ async def sync_tasks(db, record, user_id):
                     .values(payload=task, updated_at=utc_now_naive())
                 )
     return {"checked": changed, "failed": failures}
+
+
+def compare_task_schedule(task, remote):
+    """Compare read-only snapshots; an incomplete response is never a match."""
+    try:
+        members = remote.get("members")
+        if not isinstance(members, list) or any(
+            not isinstance(member, dict) or not isinstance(member.get("id"), str)
+            or not member["id"] or not isinstance(member.get("role"), str) for member in members
+        ):
+            raise ValueError("飞书未返回完整的负责人信息")
+        local = task.get("assignee") or {}
+        local_id = local.get("feishuUserId")
+        if local and not local_id:
+            raise ValueError("本地负责人缺少飞书用户编号，请核对绑定")
+        remote_ids = sorted({m["id"] for m in members if m["role"] == "assignee"})
+        assignees = [{"id": uid, "name": next(
+            (m.get("name") for m in members if m["id"] == uid and m.get("name")),
+            local.get("displayName") if uid == local_id else None,
+        ) or uid} for uid in remote_ids]
+        due = remote.get("due")
+        due = {} if due is None else due
+        if not isinstance(due, dict) or (due and "timestamp" not in due):
+            raise ValueError("飞书未返回有效的任务期限")
+        timestamp = str(due.get("timestamp", "0"))
+        if not timestamp.isdecimal() or (int(timestamp) > 0 and not isinstance(due.get("is_all_day"), bool)):
+            raise ValueError("飞书未返回有效的任务期限")
+        due_date = None
+        if int(timestamp):
+            # Feishu all-day timestamps encode the calendar date in UTC, not local time.
+            value = datetime.fromtimestamp(int(timestamp) / 1000, UTC)
+            due_date = (value.date().isoformat() if due["is_all_day"] else
+                        value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M（北京时间）"))
+        differences = []
+        if remote_ids != ([local_id] if local_id else []):
+            differences.append("assignee")
+        if due_date != (task.get("dueDate") or None):
+            differences.append("dueDate")
+        return {
+            "status": "DIFFERENT" if differences else "MATCH", "differences": differences,
+            "localAssignees": [{"id": local_id, "name": local.get("displayName") or local_id}] if local_id else [],
+            "remoteAssignees": assignees, "localDueDate": task.get("dueDate") or None, "remoteDueDate": due_date,
+        }
+    except (ValueError, OverflowError, OSError) as exc:
+        error = str(exc) if isinstance(exc, ValueError) else "飞书任务期限超出有效范围"
+        return {"status": "UNVERIFIED", "error": error}
 
 
 async def sync_task_batch():

@@ -186,8 +186,10 @@ async def test_create_task_uses_assignee_and_idempotency_token():
             return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
         assert request.method == "POST"
         assert request.url.params["user_id_type"] == "user_id"
-        assert request.url.params["client_token"] == "meeting-m1-task-1"
+        assert "client_token" not in request.url.params
         payload = json.loads(request.content)
+        assert payload["client_token"] == "meeting-m1-task-1"
+        assert payload["extra"] == "meeting-source-marker"
         assert payload["summary"] == "核对资料"
         assert payload["description"] == "来源：会议"
         assert payload["members"] == [{"id": "ou_user", "type": "user", "role": "assignee"}]
@@ -201,10 +203,47 @@ async def test_create_task_uses_assignee_and_idempotency_token():
         description="来源：会议",
         due_timestamp=1798656000,
         client_token="meeting-m1-task-1",
+        extra="meeting-source-marker",
     )
     assert result["data"]["task"]["guid"] == "task-guid"
     assert len(requests) == 1
     await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_response", ["timeout", "server_error"])
+async def test_task_creation_retry_reuses_body_and_token(lost_response):
+    remote_tasks = {}
+    bodies = []
+
+    async def handler(request):
+        payload = json.loads(request.content)
+        bodies.append(payload)
+        # Model Feishu's documented five-minute idempotency contract. Query
+        # parameters do not activate it; absent tokens create another task.
+        key = payload.get("client_token") or f"request-{len(bodies)}"
+        remote_tasks.setdefault(key, {"guid": f"remote-{len(remote_tasks) + 1}"})
+        if len(bodies) == 1:
+            if lost_response == "timeout":
+                raise httpx.ReadTimeout("Response lost after create", request=request)
+            return httpx.Response(500, json={"code": 1470500})
+        return httpx.Response(200, json={"code": 0, "data": {"task": remote_tasks[key]}})
+
+    async def no_sleep(_):
+        pass
+
+    client = _client(handler, sleep=no_sleep)
+    try:
+        result = await client.create_task(
+            user_id="member", summary="测试", description="故障恢复测试",
+            client_token="meeting-retry-task-1",
+        )
+        assert len(bodies) == 2
+        assert bodies[0] == bodies[1]
+        assert len(remote_tasks) == 1
+        assert result["data"]["task"]["guid"] == "remote-1"
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -1393,3 +1432,28 @@ async def test_task_read_does_not_report_success_for_incomplete_response():
             await client.get_task("task-1")
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_edit_details_does_not_reopen_a_task_completed_in_feishu():
+    calls = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"code": 0, "data": {"task": {
+                "guid": "task-1", "completed_at": "1750000000000",
+                "members": [{"id": "same", "role": "assignee"}],
+            }}})
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    client = _client(handler)
+    try:
+        await client.edit_task(task_id="task-1", user_id="same", summary="仅修改标题", description="",
+                               due_timestamp=1798656000, completed=None)
+    finally:
+        await client.aclose()
+    assert len(calls) == 1
+    assert "completed_at" not in calls[0]["task"]
+    assert "completed_at" not in calls[0]["update_fields"]
+    assert calls[0]["task"]["due"] == {"timestamp": "1798656000000", "is_all_day": True}

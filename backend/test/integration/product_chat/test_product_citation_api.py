@@ -341,6 +341,8 @@ async def test_current_knowledge_policy_denial_or_failure_returns_403_even_for_s
     [
         ("source", {"enabled": False}),
         ("item", {"source_validity": "invalid"}),
+        ("item", {"publication_status": "OFFLINE"}),
+        ("item", {"publication_status": "RESTORE_FAILED"}),
         ("item", {"active_version_id": "version-replaced"}),
         ("version", {"processing_status": "parsed"}),
         ("version", {"review_status": "pending"}),

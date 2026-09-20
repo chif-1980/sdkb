@@ -17,6 +17,8 @@ export const decideMeetingKnowledge = (id, item, data) => apiPatch(`${path(id)}/
 export const retryManagedMeeting = (id) => apiPost(`${path(id)}/retry`)
 export const cancelManagedMeeting = (id) => apiPost(`${path(id)}/cancel`)
 export const syncMeetingTasks = (id) => apiPost(`${path(id)}/sync-tasks`)
+export const previewTaskReconciliation = (id, item, data) => apiPost(`${path(id)}/tasks/${encodeURIComponent(item)}/reconcile/preview`, data)
+export const confirmTaskReconciliation = (id, item, data) => apiPost(`${path(id)}/tasks/${encodeURIComponent(item)}/reconcile`, data)
 export async function downloadMeeting(id, version) {
   const response = await apiGet(`${path(id)}/export?version=${version}`, {}, true, 'blob')
   const url = URL.createObjectURL(await response.blob())

@@ -234,10 +234,10 @@ class MeetingRepository:
         await MeetingManagement(self.db).attach(record)
         return record
 
-    async def save_result(self, record, result, *, editor=None):
+    async def save_result(self, record, result, *, editor=None, audit=None):
         from yuxi.product_chat.meeting_management import MeetingManagement
 
-        result = await MeetingManagement(self.db).project(record, result, editor=editor)
+        result = await MeetingManagement(self.db).project(record, result, editor=editor, audit=audit)
         result = {**result, "body": meeting_body(result)}
         record.version += 1
         record.result = result

@@ -83,3 +83,6 @@ docs/vibe
 
 .taskr/
 .worktrees/
+
+# Local secret backups must never enter release archives.
+.env.backup*

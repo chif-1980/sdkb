@@ -41,7 +41,7 @@
         <template v-else-if="column.key === 'review'"><span :class="['meeting-review-state', `is-${reviewTone(record.reviewStatus || 'PENDING')}`]"><span class="meeting-state-mark" aria-hidden="true" />{{ label(record.reviewStatus || 'PENDING') }}</span></template>
         <template v-else-if="column.key === 'execution'"><span :class="['meeting-execution-state', `is-${executionTone(record)}`]"><span class="meeting-state-mark" aria-hidden="true" />{{ taskExecutionLabel(record) }}</span></template>
         <template v-else-if="column.key === 'knowledgeState'">{{ label(record.status) }}<small>{{ label(record.comparisonStatus) }}</small></template>
-        <template v-else-if="column.key === 'sync'">{{ label(record.delivery?.syncStatus || 'NOT_SENT') }}</template>
+        <template v-else-if="column.key === 'sync'"><span :class="{'meeting-schedule-warning': record.delivery?.scheduleComparison?.status === 'DIFFERENT'}">{{ record.delivery?.feishuTaskId ? taskScheduleLabel(record.delivery) : label(record.delivery?.syncStatus || 'NOT_SENT') }}</span></template>
         <template v-else-if="column.key === 'dueDate'">{{ taskDeadlineLabel(record) }}</template>
         <template v-else-if="column.key === 'updatedAt'">{{ formatDate(record.updatedAt) }}</template>
       </template>
@@ -55,7 +55,7 @@ import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowUpRight, RefreshCw } from 'lucide-vue-next'
 import { listMeetings, meetingMetrics, meetingQueue } from '@/apis/meetingManagement'
-import { label, formatDate, stateColor, reviewTone, executionTone, taskAssigneeLabel, taskDeadlineLabel, taskExecutionLabel } from '@/utils/meetingManagement'
+import { label, formatDate, stateColor, reviewTone, executionTone, taskAssigneeLabel, taskDeadlineLabel, taskExecutionLabel, taskScheduleLabel } from '@/utils/meetingManagement'
 const route = useRoute(), router = useRouter()
 const rows = ref([]), total = ref(0), loading = ref(false), error = ref(''), counts = ref({})
 const searchText = ref(route.query.q || ''), filterState = ref(route.query.state || ''), archived = ref(route.query.archived === 'true')

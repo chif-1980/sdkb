@@ -168,7 +168,8 @@ async def test_resolve_scope_rejects_a_disabled_source(db_session):
     assert exc_info.value.status_code == 503
 
 
-async def test_resolve_scope_only_returns_current_published_approved_versions(db_session):
+@pytest.mark.parametrize("publication_status", ["ACTIVE", "OFFLINE", "RESTORE_FAILED"])
+async def test_resolve_scope_only_returns_current_published_approved_versions(db_session, publication_status):
     db_session.add(
         FeishuSource(
             source_id="source-1",
@@ -202,6 +203,7 @@ async def test_resolve_scope_only_returns_current_published_approved_versions(db
 
     now = datetime.now(UTC)
     current = add_item("item-current", active_version_id="version-current")
+    current.publication_status = publication_status
     current_version = FeishuMaterialVersion(
         version_id="version-current",
         item_id=current.item_id,
@@ -291,7 +293,7 @@ async def test_resolve_scope_only_returns_current_published_approved_versions(db
     assert await service.resolve_scope(_user()) == ProductKnowledgeScope(
         source_id="source-1",
         kb_id="kb-1",
-        allowed_file_ids=("file-current",),
+        allowed_file_ids=("file-current",) if publication_status == "ACTIVE" else (),
     )
 
 
