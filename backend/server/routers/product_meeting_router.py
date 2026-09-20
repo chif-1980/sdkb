@@ -67,7 +67,7 @@ class FollowupTaskEdit(BaseModel):
 class MeetingFollowupEdit(BaseModel):
     version: int = Field(ge=1)
     tasks: list[FollowupTaskEdit] = Field(default_factory=list, max_length=100)
-    action: Literal["SAVE", "CONFIRM", "RESEND", "IGNORE"] = "SAVE"
+    action: Literal["SAVE", "CONFIRM", "RESEND", "IGNORE", "APPLY_AI", "DISMISS_AI"] = "SAVE"
     taskId: str | None = Field(default=None, min_length=1, max_length=80)
 
 
@@ -286,13 +286,18 @@ async def update_meeting_followup(meeting_id, patch, user, *, owner_id=None, req
                 review_status = "PENDING"
             updated_tasks.append(
                 {
-                    **{key: previous[key] for key in ("extractionKey", "sourceMeetingId") if key in previous},
+                    **{
+                        key: previous[key]
+                        for key in ("extractionKey", "sourceMeetingId", "aiProposal")
+                        if key in previous
+                    },
                     "id": task.id,
                     "title": task.title.strip(),
                     "content": task.content.strip(),
                     "assignee": assignee,
                     "assigneeSuggestion": previous.get("assigneeSuggestion"),
                     "dueDate": normalized_due_date,
+                    "dueDateEdited": True,
                     "dueDateSuggestion": previous.get("dueDateSuggestion")
                     or (
                         previous.get("dueDate")
@@ -306,12 +311,44 @@ async def update_meeting_followup(meeting_id, patch, user, *, owner_id=None, req
                     "delivery": delivery,
                 }
             )
-        if patch.action in {"CONFIRM", "RESEND", "IGNORE"}:
+        if patch.action in {"CONFIRM", "RESEND", "IGNORE", "APPLY_AI", "DISMISS_AI"}:
             if not patch.taskId:
                 raise HTTPException(422, "请指定要处理的会议待办。")
             if patch.taskId not in {task["id"] for task in updated_tasks}:
                 raise HTTPException(422, "要处理的会议待办不存在。")
         delivery_error = None
+        if patch.action in {"APPLY_AI", "DISMISS_AI"}:
+            target = next(task for task in updated_tasks if task["id"] == patch.taskId)
+            proposal = target.pop("aiProposal", None)
+            if not proposal:
+                raise HTTPException(409, "该待办没有待核对的 AI 修改，请刷新后重试。")
+            if patch.action == "APPLY_AI":
+                target.update(
+                    {
+                        key: proposal.get(key)
+                        for key in (
+                            "title",
+                            "content",
+                            "dueDate",
+                            "dueDateSuggestion",
+                            "assigneeSuggestion",
+                            "sourceRefs",
+                            "sourceMeetingId",
+                        )
+                    }
+                )
+                from yuxi.product_chat.meeting_content import task_date
+
+                target["dueDate"] = task_date({**proposal, "reviewStatus": "PENDING"}) or None
+                target["dueDateEdited"] = False
+                if (target.get("assignee") or {}).get("displayName") != proposal.get("assigneeSuggestion"):
+                    target["assignee"] = None  # A model name cannot grant a directory identity.
+                if target["delivery"].get("feishuTaskId"):
+                    target["delivery"].update(
+                        {"pendingUpdate": True, "syncStatus": "PENDING", "notifyAssigneeChanged": True}
+                    )
+                else:
+                    target["reviewStatus"] = "PENDING"
         if patch.action == "IGNORE":
             target = next(task for task in updated_tasks if task["id"] == patch.taskId)
             if target["delivery"].get("feishuTaskId"):
@@ -345,7 +382,7 @@ async def update_meeting_followup(meeting_id, patch, user, *, owner_id=None, req
                                 task_id=target["delivery"]["feishuTaskId"],
                                 due_timestamp=int(
                                     datetime.combine(
-                                        date.fromisoformat(target["dueDate"]), time.max, tzinfo=UTC
+                                        date.fromisoformat(target["dueDate"]), time.min, tzinfo=UTC
                                     ).timestamp()
                                 ),
                             )
@@ -368,49 +405,15 @@ async def update_meeting_followup(meeting_id, patch, user, *, owner_id=None, req
                 previous_delivery = target.get("delivery") or {}
                 message_id = previous_delivery.get("messageId")
                 chat_id = previous_delivery.get("chatId")
-                # Keep the already-created Feishu task even when a later
-                # notification retry fails. The task and message have
-                # separate delivery lifecycles.
+                # Keep the already-created Feishu task when a later update
+                # fails. The task itself is the single Feishu notification
+                # channel; do not send a second robot message.
                 task_id = previous_delivery.get("feishuTaskId")
                 try:
                     client = FeishuClient()
-                    # CONFIRM sends the first notification. RESEND deliberately
-                    # sends a new notification while keeping the existing
-                    # idempotent Feishu task, so a missing chat message can be
-                    # recovered without creating duplicate tasks.
-                    if patch.action == "RESEND" or previous_delivery.get("notifyAssigneeChanged"):
-                        message_id = None
-                    if not message_id:
-                        message_lines = [
-                            f"会议待办：{target['title']}",
-                            f"会议：{(record.result or {}).get('title') or '会议纪要'}",
-                        ]
-                        if target.get("content"):
-                            message_lines.append(f"内容：{target['content']}")
-                        message_lines.append(f"截止日期：{target['dueDate'] or '待确认'}")
-                        if target.get("sourceRefs"):
-                            message_lines.append(f"依据：{'、'.join(target['sourceRefs'])}")
-                        message_lines.append("请在飞书中确认并跟进。")
-                        message = await client.send_text_message(
-                            # Use the tenant directory user ID for both the
-                            # message and the task. Open IDs are application
-                            # scoped and can point at a different identity
-                            # when multiple Feishu apps are connected.
-                            user_id=feishu_user_id,
-                            text="\n".join(message_lines),
-                        )
-                        message_id = (
-                            (message.get("data") or {}).get("message_id") if isinstance(message, dict) else None
-                        )
-                        chat_id = (message.get("data") or {}).get("chat_id") if isinstance(message, dict) else None
-                        resolver = getattr(client, "get_message_delivery", None)
-                        if message_id and not chat_id and resolver:
-                            resolved = await resolver(message_id)
-                            chat_id = resolved.get("chatId")
                     # Feishu's task API does not guarantee idempotency for a
-                    # repeated client_token after the first request. A resend
-                    # must therefore reuse the stored task instead of creating
-                    # another task for the same meeting item.
+                    # repeated client_token after the first request. Reuse the
+                    # stored task instead of creating another task for this item.
                     if task_id and previous_delivery.get("pendingUpdate"):
                         await client.edit_task(
                             task_id=task_id,
@@ -421,7 +424,7 @@ async def update_meeting_followup(meeting_id, patch, user, *, owner_id=None, req
                                 int(
                                     datetime.combine(
                                         date.fromisoformat(target["dueDate"]),
-                                        time.max,
+                                        time.min,
                                         tzinfo=UTC,
                                     ).timestamp()
                                 )
@@ -443,7 +446,7 @@ async def update_meeting_followup(meeting_id, patch, user, *, owner_id=None, req
                             due_timestamp=(
                                 int(
                                     datetime.combine(
-                                        date.fromisoformat(target["dueDate"]), time.max, tzinfo=UTC
+                                        date.fromisoformat(target["dueDate"]), time.min, tzinfo=UTC
                                     ).timestamp()
                                 )
                                 if target.get("dueDate")
@@ -548,6 +551,23 @@ async def cancel_meeting(meeting_id, user, *, owner_id=None):
     return {"run": {"runId": meeting_id, "status": record.state}}
 
 
+@product_meeting.get("/chat/meetings/{meeting_id}/markdown")
+async def copy_meeting(meeting_id: str, version: int, user: User = Depends(get_product_user)):
+    from yuxi.product_chat.meeting_content import meeting_body
+
+    async with pg_manager.get_async_session_context() as db:
+        record = await require_meeting(db, meeting_id, user)
+        if not record.result or record.version != version:
+            raise HTTPException(409, "纪要版本已变化，请刷新后再复制。")
+        result, sources = await MeetingRepository(db).export_materials(record, user.id)
+        source_list = "\n".join(
+            f"- S{i} {source['title']}：{source.get('url') or '用户提供的文字或文件'}"
+            for i, source in enumerate(sources, 1)
+        )
+        body = meeting_body(result)
+        return {"body": body + ("\n\n## 会议来源\n\n" + source_list if source_list else "")}
+
+
 @product_meeting.get("/chat/meetings/{meeting_id}/export")
 async def export_meeting(meeting_id: str, version: int, user: User = Depends(get_product_user), *, owner_id=None):
     from yuxi.product_chat.meeting_export import export_docx
@@ -556,7 +576,8 @@ async def export_meeting(meeting_id: str, version: int, user: User = Depends(get
         record = await require_meeting(db, meeting_id, user, owner_id=owner_id)
         if not record.result or record.version != version:
             raise HTTPException(409, "导出版本已变化，请等待保存完成后重试。")
-        data = await asyncio.to_thread(export_docx, record.result, record.sources, record.version)
+        result, sources = await MeetingRepository(db).export_materials(record, owner_id or user.id)
+        data = await asyncio.to_thread(export_docx, result, sources, record.version)
     filename = quote(f"{record.result['title'][:80]}-v{version}.docx", safe="")
     return Response(
         data,

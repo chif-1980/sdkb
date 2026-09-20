@@ -34,7 +34,19 @@ def merge_followups(old_items, incoming, *, run_id):
     merged = deepcopy(old_items)
     by_key = {item.get("extractionKey") or item_key(item): item for item in merged}
     used_ids = {item["id"] for item in merged}
+    by_id = {str(item["id"]): item for item in merged}
     for item in deepcopy(incoming):
+        target_id = item.pop("targetTaskId", None)
+        if target_id:
+            previous = by_id.get(str(target_id))
+            if previous is None:
+                raise ValueError("AI 修改的待办编号不存在，请重试。")
+            previous["aiProposal"] = {
+                key: item.get(key)
+                for key in ("title", "content", "assigneeSuggestion", "dueDate", "dueDateSuggestion", "sourceRefs")
+            }
+            previous["aiProposal"]["sourceMeetingId"] = run_id
+            continue
         key = item_key(item)
         if key in by_key:
             # A new model comparison may be refreshed, but a maintainer decision cannot.

@@ -34,7 +34,7 @@
               <a-textarea v-model:value="draft.body" :rows="20" aria-label="会议纪要正文" />
               <div class="meeting-actions"><a-button type="primary" :loading="busy" @click="saveMinutes">保存修改</a-button><a-button :disabled="busy" @click="editing = false">取消</a-button></div>
             </div>
-            <section v-else-if="result" class="meeting-panel"><MarkdownPreview :content="result.body" /></section>
+            <section v-else-if="result" class="meeting-panel"><p class="meeting-context-note">纪要保留会议当时的安排；后续负责人、期限和执行进度请查看“待办事项”。</p><MarkdownPreview :content="result.body" /></section>
             <a-empty v-else description="尚无成功的会议纪要" />
             <section v-if="current" class="meeting-panel">
               <h2>原始资料与依据</h2>
@@ -50,9 +50,10 @@
               <a-button :disabled="!current || busy || data.meeting.archived" @click="run(() => syncMeetingTasks(id))">刷新飞书状态</a-button>
               <span>无期限的事项不计入逾期。</span>
             </div>
+            <p class="meeting-context-note">会议识别的负责人和期限需核对后确认；此处显示与助手共用的最新待办，纪要原文保留会议当时的安排。</p>
             <article v-for="task in tasks" :key="task.id" class="meeting-item">
-              <div class="meeting-item-header"><div><h3>{{ task.title }}</h3><p>{{ task.content }}</p></div><a-tag>{{ label(task.reviewStatus || 'PENDING') }}</a-tag></div>
-              <div class="meeting-meta"><span>负责人：{{ task.assignee?.displayName || '待分配' }}</span><span>期限：{{ task.dueDate || '未设期限' }}</span><span>{{ label(task.status) }}</span></div>
+              <div class="meeting-item-header"><div><h3>{{ task.title }}</h3><p>{{ task.content }}</p></div><span :class="['meeting-review-state', `is-${reviewTone(task.reviewStatus || 'PENDING')}`]"><span class="meeting-state-mark" aria-hidden="true" />{{ label(task.reviewStatus || 'PENDING') }}</span></div>
+              <div class="meeting-meta"><span>负责人：{{ taskAssigneeLabel(task) }}</span><span>期限：{{ taskDeadlineLabel(task) }}</span><span class="meeting-execution-status"><strong>执行状态：</strong><span :class="['meeting-execution-state', `is-${executionTone(task)}`]"><span class="meeting-state-mark" aria-hidden="true" />{{ taskExecutionLabel(task) }}</span></span></div>
               <small v-if="task.delivery?.feishuTaskId">飞书任务 {{ task.delivery.feishuTaskId }} · {{ label(task.delivery.syncStatus) }} · 最近读取 {{ formatDate(task.delivery.lastSyncedAt) }}</small>
               <small v-if="(task.delivery?.error || task.delivery?.syncError)" class="meeting-error">{{ task.delivery.error || task.delivery.syncError }}</small>
               <div class="meeting-source"><button v-for="ref in task.sourceRefs" :key="ref" class="meeting-title-link" @click="showTaskEvidence(task, ref)">{{ ref }}</button></div>
@@ -112,14 +113,14 @@
   </main>
 </template>
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { ArrowLeft } from 'lucide-vue-next'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { searchFormalKnowledge, getManagedMeeting, archiveMeeting, editMeetingMinutes, editMeetingTasks, getMeetingDirectory,
   decideMeetingKnowledge, retryManagedMeeting, cancelManagedMeeting, syncMeetingTasks, downloadMeeting, getMeetingVersion } from '@/apis/meetingManagement'
-import { label, formatDate, stateColor, safeSourceUrl } from '@/utils/meetingManagement'
+import { label, formatDate, stateColor, reviewTone, executionTone, safeSourceUrl, taskAssigneeLabel, taskDeadlineLabel, taskExecutionLabel } from '@/utils/meetingManagement'
 const route = useRoute(), router = useRouter(), id = route.params.id
 const data = ref(null), loading = ref(false), busy = ref(false), error = ref('')
 const tab = ref(['TASK','KNOWLEDGE'].includes(route.query.tab) ? route.query.tab : 'minutes')
@@ -172,6 +173,11 @@ async function showTaskEvidence(item, ref) {
 async function viewVersion(item) {await run(async () => {preview.value = await getMeetingVersion(id,item.id); previewEvidence.value = []; previewOpen.value = true},false)}
 async function selectVersion(version) {await run(async () => {preview.value = await getMeetingVersion(id,preview.value.meeting.id,version)},false)}
 onBeforeRouteLeave(() => {if(editing.value || taskModal.value || decisionModal.value) {message.warning('请先保存或取消正在编辑的内容'); return false}})
-onMounted(load)
+function refreshCurrent() {
+  if (!document.hidden && !loading.value && !busy.value && !editing.value && !taskModal.value && !decisionModal.value) load()
+}
+watch(tab, value => { if (value === 'TASK') refreshCurrent() })
+onMounted(() => { load(); window.addEventListener('focus', refreshCurrent); document.addEventListener('visibilitychange', refreshCurrent) })
+onBeforeUnmount(() => { window.removeEventListener('focus', refreshCurrent); document.removeEventListener('visibilitychange', refreshCurrent) })
 </script>
 <style lang="less" src="@/assets/css/meeting-management.less"></style>

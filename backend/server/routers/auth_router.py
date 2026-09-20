@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import APIKey, User, Department
+from yuxi.storage.postgres.models_product import FeishuUserBinding
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.repositories.department_repository import DepartmentRepository
 from server.utils.auth_middleware import (
@@ -98,6 +99,10 @@ class UserResponse(BaseModel):
     department_name: str | None = None  # 部门名称
     created_at: str
     last_login: str | None = None
+
+
+class UserListResponse(UserResponse):
+    feishu_linked: bool
 
 
 class UserAccessOption(BaseModel):
@@ -594,7 +599,7 @@ async def create_user(
 
 
 # 路由：获取所有用户（管理员权限）
-@auth.get("/users", response_model=list[UserResponse])
+@auth.get("/users", response_model=list[UserListResponse])
 async def read_users(
     skip: int = Query(0, ge=0, le=MAX_PAGINATION_OFFSET),
     limit: int = Query(100, ge=1, le=500),
@@ -613,10 +618,18 @@ async def read_users(
             skip=skip, limit=limit, department_id=current_user.department_id
         )
 
+    linked_user_ids = set(
+        await db.scalars(
+            select(FeishuUserBinding.user_id).where(
+                FeishuUserBinding.user_id.in_([user.id for user, _ in users_with_dept])
+            )
+        )
+    )
     users = []
     for user, dept_name in users_with_dept:
         user_dict = user.to_dict()
         user_dict["department_name"] = dept_name
+        user_dict["feishu_linked"] = user.id in linked_user_ids
         users.append(user_dict)
     return users
 

@@ -27,7 +27,7 @@ const table = {
 }
 const stubs = {
   'a-button': button, 'a-alert': {props:['message','description'], template:'<p>{{ message }} {{ description }}</p>'},
-  'a-table': table, 'a-tag': passthrough, 'a-tabs': passthrough, 'a-tab-pane': passthrough,
+  'a-table': table, 'a-tag': passthrough, 'a-tabs': {name:'a-tabs', template:'<div><slot /></div>'}, 'a-tab-pane': passthrough,
   'a-spin': passthrough, 'a-modal': true, 'a-drawer': true, 'a-list': true,
   'a-input': true, 'a-textarea': true, 'a-select': true, 'a-input-search': true,
   'a-empty': true, 'a-checkbox': true, 'a-pagination': true,
@@ -89,4 +89,50 @@ describe('会议管理入口', () => {
     expect(wrapper.text()).toContain('保存修改')
     wrapper.unmount()
   })
+})
+
+const extractedTask = {id:'task-1', title:'核对手册', assigneeSuggestion:'程峰', dueDateSuggestion:'2026年9月21日前', status:'OPEN', reviewStatus:'PENDING'}
+function meetingData(tasks) {
+  return {meeting:{id:'m1',title:'验收会议',state:'completed'}, current:{id:'m1',version:1,sources:[],result:{body:'原始会议安排',followup:{tasks}}},runs:[],events:[]}
+}
+it('待办详情和队列均保留原文识别的安排，不冒充已分配或已执行', async () => {
+  api.getManagedMeeting.mockResolvedValue(meetingData([extractedTask]))
+  api.meetingQueue.mockResolvedValue({items:[{...extractedTask,meetingId:'m1'}],total:1})
+  for (const path of ['/meeting-management/m1?tab=TASK', '/meeting-management?tab=TASK']) {
+    const {wrapper} = await render(path)
+    expect(wrapper.text()).toContain('程峰（会议识别，待核对）')
+    expect(wrapper.text()).toContain('2026年9月21日前（会议识别，待核对）')
+    expect(wrapper.text()).toContain('待确认后跟进')
+    expect(wrapper.text()).not.toContain('未设期限')
+    wrapper.unmount()
+  }
+})
+it('切回页面读取助手保存的最新安排，编辑期间不刷新覆盖草稿', async () => {
+  api.getManagedMeeting.mockResolvedValue(meetingData([extractedTask]))
+  const {wrapper} = await render('/meeting-management/m1?tab=TASK')
+  api.getManagedMeeting.mockResolvedValue(meetingData([{...extractedTask, assignee:{displayName:'实际负责人'}, dueDate:'2026-09-22',status:'IN_PROGRESS',reviewStatus:'CONFIRMED'}]))
+  window.dispatchEvent(new Event('focus')); await flushPromises()
+  expect(wrapper.text()).toContain('负责人：实际负责人')
+  expect(wrapper.text()).toContain('期限：2026-09-22')
+  expect(wrapper.text()).toContain('执行状态：进行中')
+  expect(wrapper.text()).not.toContain('程峰（会议识别')
+  await wrapper.findAll('button').find(b => b.text() === '编辑纪要').trigger('click')
+  const calls = api.getManagedMeeting.mock.calls.length
+  window.dispatchEvent(new Event('focus')); await flushPromises()
+  expect(api.getManagedMeeting).toHaveBeenCalledTimes(calls)
+  expect(wrapper.text()).toContain('保存修改')
+  wrapper.unmount()
+  window.dispatchEvent(new Event('focus')); await flushPromises()
+  expect(api.getManagedMeeting).toHaveBeenCalledTimes(calls)
+})
+it('从纪要进入待办时读取最新状态，刷新仅查询而不发送飞书任务', async () => {
+  api.getManagedMeeting.mockResolvedValue(meetingData([extractedTask]))
+  const {wrapper} = await render('/meeting-management/m1')
+  api.getManagedMeeting.mockResolvedValue(meetingData([{...extractedTask,status:'DONE',reviewStatus:'CONFIRMED'}]))
+  wrapper.findComponent(MeetingManagementDetail).findComponent({name:'a-tabs'}).vm.$emit('update:activeKey','TASK')
+  await flushPromises()
+  expect(wrapper.text()).toContain('执行状态：已完成')
+  expect(api.editMeetingTasks).not.toHaveBeenCalled()
+  expect(api.syncMeetingTasks).not.toHaveBeenCalled()
+  wrapper.unmount()
 })

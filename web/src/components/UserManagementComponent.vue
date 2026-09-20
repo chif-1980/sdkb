@@ -5,7 +5,7 @@
       <div class="header-content">
         <div class="section-title">用户管理</div>
         <p class="section-description">
-          管理系统用户，请谨慎操作。删除用户后该用户将无法登录系统。
+          飞书用户首次扫码验证后会自动登记，管理权限需在“编辑用户”中授予管理员角色。删除用户后该用户将无法登录系统。
         </p>
       </div>
       <div class="header-actions">
@@ -130,6 +130,14 @@
 
               <template #info>
                 <div class="card-content">
+                  <div class="info-item">
+                    <span class="info-label">飞书账号:</span>
+                    <span class="info-value">{{ user.feishu_linked ? '已关联' : '未关联' }}</span>
+                  </div>
+                  <div class="info-item">
+                    <span class="info-label">管理权限:</span>
+                    <span class="info-value">{{ user.role === 'admin' || user.role === 'superadmin' ? '已开通' : '未开通' }}</span>
+                  </div>
                   <div class="info-item">
                     <span class="info-label">手机号:</span>
                     <span class="info-value phone-text">{{ user.phone_number || '-' }}</span>

@@ -1,5 +1,7 @@
 """Owned meeting jobs and optimistic, immutable result revisions."""
 
+from copy import deepcopy
+import re
 from uuid import uuid4
 from urllib.parse import urldefrag
 
@@ -8,6 +10,7 @@ from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 
 from sqlalchemy import select
 
+from yuxi.product_chat.meeting_content import meeting_body
 from yuxi.product_chat.repository import ProductChatNotFoundError, ProductChatRepository
 from yuxi.storage.postgres.models_product import MeetingRecord, MeetingRevision, ProductConversation, ProductMessage
 from yuxi.utils.datetime_utils import UTC, utc_isoformat, utc_now_naive
@@ -34,6 +37,28 @@ class MeetingRepository:
         if record is None:
             raise ProductChatNotFoundError()
         return record
+
+    async def export_materials(self, record, user_id):
+        """Resolve retained tasks against their own run before numbering export sources."""
+        result, sources = deepcopy(record.result), deepcopy(record.sources or [])
+        offsets = {record.id: 0}
+        for task in (result.get("followup") or {}).get("tasks", []):
+            source_id = task.get("sourceMeetingId") or record.id
+            if source_id not in offsets:
+                original = await self.require(source_id, user_id)
+                if original.conversation_id != record.conversation_id:
+                    raise ProductChatNotFoundError()
+                if original.sources == record.sources:
+                    offsets[source_id] = 0
+                else:
+                    offsets[source_id] = len(sources)
+                    sources.extend(deepcopy(original.sources or []))
+            offset = offsets[source_id]
+            task["sourceRefs"] = [
+                re.sub(r"^S(\d+)-", lambda match: f"S{int(match[1]) + offset}-", ref)
+                for ref in task.get("sourceRefs", [])
+            ]
+        return result, sources
 
     async def list_history(self, user_id, *, query="", offset=0, limit=20, group_id=None):
         # Only project metadata: never load the long transcripts into the picker.
@@ -213,6 +238,7 @@ class MeetingRepository:
         from yuxi.product_chat.meeting_management import MeetingManagement
 
         result = await MeetingManagement(self.db).project(record, result, editor=editor)
+        result = {**result, "body": meeting_body(result)}
         record.version += 1
         record.result = result
         record.updated_at = utc_now_naive()
@@ -229,7 +255,7 @@ def serialize_meeting(record, *, include_sources=True):
         "conversationId": record.conversation_id,
         "state": record.state,
         "progress": record.progress,
-        "result": record.result,
+        "result": {**record.result, "body": meeting_body(record.result)} if record.result else None,
         "error": record.error,
         "version": record.version,
         "updatedAt": utc_isoformat(record.updated_at.replace(tzinfo=UTC)),
