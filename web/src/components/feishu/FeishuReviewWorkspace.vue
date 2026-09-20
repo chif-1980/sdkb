@@ -3280,17 +3280,17 @@ async function loadReviewContent() {
   const detail = packageDetail.value
   const requestId = ++contentRequestSeq
   reviewContent.value = emptyReviewContent()
-  if (!detail?.target_kb_id || !detail?.yuxi_file_id) {
+  if (!detail?.content_kb_id || !detail?.yuxi_file_id) {
     reviewContent.value = {
       ...emptyReviewContent(),
       loaded: true,
-      error: '当前资料尚未生成可审核正文，请返回“资料与扫描”检查解析结果。'
+      error: '当前资料的解析正文记录不存在，请返回“资料与扫描”检查解析结果。'
     }
     return
   }
   reviewContent.value = { ...emptyReviewContent(), loading: true }
   try {
-    const response = await documentApi.getDocumentContent(detail.target_kb_id, detail.yuxi_file_id)
+    const response = await documentApi.getDocumentContent(detail.content_kb_id, detail.yuxi_file_id)
     if (requestId !== contentRequestSeq) return
     if (response?.status === 'failed') throw new Error(response.message || '解析内容读取失败')
     reviewContent.value = {
@@ -3316,7 +3316,7 @@ async function loadPreviousReviewContent() {
   const requestId = ++previousContentRequestSeq
   previousReviewContent.value = emptyReviewContent()
   if (!detail?.previous_version) return
-  if (!detail.target_kb_id || !detail.previous_version.yuxi_file_id) {
+  if (!detail.previous_version.content_kb_id || !detail.previous_version.yuxi_file_id) {
     previousReviewContent.value = {
       ...emptyReviewContent(),
       loaded: true,
@@ -3327,7 +3327,7 @@ async function loadPreviousReviewContent() {
   previousReviewContent.value = { ...emptyReviewContent(), loading: true }
   try {
     const response = await documentApi.getDocumentContent(
-      detail.target_kb_id,
+      detail.previous_version.content_kb_id,
       detail.previous_version.yuxi_file_id
     )
     if (requestId !== previousContentRequestSeq) return

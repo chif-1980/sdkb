@@ -646,6 +646,12 @@ async def test_review_package_update_returns_previous_published_version(governan
     client, session, _, _ = governance_api_fixture
     source_item = await session.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == "item-1"))
     source_item.active_version_id = "version-0"
+    session.add_all([
+        KnowledgeBase(kb_id="kb-parsed", name="解析库", kb_type="milvus"),
+        KnowledgeBase(kb_id="kb-previous", name="旧版库", kb_type="milvus"),
+        KnowledgeFile(file_id="file-1", kb_id="kb-parsed", filename="新版.docx"),
+        KnowledgeFile(file_id="file-0", kb_id="kb-previous", filename="旧版.docx"),
+    ])
     session.add(
         FeishuMaterialVersion(
             version_id="version-0",
@@ -666,11 +672,14 @@ async def test_review_package_update_returns_previous_published_version(governan
     detail = await client.get(f"/api/governance/review-packages/{package_id}")
 
     assert detail.status_code == 200
+    assert detail.json()["target_kb_id"] == "kb-1"
+    assert detail.json()["content_kb_id"] == "kb-parsed"
     assert detail.json()["items"][0]["review_type"] == "UPDATE"
     assert detail.json()["previous_version"] == {
         "version_id": "version-0",
         "revision": "0",
         "yuxi_file_id": "file-0",
+        "content_kb_id": "kb-previous",
         "chunk_count": 3,
         "token_count": 80,
         "published_at": None,

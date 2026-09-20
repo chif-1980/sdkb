@@ -43,6 +43,7 @@ from yuxi.storage.postgres.models_knowledge import (
     FeishuSourceChangeRequest,
     FeishuSourceItem,
     FeishuSourceSegment,
+    KnowledgeFile,
 )
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -381,6 +382,19 @@ class ReviewPackageService:
                 )
                 .limit(1)
             )
+        # A source can be retargeted after parsing. Resolve content from each
+        # version's file without changing the source's publication destination.
+        content_file_ids = {
+            version.yuxi_file_id
+            for version in (source_version, previous_version)
+            if version and version.yuxi_file_id
+        }
+        content_kbs = {}
+        if content_file_ids:
+            content_rows = await self.session.execute(
+                select(KnowledgeFile.file_id, KnowledgeFile.kb_id).where(KnowledgeFile.file_id.in_(content_file_ids))
+            )
+            content_kbs = dict(content_rows.all())
         material_by_version = {}
         material_by_item = {}
         if source_version and source_item:
@@ -460,6 +474,7 @@ class ReviewPackageService:
             "source_version_id": package.source_version_id,
             "source_url": package.source_url_snapshot,
             "target_kb_id": source.target_kb_id if source else None,
+            "content_kb_id": content_kbs.get(source_version.yuxi_file_id) if source_version else None,
             "item_type": source_item.item_type if source_item else None,
             "revision": source_version.revision if source_version else None,
             "yuxi_file_id": source_version.yuxi_file_id if source_version else None,
@@ -474,6 +489,7 @@ class ReviewPackageService:
                 "version_id": previous_version.version_id,
                 "revision": previous_version.revision,
                 "yuxi_file_id": previous_version.yuxi_file_id,
+                "content_kb_id": content_kbs.get(previous_version.yuxi_file_id),
                 "chunk_count": previous_version.chunk_count or 0,
                 "token_count": previous_version.token_count or 0,
                 "published_at": _iso(previous_version.published_at),

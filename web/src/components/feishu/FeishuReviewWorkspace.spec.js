@@ -55,6 +55,7 @@ function packageDetail(packageId = 'package-first') {
     source_item_id: target ? 'item-target' : 'item-first',
     source_url: `https://quickdone.feishu.cn/wiki/${packageId}`,
     target_kb_id: 'kb-1',
+    content_kb_id: 'kb-1',
     item_type: target ? 'pdf' : 'page',
     revision: target ? '2' : '1',
     yuxi_file_id: target ? 'file-target' : 'file-first',
@@ -86,6 +87,7 @@ function packageDetail(packageId = 'package-first') {
           version_id: 'version-target-old',
           revision: '1',
           yuxi_file_id: 'file-target-old',
+          content_kb_id: 'kb-1',
           chunk_count: 2,
           token_count: 80,
           published_at: '2026-08-20T08:00:00Z'
@@ -273,6 +275,7 @@ function unchangedUpdatePackageDetail({ mixed = false } = {}) {
     version_id: 'version-first-old',
     revision: 'updated:2026-08-24T03:29:45+00:00',
     yuxi_file_id: 'file-first-old',
+    content_kb_id: 'kb-1',
     chunk_count: 71,
     token_count: 1200,
     published_at: '2026-08-24T04:00:00Z'
@@ -484,6 +487,50 @@ describe('FeishuReviewWorkspace', () => {
     expect(apiAdminGet).toHaveBeenCalledWith(
       '/api/governance/review-packages?source_id=source-1&view=mine'
     )
+  })
+
+  it('知识源切换目标库后按新旧版本各自的正文库读取', async () => {
+    const defaultGet = apiAdminGet.getMockImplementation()
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/governance/review-packages/package-target') {
+        const detail = packageDetail('package-target')
+        detail.content_kb_id = 'kb-parsed'
+        detail.previous_version.content_kb_id = 'kb-older'
+        return Promise.resolve(detail)
+      }
+      if (url === '/api/knowledge/databases/kb-parsed/documents/file-target/content') {
+        return Promise.resolve({ content: '# 新版解析正文', lines: [] })
+      }
+      if (url === '/api/knowledge/databases/kb-older/documents/file-target-old/content') {
+        return Promise.resolve({ content: '# 旧版解析正文', lines: [] })
+      }
+      return defaultGet(url)
+    })
+    const wrapper = mountWorkspace({ targetReviewId: { packageId: 'package-target' } })
+    await flushPromises()
+
+    expect(apiAdminGet).toHaveBeenCalledWith('/api/knowledge/databases/kb-parsed/documents/file-target/content')
+    expect(apiAdminGet).toHaveBeenCalledWith('/api/knowledge/databases/kb-older/documents/file-target-old/content')
+    expect(apiAdminGet).not.toHaveBeenCalledWith('/api/knowledge/databases/kb-1/documents/file-target/content')
+    expect(wrapper.text()).toContain('新版解析正文')
+    expect(wrapper.text()).not.toContain('未读取到可审核正文')
+    wrapper.unmount()
+  })
+
+  it('正文记录缺失时显示检查提示而不向发布目标库查找', async () => {
+    const defaultGet = apiAdminGet.getMockImplementation()
+    apiAdminGet.mockImplementation((url) => {
+      if (url === '/api/governance/review-packages/package-first') {
+        return Promise.resolve({ ...packageDetail(), content_kb_id: null })
+      }
+      return defaultGet(url)
+    })
+    const wrapper = mountWorkspace()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('解析正文记录不存在')
+    expect(apiAdminGet).not.toHaveBeenCalledWith('/api/knowledge/databases/kb-1/documents/file-first/content')
+    wrapper.unmount()
   })
 
   it('按文档名称或拼音搜索审核包并支持清空', async () => {
