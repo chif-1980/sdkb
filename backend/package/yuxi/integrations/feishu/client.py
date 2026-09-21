@@ -372,6 +372,19 @@ class FeishuClient:
             file_name=self._download_filename(response.headers.get("content-disposition")),
         )
 
+    async def send_card_message(self, *, open_id: str, card: dict[str, Any], uuid: str) -> dict[str, Any]:
+        """The same UUID must be reused for retries within Feishu's one-hour window."""
+        response = await self._post_response(
+            "/open-apis/im/v1/messages",
+            params={"receive_id_type": "open_id"},
+            json_body={"receive_id": open_id, "msg_type": "interactive",
+                       "content": json.dumps(card, ensure_ascii=False), "uuid": uuid},
+        )
+        payload = response.json()
+        if payload.get("code") != 0 or not (payload.get("data") or {}).get("message_id"):
+            raise FeishuApiError("Feishu card delivery was not acknowledged", error=self._error_from_response(response))
+        return payload["data"]
+
     async def send_text_message(
         self,
         *,

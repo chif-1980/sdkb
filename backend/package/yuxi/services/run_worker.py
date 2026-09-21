@@ -7,6 +7,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from arq import cron
 
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
@@ -18,6 +19,7 @@ from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.product_chat.progress import ProgressAccumulator, progress_stage_from_chunk
 from yuxi.product_chat.meeting_service import process_meeting_run
+from yuxi.product_chat.meeting_notifications import deliver_meeting_notifications
 from yuxi.services.run_queue_service import (
     append_run_stream_event,
     clear_cancel_signal,
@@ -673,6 +675,7 @@ async def _worker_shutdown(ctx):
 
 
 class WorkerSettings:
+    cron_jobs = [cron(deliver_meeting_notifications, second={0, 30}, run_at_startup=True)]
     functions = [process_agent_run, process_meeting_run]
     max_tries = 2
     retry_jobs = True

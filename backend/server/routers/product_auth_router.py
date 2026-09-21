@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_db, get_product_user
 from yuxi.product_chat.auth_service import (
+    CLIENT_STATE_COOKIE,
     COOKIE_NAME,
     SESSION_TTL_SECONDS,
     STATE_TTL_SECONDS,
@@ -21,6 +22,7 @@ from yuxi.product_chat.auth_service import (
     ProductAuthService,
 )
 from yuxi.product_chat.schemas import (
+    FeishuClientLoginRequest,
     FeishuQrLoginConfigResponse,
     ProductUserResponse,
     SessionResponse,
@@ -124,7 +126,50 @@ async def feishu_callback(
                 return RedirectResponse(url=f"{context['origin']}/auth/feishu/callback#{error_query}", status_code=303)
         return RedirectResponse(url=f"/login?{error_query}", status_code=303)
 
-    response = RedirectResponse(url="/chat", status_code=303)
+    response = RedirectResponse(url=getattr(service, "return_path", "/chat"), status_code=303)
+    _set_session_cookie(response, session_token)
+    return response
+
+
+@product_auth.get("/auth/feishu/client-config")
+async def feishu_client_config(
+    response: Response,
+    return_path: str = "/chat",
+    service: ProductAuthService = Depends(get_product_auth_service),
+) -> dict:
+    try:
+        config = await service.create_client_config(return_path)
+    except ProductAuthError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code}) from exc
+    response.headers["Cache-Control"] = "no-store"
+    response.set_cookie(
+        CLIENT_STATE_COOKIE, config["state"], max_age=STATE_TTL_SECONDS,
+        httponly=True, secure=_is_production(), samesite="strict", path="/api/auth/feishu",
+    )
+    return config
+
+
+@product_auth.post("/auth/feishu/client-login")
+async def feishu_client_login(
+    payload: FeishuClientLoginRequest,
+    request: Request,
+    response: Response,
+    service: ProductAuthService = Depends(get_product_auth_service),
+) -> dict:
+    try:
+        _, token = await service.complete_client_login(
+            payload.code, payload.state, request.cookies.get(CLIENT_STATE_COOKIE)
+        )
+    except ProductAuthError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code}) from exc
+    response.headers["Cache-Control"] = "no-store"
+    response.delete_cookie(CLIENT_STATE_COOKIE, path="/api/auth/feishu", secure=_is_production(),
+                           httponly=True, samesite="strict")
+    _set_session_cookie(response, token)
+    return {"returnPath": service.return_path}
+
+
+def _set_session_cookie(response: Response, session_token: str) -> None:
     response.set_cookie(
         key=COOKIE_NAME,
         value=session_token,
@@ -134,7 +179,6 @@ async def feishu_callback(
         samesite="lax",
         path="/",
     )
-    return response
 
 
 @product_auth.post("/auth/logout", status_code=204)

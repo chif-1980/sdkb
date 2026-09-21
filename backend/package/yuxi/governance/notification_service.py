@@ -154,6 +154,7 @@ class NotificationService:
                 select(FeishuNotificationDelivery)
                 .where(
                     FeishuNotificationDelivery.channel == "FEISHU",
+                    FeishuNotificationDelivery.object_type != "ASSISTANT_MEETING",
                     FeishuNotificationDelivery.status == "FAILED",
                     FeishuNotificationDelivery.retry_count < len(NOTIFICATION_RETRY_DELAYS),
                     or_(
@@ -187,6 +188,7 @@ class NotificationService:
                 select(FeishuNotificationDelivery)
                 .where(
                     FeishuNotificationDelivery.status == "SUPPRESSED",
+                    FeishuNotificationDelivery.object_type != "ASSISTANT_MEETING",
                     FeishuNotificationDelivery.channel.in_(enabled_channels),
                 )
                 .order_by(FeishuNotificationDelivery.created_at)

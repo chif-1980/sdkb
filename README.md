@@ -4,7 +4,7 @@
   <p><strong>企业知识治理与可信知识助手平台</strong></p>
   <p>让企业资料从接入、加工、审核到发布形成可追溯闭环，并以可核对的引用支撑每一次回答。</p>
 
-  [![Version](https://img.shields.io/badge/version-0.6.3-0f766e)](https://github.com/chif-1980/sdkb/tree/0.6.3)
+  [![Version](https://img.shields.io/badge/version-0.6.4-0f766e)](https://github.com/chif-1980/sdkb/tree/0.6.4)
   [![License](https://img.shields.io/badge/license-MIT-475569)](LICENSE)
   [![Docs](https://img.shields.io/badge/docs-在线文档-2563eb)](https://chif-1980.github.io/sdkb/)
 
@@ -80,7 +80,9 @@
 
 ## 当前版本
 
-**0.6.3（2026-09-20）**，配套 [企业知识助手 0.6.5](https://github.com/chif-1980/sdAssit/tree/0.6.5)。两端补丁版本独立管理。
+**0.6.4（2026-09-21）**，配套 [企业知识助手 0.6.6](https://github.com/chif-1980/sdAssit/tree/0.6.6)。两端补丁版本独立管理。
+
+- **首期飞书工作台嵌入**：保存桌面端和移动端助手入口，客户端内使用飞书授权登录；通知投递由后台任务重试并以会议直达链接打开结果。通知开关默认关闭，真实收件人验收通过后再启用。
 
 - **本次修复**：知识审核按文档实际所在知识库读取正文，修复知识源切换目标库后正文加载失败，同时支持新旧版本分别读取各自正文。
 

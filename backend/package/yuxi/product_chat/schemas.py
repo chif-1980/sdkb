@@ -88,6 +88,11 @@ class SessionResponse(ProductResponse):
     user: ProductUserResponse
 
 
+class FeishuClientLoginRequest(StrictRequest):
+    code: str = Field(min_length=1, max_length=2048)
+    state: str = Field(min_length=20, max_length=128)
+
+
 class FeishuQrLoginConfigResponse(ProductResponse):
     goto: str
     expires_in: int

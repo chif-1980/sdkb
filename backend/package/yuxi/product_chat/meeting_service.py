@@ -633,6 +633,9 @@ async def _analyze(record_id):
                 "status": "COMPLETED",
                 "updatedAt": utc_isoformat(),
             }
+            from yuxi.product_chat.meeting_notifications import queue_completion
+
+            await queue_completion(db, stored)
         await append_run_stream_event(record_id, "completed", {"runId": record_id})
         return {"phase": "save_result"}
 

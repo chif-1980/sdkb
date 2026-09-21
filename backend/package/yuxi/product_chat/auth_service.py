@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 from sqlalchemy import delete, select
@@ -29,6 +30,7 @@ from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
 
 COOKIE_NAME = "enterprise_assistant_session"
+CLIENT_STATE_COOKIE = "enterprise_assistant_client_state"
 STATE_TTL_SECONDS = 300
 SESSION_TTL_SECONDS = 8 * 60 * 60
 
@@ -74,6 +76,23 @@ class ProductAuthService:
         self._app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
         self._redirect_uri = os.environ.get("FEISHU_PRODUCT_REDIRECT_URI", "").strip()
         self.manager_context = None
+        self.return_path = _DEFAULT_RETURN_PATH
+
+    async def create_client_config(self, return_path: str = _DEFAULT_RETURN_PATH) -> dict:
+        self._require_configuration(include_secret=True)
+        state = await self._create_state(return_path, flow="client")
+        return {"appId": self._app_id, "state": state, "expiresIn": STATE_TTL_SECONDS}
+
+    async def complete_client_login(self, code: str, state: str, cookie_state: str | None) -> tuple[User, str]:
+        if not cookie_state or not secrets.compare_digest(state, cookie_state):
+            raise ProductAuthError("FEISHU_OAUTH_STATE_INVALID", 401)
+        payload = await self._consume_state(state)
+        if payload.get("flow") != "client" or payload.get("manager"):
+            raise ProductAuthError("FEISHU_OAUTH_STATE_INVALID", 401)
+        self.return_path = payload["return_path"]
+        self._require_configuration(include_secret=True)
+        profile = await self._fetch_profile(code, client_login=True)
+        return await self._issue_session(profile)
 
     async def create_login_url(self, return_path: str = _DEFAULT_RETURN_PATH) -> str:
         self._require_configuration(include_secret=False)
@@ -103,12 +122,18 @@ class ProductAuthService:
 
     async def complete_callback(self, code: str | None, state: str | None) -> tuple[User, str]:
         payload = await self._consume_state(state)
+        if payload.get("flow", "browser") != "browser":
+            raise ProductAuthError("FEISHU_OAUTH_STATE_INVALID", 401)
         self.manager_context = payload.get("manager")
+        self.return_path = payload["return_path"]
         self._require_configuration(include_secret=True)
         if not code:
             raise ProductAuthError("FEISHU_OAUTH_FAILED", 401)
 
         profile = await self._fetch_profile(code)
+        return await self._issue_session(profile)
+
+    async def _issue_session(self, profile: dict[str, Any]) -> tuple[User, str]:
         user = await self.resolve_bound_user(profile)
         token = AuthUtils.create_access_token(
             {"sub": str(user.id), "token_kind": "enterprise_assistant"},
@@ -409,7 +434,7 @@ class ProductAuthService:
             raise ProductAuthError("FEISHU_OAUTH_STATE_INVALID", 401)
         return payload
 
-    async def _create_state(self, return_path: str, *, manager: dict | None = None) -> str:
+    async def _create_state(self, return_path: str, *, manager: dict | None = None, flow: str = "browser") -> str:
         normalized_return_path = self._normalize_return_path(return_path)
 
         for _ in range(3):
@@ -419,6 +444,7 @@ class ProductAuthService:
                 {
                     "state_hash": state_hash,
                     "return_path": normalized_return_path,
+                    **({"flow": flow} if flow != "browser" else {}),
                     "expires_at": int(time.time()) + STATE_TTL_SECONDS,
                     **({"manager": manager} if manager else {}),
                 },
@@ -438,13 +464,15 @@ class ProductAuthService:
 
         raise ProductAuthError("AUTH_SERVICE_UNAVAILABLE", 503)
 
-    async def _fetch_profile(self, code: str) -> dict[str, Any]:
+    async def _fetch_profile(self, code: str, *, client_login: bool = False) -> dict[str, Any]:
         if self._http_client is not None:
-            return await self._fetch_profile_with_client(self._http_client, code)
+            return await self._fetch_profile_with_client(self._http_client, code, client_login=client_login)
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
-            return await self._fetch_profile_with_client(client, code)
+            return await self._fetch_profile_with_client(client, code, client_login=client_login)
 
-    async def _fetch_profile_with_client(self, client: httpx.AsyncClient, code: str) -> dict[str, Any]:
+    async def _fetch_profile_with_client(
+        self, client: httpx.AsyncClient, code: str, *, client_login: bool = False
+    ) -> dict[str, Any]:
         try:
             token_response = await client.post(
                 FEISHU_TOKEN_URL,
@@ -453,7 +481,7 @@ class ProductAuthService:
                     "client_id": self._app_id,
                     "client_secret": self._app_secret,
                     "code": code,
-                    "redirect_uri": self._redirect_uri,
+                    **({} if client_login else {"redirect_uri": self._redirect_uri}),
                 },
             )
             token_response.raise_for_status()
@@ -487,7 +515,22 @@ class ProductAuthService:
 
     @staticmethod
     def _normalize_return_path(return_path: str | None) -> str:
-        return _DEFAULT_RETURN_PATH if return_path != _DEFAULT_RETURN_PATH else return_path
+        if not return_path or not return_path.startswith("/chat"):
+            return _DEFAULT_RETURN_PATH
+        try:
+            url = urlsplit(return_path)
+            pairs = parse_qsl(url.query, max_num_fields=4)
+        except ValueError:
+            return _DEFAULT_RETURN_PATH
+        if url.scheme or url.netloc or url.path != "/chat" or url.fragment:
+            return _DEFAULT_RETURN_PATH
+        params = dict(pairs)
+        if len(params) != len(pairs) or any(
+            key not in {"conversationId", "meetingId"} or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", value)
+            for key, value in pairs
+        ):
+            return _DEFAULT_RETURN_PATH
+        return f"/chat?{urlencode(pairs)}" if pairs else _DEFAULT_RETURN_PATH
 
     @staticmethod
     def _hash_state(state: str) -> str:

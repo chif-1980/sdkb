@@ -521,3 +521,63 @@ async def test_callback_logs_exclude_code_access_token_and_cookie(db_session, ca
     assert "secret-oauth-code" not in caplog.text
     assert "user-access-token" not in caplog.text
     assert "enterprise_assistant_session" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "//evil.test/chat",
+        "/chat?next=https://evil.test",
+        "/chat?meetingId=a&meetingId=b",
+        "/chat#evil",
+        "/chat?meetingId=%2Fbad",
+    ],
+)
+async def test_deep_link_rejects_external_or_ambiguous_destination(db_session, path):
+    service = _service(db_session, FakeRedis())
+    state = _state_from_url(await service.create_login_url(path))
+    await service.complete_callback("code", state)
+    assert service.return_path == "/chat"
+
+
+async def test_browser_login_preserves_meeting_destination(db_session):
+    service = _service(db_session, FakeRedis())
+    path = "/chat?conversationId=CONV-1&meetingId=MT-1"
+    state = _state_from_url(await service.create_qr_login_url(path))
+    await service.complete_callback("code", state)
+    assert service.return_path == path
+
+
+async def test_client_login_binds_browser_consumes_state_and_reuses_account(db_session):
+    user = await _add_user(db_session)
+    redis = FakeRedis()
+    def handler(request):
+        if request.url.path.endswith("/oauth/token"):
+            body = json.loads(request.content)
+            assert "redirect_uri" not in body
+            assert body["code"] == "client-code"
+            return httpx.Response(200, json={"code": 0, "access_token": "token"})
+        return httpx.Response(200, json={"code": 0, "data": _profile()})
+    service = ProductAuthService(db=db_session, redis_client=redis,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), directory_client=FakeDirectoryClient())
+    config = await service.create_client_config("/chat?conversationId=C1&meetingId=M1")
+    state = config["state"]
+    with pytest.raises(ProductAuthError, match="FEISHU_OAUTH_STATE_INVALID"):
+        await service.complete_client_login("client-code", state, "wrong-browser")
+    actual, token = await service.complete_client_login("client-code", state, state)
+    assert actual.id == user.id
+    assert actual.role == "user"
+    assert AuthUtils.decode_token(token)["token_kind"] == "enterprise_assistant"
+    assert service.return_path == "/chat?conversationId=C1&meetingId=M1"
+    with pytest.raises(ProductAuthError, match="FEISHU_OAUTH_STATE_INVALID"):
+        await service.complete_client_login("client-code", state, state)
+
+
+async def test_client_and_browser_states_cannot_be_interchanged(db_session):
+    service = _service(db_session, FakeRedis())
+    config = await service.create_client_config()
+    with pytest.raises(ProductAuthError, match="FEISHU_OAUTH_STATE_INVALID"):
+        await service.complete_callback("code", config["state"])
+    state = _state_from_url(await service.create_login_url())
+    with pytest.raises(ProductAuthError, match="FEISHU_OAUTH_STATE_INVALID"):
+        await service.complete_client_login("code", state, state)
