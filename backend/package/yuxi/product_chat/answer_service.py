@@ -397,6 +397,7 @@ class AnswerService:
                 model_spec = system_chat_model_spec()
                 model = self._model_selector(model_spec)
                 evidence = ()
+                phase_started = perf_counter()
                 async for investigation_event in self._investigate_evidence(
                     question,
                     user,
@@ -408,6 +409,7 @@ class AnswerService:
                         yield investigation_event
                     else:
                         evidence = investigation_event.citations
+                retrieval_ms = round((perf_counter() - phase_started) * 1000)
             else:
                 retrieval_query = self._build_retrieval_query(question, history)
                 yield AnswerProgress("RETRIEVING", "正在检索已审核发布的资料")
