@@ -1457,3 +1457,39 @@ async def test_edit_details_does_not_reopen_a_task_completed_in_feishu():
     assert "completed_at" not in calls[0]["task"]
     assert "completed_at" not in calls[0]["update_fields"]
     assert calls[0]["task"]["due"] == {"timestamp": "1798656000000", "is_all_day": True}
+
+
+@pytest.mark.asyncio
+async def test_card_transport_preserves_retry_uuid_and_destination():
+    card = {"elements": [{"tag": "a", "href": "https://assit.quickdone.cn/chat?conversationId=c&meetingId=m"}]}
+    calls = []
+
+    def handler(request):
+        assert request.url.path == "/open-apis/im/v1/messages"
+        assert request.url.params["receive_id_type"] == "open_id"
+        body = json.loads(request.content)
+        calls.append(body)
+        assert body["receive_id"] == "ou_employee"
+        assert body["msg_type"] == "interactive"
+        assert json.loads(body["content"]) == card
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_card"}})
+
+    client = _client(handler)
+    try:
+        for _ in range(2):
+            assert await client.send_card_message(open_id="ou_employee", card=card, uuid="stable-retry-id") == {
+                "message_id": "om_card",
+            }
+        assert [body["uuid"] for body in calls] == ["stable-retry-id", "stable-retry-id"]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_card_transport_rejects_unacknowledged_delivery():
+    client = _client(lambda request: httpx.Response(200, json={"code": 0, "data": {}}))
+    try:
+        with pytest.raises(FeishuApiError, match="not acknowledged"):
+            await client.send_card_message(open_id="ou_employee", card={}, uuid="stable-retry-id")
+    finally:
+        await client.aclose()

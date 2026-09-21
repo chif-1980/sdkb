@@ -348,3 +348,54 @@ async def test_callback_redirects_stably_when_redis_is_unavailable(api_context, 
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login?error=AUTH_SERVICE_UNAVAILABLE"
+
+
+async def test_client_login_binds_cookie_and_preserves_meeting_destination(api_context, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    client, service, user, _, _ = api_context
+    monkeypatch.setenv("YUXI_ENV", "production")
+    client.base_url = "https://test"
+    service.return_path = "/chat?conversationId=conv-1&meetingId=meeting-1"
+    service.create_client_config = AsyncMock(return_value={
+        "appId": "test-app-id", "state": "client-challenge-0123456789", "expiresIn": 300,
+    })
+    service.complete_client_login = AsyncMock(return_value=(user, "product-session"))
+    response = await client.get("/api/auth/feishu/client-config", params={"return_path": service.return_path})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    cookie = response.headers["set-cookie"]
+    assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=strict" in cookie
+    assert "Path=/api/auth/feishu" in cookie
+    service.create_client_config.assert_awaited_once_with(service.return_path)
+
+    response = await client.post(
+        "/api/auth/feishu/client-login",
+        json={"code": "client-code", "state": "client-challenge-0123456789"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"returnPath": service.return_path}
+    assert response.headers["cache-control"] == "no-store"
+    service.complete_client_login.assert_awaited_once_with(
+        "client-code", "client-challenge-0123456789", "client-challenge-0123456789",
+    )
+    cookies = response.headers.get_list("set-cookie")
+    assert any("Max-Age=0" in cookie and "Path=/api/auth/feishu" in cookie for cookie in cookies)
+    assert any("enterprise_assistant_session=product-session" in cookie and "Secure" in cookie for cookie in cookies)
+
+
+async def test_client_login_failure_does_not_issue_session(api_context):
+    from unittest.mock import AsyncMock
+
+    client, service, _, _, _ = api_context
+    service.complete_client_login = AsyncMock(side_effect=ProductAuthError(
+        code="FEISHU_OAUTH_STATE_INVALID", status_code=401, message="private provider details",
+    ))
+    response = await client.post(
+        "/api/auth/feishu/client-login",
+        json={"code": "client-code", "state": "client-challenge-0123456789"},
+    )
+    assert response.status_code == 401
+    assert response.json() == {"detail": {"code": "FEISHU_OAUTH_STATE_INVALID"}}
+    assert "set-cookie" not in response.headers
+    service.complete_client_login.assert_awaited_once_with("client-code", "client-challenge-0123456789", None)
