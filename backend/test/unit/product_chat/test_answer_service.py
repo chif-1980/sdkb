@@ -17,6 +17,7 @@ from yuxi.product_chat.answer_service import (
     AnswerProgress,
     AnswerService,
     GroundedAnswer,
+    GroundedCitation,
 )
 from yuxi.product_chat.source_policy_service import ProductKnowledgeScope
 
@@ -187,6 +188,33 @@ def _service(
         agent_factory=agent_factory,
     )
     return service, policy, knowledge, repository, model, selector
+
+
+def test_concise_prompt_limits_evidence_excerpt_without_changing_citation_data():
+    citation = GroundedCitation(
+        evidence_id="E1",
+        source_id="source-1",
+        item_id="item-1",
+        version_id="version-1",
+        yuxi_file_id="file-1",
+        title="产品手册",
+        source_url="https://quickdone.feishu.cn/wiki/item-1",
+        path_text="产品 / 手册",
+        locator="第1段",
+        excerpt="x" * 4000,
+        source_version_at=PUBLISHED_AT,
+    )
+
+    concise = AnswerService._build_prompt("问题", (citation,))[1]["content"]
+    detailed = AnswerService._build_prompt(
+        "问题",
+        (citation,),
+        system_prompt=DETAILED_SYSTEM_PROMPT,
+    )[1]["content"]
+
+    assert '"excerpt": "' + ("x" * 2000) in concise
+    assert '"excerpt": "' + ("x" * 4000) in detailed
+    assert len(citation.excerpt) == 4000
 
 
 @pytest.mark.asyncio
@@ -508,7 +536,9 @@ async def test_detailed_mode_uses_controlled_multi_step_tools_and_streams_the_gr
     assert knowledge.query_calls[0][2]["allowed_file_ids"] == ["file-1", "file-2"]
     assert knowledge.open_calls == [("kb-1", "file-1", 0, 80)]
     assert repository.calls[0] == ("source-1", ("file-1", "file-stale"))
-    assert len(policy.calls) >= 6
+    # Scope and department permissions are resolved once per request and then
+    # reused by the bounded investigation tools.
+    assert len(policy.calls) == 1
     assert model.calls[0][0][0] == {"role": "system", "content": DETAILED_SYSTEM_PROMPT}
     assert "未发布内容" not in model.calls[0][0][1]["content"]
 

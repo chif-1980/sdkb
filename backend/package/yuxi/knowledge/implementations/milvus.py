@@ -315,6 +315,10 @@ class MilvusKB(KnowledgeBase):
 
         # 存储集合映射 {kb_id: Collection}
         self.collections: dict[str, Any] = {}
+        # Reuse embedding model clients across queries. The model cache is
+        # process-local and refreshed separately; a new model instance is only
+        # created when a knowledge base references a new embedding spec.
+        self._embedding_models: dict[str, Any] = {}
 
         # 初始化连接
         self._init_connection()
@@ -478,7 +482,10 @@ class MilvusKB(KnowledgeBase):
         """获取 embedding 编码函数。sync=True 返回同步版本，否则返回异步版本。"""
         from yuxi.models.embed import select_embedding_model
 
-        model = select_embedding_model(embedding_model_spec)
+        model = self._embedding_models.get(embedding_model_spec)
+        if model is None:
+            model = select_embedding_model(embedding_model_spec)
+            self._embedding_models[embedding_model_spec] = model
         batch_size = int(getattr(model, "batch_size", 40) or 40)
         method = model.batch_encode if sync else model.abatch_encode
         return partial(method, batch_size=batch_size)
@@ -964,6 +971,11 @@ class MilvusKB(KnowledgeBase):
             raise ValueError(f"Database {kb_id} not found")
 
         try:
+            query_started_at = time.perf_counter()
+            embedding_ms: float | None = None
+            search_ms: float | None = None
+            hydrate_ms: float | None = None
+            rerank_ms: float | None = None
             # 查询参数（从 merged_kwargs 读取）
             logger.debug(f"Query params: {merged_kwargs}")
             final_top_k = int(merged_kwargs.get("final_top_k", 10))
@@ -994,10 +1006,13 @@ class MilvusKB(KnowledgeBase):
             if search_mode == "vector":
                 embedding_model_spec = self.databases_meta[kb_id].get("embedding_model_spec")
                 embedding_function = self._get_embedding_function(embedding_model_spec, sync=True)
+                phase_started_at = time.perf_counter()
                 query_embedding = await _run_milvus_query_io(embedding_function, [query_text])
+                embedding_ms = round((time.perf_counter() - phase_started_at) * 1000)
 
                 search_params = {"metric_type": metric_type, "params": {"nprobe": 10}}
 
+                phase_started_at = time.perf_counter()
                 results = await _run_milvus_query_io(
                     collection.search,
                     data=query_embedding,
@@ -1007,6 +1022,7 @@ class MilvusKB(KnowledgeBase):
                     expr=file_expr,
                     output_fields=output_fields,
                 )
+                search_ms = round((time.perf_counter() - phase_started_at) * 1000)
 
                 if results and len(results) > 0 and len(results[0]) > 0:
                     for hit in results[0]:
@@ -1049,7 +1065,9 @@ class MilvusKB(KnowledgeBase):
             else:
                 embedding_model_spec = self.databases_meta[kb_id].get("embedding_model_spec")
                 embedding_function = self._get_embedding_function(embedding_model_spec, sync=True)
+                phase_started_at = time.perf_counter()
                 query_embedding = await _run_milvus_query_io(embedding_function, [query_text])
+                embedding_ms = round((time.perf_counter() - phase_started_at) * 1000)
                 bm25_top_k = int(merged_kwargs.get("bm25_top_k", recall_top_k))
                 bm25_top_k = max(bm25_top_k, 1)
                 bm25_drop_ratio_search = float(merged_kwargs.get("bm25_drop_ratio_search", 0.0))
@@ -1073,6 +1091,7 @@ class MilvusKB(KnowledgeBase):
                     limit=bm25_top_k,
                     expr=file_expr,
                 )
+                phase_started_at = time.perf_counter()
                 results = await _run_milvus_query_io(
                     collection.hybrid_search,
                     reqs=[vector_request, bm25_request],
@@ -1080,6 +1099,7 @@ class MilvusKB(KnowledgeBase):
                     limit=recall_top_k,
                     output_fields=output_fields,
                 )
+                search_ms = round((time.perf_counter() - phase_started_at) * 1000)
                 if results and len(results) > 0 and len(results[0]) > 0:
                     for hit in results[0]:
                         score = float(hit.distance or 0.0)
@@ -1100,9 +1120,23 @@ class MilvusKB(KnowledgeBase):
             if not retrieved_chunks:
                 return []
 
+            phase_started_at = time.perf_counter()
             await self._hydrate_chunk_sources(kb_id, retrieved_chunks)
+            hydrate_ms = round((time.perf_counter() - phase_started_at) * 1000)
 
             if not use_reranker:
+                logger.info(
+                    "milvus_query kb_id={} mode={} result_count={} embedding_ms={} search_ms={} "
+                    "hydrate_ms={} rerank_ms={} duration_ms={}",
+                    kb_id,
+                    search_mode,
+                    len(retrieved_chunks[:final_top_k]),
+                    embedding_ms,
+                    search_ms,
+                    hydrate_ms,
+                    rerank_ms,
+                    round((time.perf_counter() - query_started_at) * 1000),
+                )
                 return retrieved_chunks[:final_top_k]
 
             # 使用重排序模型
@@ -1118,7 +1152,7 @@ class MilvusKB(KnowledgeBase):
 
                 reranker = get_reranker(reranker_model)
                 try:
-                    rerank_start = time.time()
+                    rerank_start = time.perf_counter()
                     documents_text = [chunk["content"] for chunk in retrieved_chunks]
                     rerank_scores = await reranker.acompute_score([query_text, documents_text], normalize=True)
 
@@ -1128,7 +1162,8 @@ class MilvusKB(KnowledgeBase):
                     retrieved_chunks.sort(
                         key=lambda item: item.get("rerank_score", item.get("score", 0.0)), reverse=True
                     )
-                    elapsed = time.time() - rerank_start
+                    rerank_ms = round((time.perf_counter() - rerank_start) * 1000)
+                    elapsed = rerank_ms / 1000
                     logger.info(f"Reranking completed for {kb_id} in {elapsed:.3f}s with model {reranker_model}")
                 finally:
                     await reranker.aclose()
@@ -1137,6 +1172,18 @@ class MilvusKB(KnowledgeBase):
                 logger.error(f"Reranking failed: {exc}, falling back to vector scores")
 
             # 统一返回结果
+            logger.info(
+                "milvus_query kb_id={} mode={} result_count={} embedding_ms={} search_ms={} "
+                "hydrate_ms={} rerank_ms={} duration_ms={}",
+                kb_id,
+                search_mode,
+                len(retrieved_chunks[:final_top_k]),
+                embedding_ms,
+                search_ms,
+                hydrate_ms,
+                rerank_ms,
+                round((time.perf_counter() - query_started_at) * 1000),
+            )
             return retrieved_chunks[:final_top_k]
 
         except Exception as e:

@@ -35,6 +35,8 @@ RECALL_TOP_K = 40
 MAX_EVIDENCE = 16
 MAX_EXPANDED_FILES = 2
 MAX_EVIDENCE_EXCERPT_CHARS = 4_000
+CONCISE_PROMPT_EXCERPT_CHARS = 2_000
+CONCISE_PROMPT_MAX_EVIDENCE = 10
 DETAILED_MAX_TOOL_CALLS = 6
 DETAILED_RECURSION_LIMIT = 16
 DETAILED_TOOL_RESULT_LIMIT = 8
@@ -371,11 +373,24 @@ class AnswerService:
     ) -> AsyncIterator[AnswerProgress | AnswerDelta | GroundedAnswer]:
         started_at = perf_counter()
         evidence_count = 0
+        scope_ms: float | None = None
+        history_ms: float | None = None
+        retrieval_ms: float | None = None
+        revalidate_ms: float | None = None
+        expand_ms: float | None = None
+        model_first_token_ms: float | None = None
+        model_total_ms: float | None = None
+        model_attempts = 0
+        model_started_at: float | None = None
         try:
             understanding_message = "正在分析问题并规划查证路径" if mode == "DETAILED" else "正在结合当前对话理解问题"
             yield AnswerProgress("UNDERSTANDING", understanding_message)
+            phase_started = perf_counter()
             scope = await self._resolve_scope(user)
+            scope_ms = round((perf_counter() - phase_started) * 1000)
+            phase_started = perf_counter()
             history = await self._load_history(conversation_id, user) if include_history else ()
+            history_ms = round((perf_counter() - phase_started) * 1000)
             model = None
 
             if mode == "DETAILED":
@@ -387,6 +402,7 @@ class AnswerService:
                     user,
                     history,
                     model,
+                    scope,
                 ):
                     if isinstance(investigation_event, AnswerProgress):
                         yield investigation_event
@@ -395,6 +411,7 @@ class AnswerService:
             else:
                 retrieval_query = self._build_retrieval_query(question, history)
                 yield AnswerProgress("RETRIEVING", "正在检索已审核发布的资料")
+                phase_started = perf_counter()
                 chunks = await self._knowledge_base.aquery(
                     retrieval_query,
                     scope.kb_id,
@@ -404,10 +421,15 @@ class AnswerService:
                     final_top_k=FINAL_TOP_K,
                     recall_top_k=RECALL_TOP_K,
                 )
+                retrieval_ms = round((perf_counter() - phase_started) * 1000)
+                phase_started = perf_counter()
                 evidence = await self._revalidate_evidence(scope.source_id, chunks)
+                revalidate_ms = round((perf_counter() - phase_started) * 1000)
                 if evidence:
                     yield AnswerProgress("VERIFYING", "正在核对原文与适用条件")
+                    phase_started = perf_counter()
                     evidence = await self._expand_adjacent_evidence(scope.kb_id, evidence)
+                    expand_ms = round((perf_counter() - phase_started) * 1000)
 
             evidence_count = len(evidence)
             if not evidence:
@@ -420,8 +442,13 @@ class AnswerService:
                     model = self._model_selector(model_spec)
                 yield AnswerProgress("COMPOSING", "正在整理结论和可核验来源")
                 system_prompt = DETAILED_SYSTEM_PROMPT if mode == "DETAILED" else SYSTEM_PROMPT
-                messages = self._build_prompt(question, evidence, history, system_prompt=system_prompt)
+                prompt_evidence = evidence if mode == "DETAILED" else evidence[:CONCISE_PROMPT_MAX_EVIDENCE]
+                messages = self._build_prompt(question, prompt_evidence, history, system_prompt=system_prompt)
                 for attempt in range(2):
+                    model_attempts = attempt + 1
+                    attempt_started_at = perf_counter()
+                    if model_started_at is None:
+                        model_started_at = attempt_started_at
                     try:
                         raw_parts: list[str] = []
                         delta_parser = _JsonAnswerDeltaParser(evidence)
@@ -430,12 +457,16 @@ class AnswerService:
                             content = getattr(response, "content", None)
                             if not isinstance(content, str) or not content:
                                 continue
+                            if model_first_token_ms is None:
+                                model_first_token_ms = round((perf_counter() - attempt_started_at) * 1000)
                             raw_parts.append(content)
                             for delta in delta_parser.feed(content):
                                 yield AnswerDelta(delta)
                         result = self._parse_model_response("".join(raw_parts), evidence, model.model_name)
+                        model_total_ms = round((perf_counter() - model_started_at) * 1000)
                         break
                     except Exception as exc:
+                        model_total_ms = round((perf_counter() - model_started_at) * 1000)
                         reason = exc.reason if isinstance(exc, AnswerGenerationError) else "MODEL_REQUEST_FAILED"
                         logger.warning(
                             "product_answer_attempt_failed conversation_id={} model={} attempt={} "
@@ -461,13 +492,23 @@ class AnswerService:
                     result = replace(result, prompt_version=DETAILED_PROMPT_VERSION)
             logger.info(
                 "product_answer conversation_id={} mode={} status={} evidence_count={} "
-                "citation_count={} duration_ms={} outcome_reason={}",
+                "citation_count={} duration_ms={} scope_ms={} history_ms={} retrieval_ms={} "
+                "revalidate_ms={} expand_ms={} model_first_token_ms={} model_total_ms={} "
+                "model_attempts={} outcome_reason={}",
                 conversation_id,
                 mode,
                 result.status,
                 evidence_count,
                 len(result.citations),
                 round((perf_counter() - started_at) * 1000),
+                scope_ms,
+                history_ms,
+                retrieval_ms,
+                revalidate_ms,
+                expand_ms,
+                model_first_token_ms,
+                model_total_ms,
+                model_attempts,
                 ("NO_EVIDENCE" if not evidence else
                  "MODEL_INSUFFICIENT" if result.status == "INSUFFICIENT" else "VALIDATED"),
             )
@@ -541,6 +582,7 @@ class AnswerService:
         user: Any,
         history: tuple[tuple[str, str], ...],
         model: Any,
+        scope: Any,
     ) -> AsyncIterator[AnswerProgress | _InvestigationEvidence]:
         from langchain.agents import create_agent
         from langchain_core.tools import tool
@@ -576,7 +618,7 @@ class AnswerService:
             normalized_query = str(query or "").strip()[:500]
             if not normalized_query:
                 return json.dumps({"error": "检索词不能为空"}, ensure_ascii=False)
-            current_scope = await self._resolve_scope(user)
+            current_scope = scope
             try:
                 chunks = await self._knowledge_base.aquery(
                     normalized_query,
@@ -601,7 +643,7 @@ class AnswerService:
             if not begin_tool_call():
                 return json.dumps({"notice": "已达到知识查证次数上限，请根据现有证据结束调查"}, ensure_ascii=False)
             normalized_file_id = str(file_id or "").strip()
-            current_scope = await self._resolve_scope(user)
+            current_scope = scope
             material = await self._get_current_material(current_scope, normalized_file_id)
             if material is None:
                 return json.dumps({"error": "资料不可访问或不是当前有效正式版本"}, ensure_ascii=False)
@@ -651,7 +693,7 @@ class AnswerService:
             normalized_patterns = [str(item).strip()[:120] for item in (patterns or []) if str(item).strip()][:5]
             if not normalized_patterns:
                 return json.dumps({"error": "文档内定位词不能为空"}, ensure_ascii=False)
-            current_scope = await self._resolve_scope(user)
+            current_scope = scope
             material = await self._get_current_material(current_scope, normalized_file_id)
             if material is None:
                 return json.dumps({"error": "资料不可访问或不是当前有效正式版本"}, ensure_ascii=False)
@@ -744,11 +786,10 @@ class AnswerService:
 
         if not collected and tool_failures:
             raise RuntimeError("Detailed knowledge investigation failed")
-        evidence = await self._revalidate_collected_evidence(user, tuple(collected))
+        evidence = await self._revalidate_collected_evidence(user, tuple(collected), scope=scope)
         if evidence:
-            final_scope = await self._resolve_scope(user)
-            evidence = await self._expand_adjacent_evidence(final_scope.kb_id, evidence)
-            evidence = await self._revalidate_collected_evidence(user, evidence)
+            evidence = await self._expand_adjacent_evidence(scope.kb_id, evidence)
+            evidence = await self._revalidate_collected_evidence(user, evidence, scope=scope)
         yield _InvestigationEvidence(evidence)
 
     @staticmethod
@@ -825,8 +866,10 @@ class AnswerService:
         self,
         user: Any,
         evidence: tuple[GroundedCitation, ...],
+        *,
+        scope: Any | None = None,
     ) -> tuple[GroundedCitation, ...]:
-        scope = await self._resolve_scope(user)
+        scope = scope or await self._resolve_scope(user)
         allowed_file_ids = set(scope.allowed_file_ids)
         current = await self._get_published_map(
             scope.source_id,
@@ -1186,7 +1229,11 @@ class AnswerService:
                 "evidence_id": citation.evidence_id,
                 "title": citation.title,
                 "locator": citation.locator,
-                "excerpt": citation.excerpt,
+                "excerpt": citation.excerpt[:(
+                    MAX_EVIDENCE_EXCERPT_CHARS
+                    if system_prompt == DETAILED_SYSTEM_PROMPT
+                    else CONCISE_PROMPT_EXCERPT_CHARS
+                )],
                 "source_version_at": (
                     citation.source_version_at.isoformat() if citation.source_version_at is not None else None
                 ),

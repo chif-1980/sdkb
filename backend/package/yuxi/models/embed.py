@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 import time
 from abc import ABC, abstractmethod
 
@@ -116,6 +117,14 @@ class OtherEmbedding(BaseEmbeddingModel):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        # Keep one async client per embedding model instance so repeated query
+        # embeddings reuse DNS/TCP/TLS connections instead of opening a new
+        # pool for every request.
+        self._async_client: httpx.AsyncClient | None = None
+        # Synchronous query embeddings run in the Milvus worker pool. Keep one
+        # requests session per worker thread so connection reuse is safe while
+        # avoiding cross-thread mutation of a Session instance.
+        self._sync_clients = threading.local()
 
     def build_payload(self, message: list[str] | str) -> dict:
         return {"model": self.model, "input": message}
@@ -177,10 +186,14 @@ class OtherEmbedding(BaseEmbeddingModel):
 
     def encode(self, message: list[str] | str) -> list[list[float]]:
         payload = self.build_payload(message)
+        client = getattr(self._sync_clients, "session", None)
+        if client is None:
+            client = requests.Session()
+            self._sync_clients.session = client
         retry_index = 0
         while True:
             try:
-                response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=60)
+                response = client.post(self.base_url, json=payload, headers=self.headers, timeout=60)
                 response.raise_for_status()
                 return self._extract_embeddings(response.json())
             except requests.RequestException as e:
@@ -200,32 +213,44 @@ class OtherEmbedding(BaseEmbeddingModel):
 
     async def aencode(self, message: list[str] | str) -> list[list[float]]:
         payload = self.build_payload(message)
-        async with httpx.AsyncClient() as client:
-            retry_index = 0
-            while True:
-                try:
-                    response = await client.post(self.base_url, json=payload, headers=self.headers, timeout=60)
-                    response.raise_for_status()
-                    return self._extract_embeddings(response.json())
-                except httpx.HTTPStatusError as e:
-                    retry = self._prepare_retry(
-                        message,
-                        retry_index=retry_index,
-                        response=e.response,
-                        error=e,
-                    )
-                    if retry:
-                        retry_index, delay = retry
-                        await asyncio.sleep(delay)
-                        continue
-                    raise
-                except httpx.RequestError as e:
-                    retry = self._prepare_retry(message, retry_index=retry_index, error=e)
-                    if retry:
-                        retry_index, delay = retry
-                        await asyncio.sleep(delay)
-                        continue
-                    raise ValueError(f"Embedding async request failed: {e}, {payload}, {self.base_url=}")
+        if self._async_client is None or getattr(self._async_client, "is_closed", False):
+            self._async_client = httpx.AsyncClient()
+
+        retry_index = 0
+        while True:
+            try:
+                response = await self._async_client.post(
+                    self.base_url,
+                    json=payload,
+                    headers=self.headers,
+                    timeout=60,
+                )
+                response.raise_for_status()
+                return self._extract_embeddings(response.json())
+            except httpx.HTTPStatusError as e:
+                retry = self._prepare_retry(
+                    message,
+                    retry_index=retry_index,
+                    response=e.response,
+                    error=e,
+                )
+                if retry:
+                    retry_index, delay = retry
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except httpx.RequestError as e:
+                retry = self._prepare_retry(message, retry_index=retry_index, error=e)
+                if retry:
+                    retry_index, delay = retry
+                    await asyncio.sleep(delay)
+                    continue
+                raise ValueError(f"Embedding async request failed: {e}, {payload}, {self.base_url=}")
+
+    async def aclose(self) -> None:
+        if self._async_client is not None and not getattr(self._async_client, "is_closed", False):
+            await self._async_client.aclose()
+            self._async_client = None
 
 
 def get_embedding_model_info_by_id(model_id: str) -> dict:

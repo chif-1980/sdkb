@@ -7,6 +7,7 @@ import io
 import json
 import re
 from collections.abc import AsyncIterator
+from time import perf_counter
 from traceback import format_tb
 from urllib.parse import quote
 from uuid import uuid4
@@ -1758,6 +1759,7 @@ async def stream_message(
             if answer is None:
                 raise RuntimeError("Answer orchestration completed without a result")
 
+            persist_started_at = perf_counter()
             async with pg_manager.get_async_session_context() as write_db:
                 repository = ProductChatRepository(write_db)
                 user_message, assistant_message, assistant_citations = await repository.append_exchange(
@@ -1783,6 +1785,13 @@ async def stream_message(
                     user_message=_message_response(user_message, []),
                     assistant_message=_message_response(assistant_message, assistant_citations, assistant_materials),
                 )
+            logger.info(
+                "product_answer_persist conversation_id={} persist_ms={} citation_count={} request_id={}",
+                conversation_id,
+                round((perf_counter() - persist_started_at) * 1000),
+                len(assistant_citations),
+                request.request_id or "",
+            )
             yield _sse_event("complete", response.model_dump(mode="json", by_alias=True))
         except ProductChatNotFoundError:
             yield _sse_event(

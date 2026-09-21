@@ -302,7 +302,7 @@ def test_embedding_sync_400_logs_warning(monkeypatch):
         calls.append(1)
         return response
 
-    monkeypatch.setattr("yuxi.models.embed.requests.post", fake_post)
+    monkeypatch.setattr("yuxi.models.embed.requests.Session", lambda: SimpleNamespace(post=fake_post))
 
     with pytest.raises(ValueError, match="400 Client Error"):
         model.encode(["hello", "test"])
@@ -330,7 +330,10 @@ def test_embedding_sync_429_retries_ten_times_before_success(monkeypatch):
     success = _requests_embedding_response(200, b'{"data":[{"embedding":[0.1,0.2]}]}')
     responses = [_requests_embedding_response(429) for _ in range(10)] + [success]
 
-    monkeypatch.setattr("yuxi.models.embed.requests.post", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        "yuxi.models.embed.requests.Session",
+        lambda: SimpleNamespace(post=lambda *_args, **_kwargs: responses.pop(0)),
+    )
 
     assert model.encode(["hello"]) == [[0.1, 0.2]]
     assert len(sleeps) == 10
@@ -356,7 +359,7 @@ def test_embedding_sync_5xx_uses_short_retry_budget(monkeypatch):
         calls.append(1)
         return _requests_embedding_response(503)
 
-    monkeypatch.setattr("yuxi.models.embed.requests.post", fake_post)
+    monkeypatch.setattr("yuxi.models.embed.requests.Session", lambda: SimpleNamespace(post=fake_post))
 
     with pytest.raises(ValueError, match="503 Server Error"):
         model.encode(["hello"])
@@ -365,6 +368,28 @@ def test_embedding_sync_5xx_uses_short_retry_budget(monkeypatch):
     assert sleeps == [1.0, 2.0]
     assert len(warnings) == 2
     assert "retry=2/2" in warnings[-1]
+
+
+def test_embedding_sync_reuses_session_per_worker_thread(monkeypatch):
+    sessions = []
+
+    class FakeSession:
+        def post(self, *_args, **_kwargs):
+            return _requests_embedding_response(200, b'{"data":[{"embedding":[0.1,0.2]}]}')
+
+    monkeypatch.setattr(
+        "yuxi.models.embed.requests.Session",
+        lambda: sessions.append(FakeSession()) or sessions[-1],
+    )
+    model = OtherEmbedding(
+        model="namespace/embedding-model",
+        base_url="https://example.com/v1/embeddings",
+        api_key="test-key",
+    )
+
+    assert model.encode(["hello"]) == [[0.1, 0.2]]
+    assert model.encode(["again"]) == [[0.1, 0.2]]
+    assert len(sessions) == 1
 
 
 @pytest.mark.asyncio
@@ -436,6 +461,34 @@ async def test_embedding_async_429_retries_ten_times_before_success(monkeypatch)
     assert len(warnings) == 10
     assert "status=429" in warnings[-1]
     assert "retry=10/10" in warnings[-1]
+
+
+@pytest.mark.asyncio
+async def test_embedding_async_reuses_http_client(monkeypatch):
+    clients = []
+
+    class FakeAsyncClient:
+        is_closed = False
+
+        async def post(self, url, **_kwargs):
+            request = httpx.Request("POST", url)
+            return httpx.Response(200, request=request, json={"data": [{"embedding": [0.1, 0.2]}]})
+
+    def make_client():
+        client = FakeAsyncClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("yuxi.models.embed.httpx.AsyncClient", make_client)
+    model = OtherEmbedding(
+        model="namespace/embedding-model",
+        base_url="https://example.com/v1/embeddings",
+        api_key="test-key",
+    )
+
+    assert await model.aencode(["hello"]) == [[0.1, 0.2]]
+    assert await model.aencode(["again"]) == [[0.1, 0.2]]
+    assert len(clients) == 1
 
 
 def test_get_reranker_loads_model_from_cache(monkeypatch):
