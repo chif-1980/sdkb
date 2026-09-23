@@ -12,10 +12,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import Integer, String, cast, distinct, func, select, text
+from sqlalchemy import Integer, String, cast, distinct, func, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_db, get_superadmin_user
+from server.utils.auth_middleware import get_admin_user, get_db, get_superadmin_user
+from yuxi.services.role_permission_service import feedback_scope
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.storage.minio.client import normalize_public_minio_url
@@ -490,6 +491,7 @@ async def get_agent_analytics(
     """获取智能体分析（超级管理员权限）"""
     try:
         from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback, ToolCall
+        from yuxi.storage.postgres.models_product import ProductMessage
 
         # 获取所有智能体
         agents_result = await db.execute(
@@ -499,8 +501,28 @@ async def get_agent_analytics(
         )
         agents = agents_result.all()
 
-        total_agents = len(agents)
-        agent_conversation_counts = [{"agent_id": agent_id, "conversation_count": count} for agent_id, count in agents]
+        conversation_counts_by_agent = {agent_id: count for agent_id, count in agents}
+
+        # Product assistant conversations carry a skill id instead of the
+        # legacy conversation agent id. Expose them in the same dashboard
+        # shape so their usage and feedback are visible to administrators.
+        product_agent_expression = func.coalesce(ProductMessage.skill_id, literal("enterprise-assistant"))
+        product_agents_result = await db.execute(
+            select(product_agent_expression.label("agent_id"), func.count(distinct(ProductMessage.conversation_id)))
+            .where(ProductMessage.role == "ASSISTANT")
+            .group_by(product_agent_expression)
+        )
+        product_agents = product_agents_result.all()
+        for product_agent_id, conversation_count in product_agents:
+            conversation_counts_by_agent[product_agent_id] = (
+                conversation_counts_by_agent.get(product_agent_id, 0) + conversation_count
+            )
+
+        total_agents = len(conversation_counts_by_agent)
+        agent_conversation_counts = [
+            {"agent_id": agent_id, "conversation_count": count}
+            for agent_id, count in conversation_counts_by_agent.items()
+        ]
 
         # 智能体满意度统计
         agent_satisfaction = []
@@ -527,6 +549,32 @@ async def get_agent_analytics(
                 {"agent_id": agent_id, "satisfaction_rate": satisfaction_rate, "total_feedbacks": total_feedbacks}
             )
 
+        for product_agent_id, _ in product_agents:
+            total_feedbacks_result = await db.execute(
+                select(func.count(ProductMessage.id)).where(
+                    ProductMessage.role == "ASSISTANT",
+                    ProductMessage.feedback_rating.is_not(None),
+                    product_agent_expression == product_agent_id,
+                )
+            )
+            total_feedbacks = total_feedbacks_result.scalar() or 0
+            positive_feedbacks_result = await db.execute(
+                select(func.count(ProductMessage.id)).where(
+                    ProductMessage.role == "ASSISTANT",
+                    ProductMessage.feedback_rating == "LIKE",
+                    product_agent_expression == product_agent_id,
+                )
+            )
+            positive_feedbacks = positive_feedbacks_result.scalar() or 0
+            satisfaction_rate = round((positive_feedbacks / total_feedbacks * 100), 2) if total_feedbacks else 100
+            agent_satisfaction.append(
+                {
+                    "agent_id": product_agent_id,
+                    "satisfaction_rate": satisfaction_rate,
+                    "total_feedbacks": total_feedbacks,
+                }
+            )
+
         # 智能体工具使用统计
         agent_tool_usage = []
         for agent_id, _ in agents:
@@ -540,9 +588,11 @@ async def get_agent_analytics(
 
             agent_tool_usage.append({"agent_id": agent_id, "tool_usage_count": tool_usage_count})
 
+        agent_tool_usage.extend({"agent_id": agent_id, "tool_usage_count": 0} for agent_id, _ in product_agents)
+
         # 表现最佳的智能体（按对话数排序）
         top_performing_agents = []
-        for i, (agent_id, conv_count) in enumerate(agents):
+        for agent_id, conv_count in conversation_counts_by_agent.items():
             # 获取满意度数据
             satisfaction_data = next(
                 (s for s in agent_satisfaction if s["agent_id"] == agent_id), {"satisfaction_rate": 0}
@@ -593,6 +643,7 @@ async def get_dashboard_stats(
 ):
     """获取基础统计（超级管理员权限）"""
     from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback
+    from yuxi.storage.postgres.models_product import ProductMessage
 
     try:
         # Basic counts
@@ -612,12 +663,28 @@ async def get_dashboard_stats(
 
         # Feedback statistics
         total_feedbacks_result = await db.execute(select(func.count(MessageFeedback.id)))
-        total_feedbacks = total_feedbacks_result.scalar() or 0
+        legacy_feedbacks = total_feedbacks_result.scalar() or 0
+
+        product_feedbacks_result = await db.execute(
+            select(func.count(ProductMessage.id)).where(
+                ProductMessage.role == "ASSISTANT",
+                ProductMessage.feedback_rating.is_not(None),
+            )
+        )
+        product_feedbacks = product_feedbacks_result.scalar() or 0
+        total_feedbacks = legacy_feedbacks + product_feedbacks
 
         like_count_result = await db.execute(
             select(func.count(MessageFeedback.id)).filter(MessageFeedback.rating == "like")
         )
-        like_count = like_count_result.scalar() or 0
+        legacy_like_count = like_count_result.scalar() or 0
+        product_like_count_result = await db.execute(
+            select(func.count(ProductMessage.id)).where(
+                ProductMessage.role == "ASSISTANT",
+                ProductMessage.feedback_rating == "LIKE",
+            )
+        )
+        like_count = legacy_like_count + (product_like_count_result.scalar() or 0)
 
         # Calculate satisfaction rate
         satisfaction_rate = round((like_count / total_feedbacks * 100), 2) if total_feedbacks > 0 else 100
@@ -646,7 +713,10 @@ async def get_dashboard_stats(
 class FeedbackListItem(BaseModel):
     """反馈列表项"""
 
-    id: int
+    # Legacy feedbacks use an integer id, while product messages use a ULID.
+    # Product ids are prefixed so the two stores remain collision-free.
+    id: int | str
+    message_id: str | int
     uid: str
     username: str | None
     avatar: str | None
@@ -663,13 +733,18 @@ async def get_all_feedbacks(
     rating: str | None = None,
     agent_id: str | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
-    """获取所有反馈记录（超级管理员权限）"""
+    """按角色配置及部门范围获取反馈记录。"""
     from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback, User
+    from yuxi.storage.postgres.models_product import ProductConversation, ProductMessage
+
+    scope = await feedback_scope(db, current_user)
+    if scope == "none" or (scope == "department" and not current_user.department_id):
+        raise HTTPException(status_code=403, detail="当前角色没有用户反馈查看权限")
 
     try:
-        query = (
+        legacy_query = (
             select(MessageFeedback, Message, Conversation, User)
             .join(Message, MessageFeedback.message_id == Message.id)
             .join(Conversation, Message.conversation_id == Conversation.id)
@@ -678,21 +753,34 @@ async def get_all_feedbacks(
 
         # Apply filters
         if rating and rating in ["like", "dislike"]:
-            query = query.filter(MessageFeedback.rating == rating)
+            legacy_query = legacy_query.filter(MessageFeedback.rating == rating)
         if agent_id:
-            query = query.filter(Conversation.agent_id == agent_id)
+            legacy_query = legacy_query.filter(Conversation.agent_id == agent_id)
 
-        # Order by creation time (most recent first)
-        query = query.order_by(MessageFeedback.created_at.desc())
+        # The product assistant stores its current feedback directly on the
+        # assistant message. Keep this query separate from the legacy join so
+        # either schema can evolve without an unsafe cross-table join.
+        product_query = (
+            select(ProductMessage, ProductConversation, User)
+            .join(ProductConversation, ProductMessage.conversation_id == ProductConversation.conversation_id)
+            .outerjoin(User, ProductConversation.owner_user_id == User.id)
+            .filter(ProductMessage.role == "ASSISTANT", ProductMessage.feedback_rating.is_not(None))
+        )
+        if rating and rating in ["like", "dislike"]:
+            product_query = product_query.filter(ProductMessage.feedback_rating == rating.upper())
+        if agent_id:
+            product_query = product_query.filter(
+                func.coalesce(ProductMessage.skill_id, literal("enterprise-assistant")) == agent_id
+            )
 
-        results = await db.execute(query)
-        results = results.all()
+        if scope == "department":
+            legacy_query = legacy_query.where(User.department_id == current_user.department_id)
+            product_query = product_query.where(User.department_id == current_user.department_id)
 
-        # Debug logging (privacy-safe)
-        logger.info(f"Found {len(results)} feedback records")
-        # Removed sensitive user data from logs for privacy compliance
+        legacy_results = (await db.execute(legacy_query)).all()
+        product_results = (await db.execute(product_query)).all()
 
-        return [
+        feedback_items = [
             {
                 "id": feedback.id,
                 "message_id": feedback.message_id,
@@ -706,8 +794,47 @@ async def get_all_feedbacks(
                 "conversation_title": conversation.title,
                 "agent_id": conversation.agent_id,
             }
-            for feedback, message, conversation, user in results
+            for feedback, message, conversation, user in legacy_results
         ]
+
+        reason_labels = {
+            "CONTENT_ERROR": "内容错误",
+            "OUTDATED": "内容过时",
+            "MISSING_SOURCE": "资料缺失",
+            "CITATION_ERROR": "引用错误",
+            "OTHER": "其他",
+        }
+        for message, conversation, user in product_results:
+            reason = reason_labels.get(message.feedback_reason_type) if message.feedback_reason_type else None
+            if message.feedback_reason_text:
+                reason = (
+                    f"{reason}；补充说明：{message.feedback_reason_text}"
+                    if reason
+                    else message.feedback_reason_text
+                )
+            feedback_items.append(
+                {
+                    "id": f"product:{message.message_id}",
+                    "message_id": message.message_id,
+                    "uid": user.uid if user else str(conversation.owner_user_id),
+                    "username": user.username if user else None,
+                    "avatar": normalize_public_minio_url(user.avatar) if user else None,
+                    "rating": message.feedback_rating.lower(),
+                    "reason": reason,
+                    "created_at": message.created_at.isoformat(),
+                    "message_content": message.content,
+                    "conversation_title": conversation.title,
+                    "agent_id": message.skill_id or "enterprise-assistant",
+                }
+            )
+
+        feedback_items.sort(key=lambda item: item["created_at"], reverse=True)
+
+        # Debug logging (privacy-safe)
+        logger.info(f"Found {len(feedback_items)} feedback records")
+        # Removed sensitive user data from logs for privacy compliance
+
+        return feedback_items
     except Exception as e:
         logger.error(f"Error getting feedbacks: {e}")
         logger.error(traceback.format_exc())

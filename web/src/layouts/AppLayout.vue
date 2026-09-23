@@ -12,6 +12,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   MessageCirclePlus,
+  MessageSquareText,
   Workflow,
   Search
 } from 'lucide-vue-next'
@@ -191,6 +192,14 @@ const mainList = computed(() => {
     items.push({ name: '会议管理', path: '/meeting-management', icon: ClipboardList, activeIcon: ClipboardList })
   }
 
+  if (userStore.canViewFeedback) {
+    items.push({
+      name: '用户反馈',
+      path: '/feedbacks',
+      icon: MessageSquareText,
+      activeIcon: MessageSquareText
+    })
+  }
   if (userStore.isSuperAdmin) {
     items.push({
       name: '数据总览',

@@ -376,7 +376,13 @@ class KnowledgeLifecycleService:
             round_number=1,
             created_by=operator_id,
         )
-        self.session.add_all([package, review_item, change_request])
+        # These models have foreign keys but no ORM relationships to order
+        # inserts. Persist parents before children within the same transaction.
+        self.session.add(package)
+        await self.session.flush()
+        self.session.add(review_item)
+        await self.session.flush()
+        self.session.add(change_request)
         await self.session.flush()
         await NotificationService(self.session).notify_admins(
             object_type="SOURCE_CHANGE",

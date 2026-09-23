@@ -67,6 +67,18 @@ const router = createRouter({
       ]
     },
     {
+      path: '/feedbacks',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'UserFeedback',
+          component: () => import('../views/UserFeedbackView.vue'),
+          meta: { requiresAuth: true, requiresAdmin: true, requiresFeedback: true }
+        }
+      ]
+    },
+    {
       path: '/dashboard',
       name: 'dashboard',
       component: AppLayout,
@@ -192,6 +204,17 @@ router.beforeEach(async (to) => {
   const isLoggedIn = userStore.isLoggedIn
   const isAdmin = userStore.isAdmin
   const isSuperAdmin = userStore.isSuperAdmin
+
+  if (isLoggedIn && isAdmin) {
+    try {
+      await userStore.refreshPermissions()
+    } catch (error) {
+      console.error('获取角色权限失败:', error)
+    }
+  }
+  if (isLoggedIn && to.matched.some((record) => record.meta.requiresFeedback) && !userStore.canViewFeedback) {
+    return '/agent'
+  }
 
   // 如果路由需要认证但用户未登录
   if (requiresAuth && !isLoggedIn) {

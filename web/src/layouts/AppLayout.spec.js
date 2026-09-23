@@ -15,7 +15,7 @@ const taskerState = vi.hoisted(() => ({
   },
   store: null
 }))
-const userState = vi.hoisted(() => ({ isAdmin: false, isSuperAdmin: false }))
+const userState = vi.hoisted(() => ({ isAdmin: false, isSuperAdmin: false, canViewFeedback: false }))
 
 vi.mock('pinia', async (importOriginal) => {
   const actual = await importOriginal()
@@ -97,6 +97,7 @@ describe('AppLayout', () => {
   beforeEach(() => {
     userState.isAdmin = false
     userState.isSuperAdmin = false
+    userState.canViewFeedback = false
     taskerState.refs.sortedTasks.value = []
     taskerState.refs.activeCount.value = 0
     taskerState.refs.isDrawerOpen.value = false
@@ -116,6 +117,37 @@ describe('AppLayout', () => {
         dispatchEvent: vi.fn()
       }))
     })
+  })
+
+  it('超级管理员可从会议管理下方直接进入用户反馈', () => {
+    userState.isAdmin = true
+    userState.isSuperAdmin = true
+    userState.canViewFeedback = true
+    const wrapper = shallowMount(AppLayout)
+    const paths = wrapper.findAllComponents({ name: 'RouterLink' }).map((link) => link.props('to'))
+    expect(paths[paths.indexOf('/meeting-management') + 1]).toBe('/feedbacks')
+    wrapper.unmount()
+  })
+
+  it('普通管理员不显示全企业反馈入口', () => {
+    userState.isAdmin = true
+    const wrapper = shallowMount(AppLayout)
+    const paths = wrapper.findAllComponents({ name: 'RouterLink' }).map((link) => link.props('to'))
+    expect(paths).toContain('/meeting-management')
+    expect(paths).not.toContain('/feedbacks')
+    wrapper.unmount()
+  })
+
+  it('授权管理员可查看反馈，撤销后隐藏入口', () => {
+    userState.isAdmin = true
+    userState.canViewFeedback = true
+    const wrapper = shallowMount(AppLayout)
+    expect(wrapper.findAllComponents({ name: 'RouterLink' }).map((link) => link.props('to'))).toContain('/feedbacks')
+    wrapper.unmount()
+    userState.canViewFeedback = false
+    const revoked = shallowMount(AppLayout)
+    expect(revoked.findAllComponents({ name: 'RouterLink' }).map((link) => link.props('to'))).not.toContain('/feedbacks')
+    revoked.unmount()
   })
 
   it('在窄屏使用折叠导航且不强制根布局宽度', async () => {

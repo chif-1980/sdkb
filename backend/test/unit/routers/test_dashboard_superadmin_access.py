@@ -10,11 +10,15 @@ from server.routers.dashboard_router import (
     dashboard,
     get_all_conversations,
     get_conversation_detail,
+    get_all_feedbacks,
+    get_agent_analytics,
+    get_dashboard_stats,
     get_tool_call_stats,
     get_user_activity_stats,
 )
-from server.utils.auth_middleware import get_superadmin_user
+from server.utils.auth_middleware import get_admin_user, get_superadmin_user
 from yuxi.storage.postgres.models_business import Base, Conversation, Department, Message, ToolCall, User
+from yuxi.storage.postgres.models_product import AnswerStatus, ProductConversation, ProductMessage
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -117,6 +121,26 @@ async def dashboard_session():
             conversation_b,
         ]:
             await db.refresh(item)
+
+        product_conversation = ProductConversation(
+            owner_user_id=user_a.id,
+            title="企业助手对话",
+        )
+        db.add(product_conversation)
+        await db.flush()
+        db.add(
+            ProductMessage(
+                conversation_id=product_conversation.conversation_id,
+                role="ASSISTANT",
+                content="企业助手回答",
+                answer_status=AnswerStatus.SUPPORTED,
+                feedback_rating="DISLIKE",
+                feedback_reason_type="CONTENT_ERROR",
+                feedback_reason_text="需要补充依据",
+                created_at=now,
+            )
+        )
+        await db.commit()
         yield {"db": db, "superadmin": superadmin, "admin_a": admin_a}
     await engine.dispose()
 
@@ -127,7 +151,8 @@ async def test_dashboard_routes_require_superadmin_dependency():
     assert dashboard_routes
     for route in dashboard_routes:
         dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
-        assert get_superadmin_user in dependency_calls
+        expected = get_admin_user if route.path == '/dashboard/feedbacks' else get_superadmin_user
+        assert expected in dependency_calls
 
 
 async def test_dashboard_dependency_rejects_department_admin(dashboard_session):
@@ -167,3 +192,46 @@ async def test_tool_stats_superadmin_include_all_departments(dashboard_session):
     assert stats.total_calls == 2
     assert stats.successful_calls == 2
     assert {tool["tool_name"] for tool in stats.most_used_tools} == {"dept_a_tool", "dept_b_tool"}
+
+
+async def test_feedbacks_include_product_assistant_feedback(dashboard_session):
+    feedbacks = await get_all_feedbacks(
+        db=dashboard_session["db"],
+        current_user=dashboard_session["superadmin"],
+    )
+
+    product_feedbacks = [item for item in feedbacks if item["id"].startswith("product:")]
+    assert len(product_feedbacks) == 1
+    assert product_feedbacks[0]["rating"] == "dislike"
+    assert product_feedbacks[0]["reason"] == "内容错误；补充说明：需要补充依据"
+    assert product_feedbacks[0]["uid"] == "user_a"
+
+
+async def test_feedback_filters_include_product_assistant_feedback(dashboard_session):
+    feedbacks = await get_all_feedbacks(
+        rating="dislike",
+        agent_id="enterprise-assistant",
+        db=dashboard_session["db"],
+        current_user=dashboard_session["superadmin"],
+    )
+
+    assert len(feedbacks) == 1
+    assert feedbacks[0]["id"].startswith("product:")
+
+
+async def test_dashboard_feedback_stats_include_product_assistant_feedback(dashboard_session):
+    stats = await get_dashboard_stats(db=dashboard_session["db"], current_user=dashboard_session["superadmin"])
+
+    assert stats["feedback_stats"]["total_feedbacks"] == 1
+    assert stats["feedback_stats"]["satisfaction_rate"] == 0
+
+
+async def test_agent_stats_include_product_assistant_feedback(dashboard_session):
+    stats = await get_agent_analytics(db=dashboard_session["db"], current_user=dashboard_session["superadmin"])
+
+    assert stats.total_agents == 2
+    product_stats = next(
+        item for item in stats.agent_satisfaction_rates if item["agent_id"] == "enterprise-assistant"
+    )
+    assert product_stats["total_feedbacks"] == 1
+    assert product_stats["satisfaction_rate"] == 0

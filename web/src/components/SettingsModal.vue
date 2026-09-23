@@ -64,6 +64,10 @@
             <Users class="icon" :size="18" />
             <span>部门管理</span>
           </div>
+          <div v-if="userStore.isSuperAdmin" class="sider-item"
+            :class="{ activesec: activeTab === 'permissions' }" @click="activeTab = 'permissions'">
+            <ShieldCheck class="icon" :size="18" /><span>角色权限</span>
+          </div>
           <div
             class="sider-item"
             :class="{ activesec: activeTab === 'agentEnv' }"
@@ -159,6 +163,8 @@
         >
           部门管理
         </div>
+        <div v-if="userStore.isSuperAdmin" class="nav-item"
+          :class="{ active: activeTab === 'permissions' }" @click="activeTab = 'permissions'">角色权限</div>
       </div>
 
       <!-- 内容区域 -->
@@ -187,6 +193,7 @@
           <div v-show="activeTab === 'department'" v-if="userStore.isSuperAdmin">
             <DepartmentManagementComponent />
           </div>
+          <RolePermissionsComponent v-if="activeTab === 'permissions' && userStore.isSuperAdmin" />
         </div>
       </div>
     </div>
@@ -198,6 +205,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useUserStore } from '@/stores/user'
 import {
   CircleUser,
+  ShieldCheck,
   ExternalLink,
   Settings,
   Key,
@@ -213,6 +221,7 @@ import BasicSettingsSection from '@/components/BasicSettingsSection.vue'
 import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
 import UserManagementComponent from '@/components/UserManagementComponent.vue'
 import DepartmentManagementComponent from '@/components/DepartmentManagementComponent.vue'
+import RolePermissionsComponent from '@/components/RolePermissionsComponent.vue'
 
 const props = defineProps({
   visible: {
@@ -243,7 +252,7 @@ const availableTabs = computed(() => {
   const tabs = []
   if (userStore.isLoggedIn) tabs.push('account', 'apiKeys', 'agentEnv')
   if (userStore.isAdmin) tabs.push('base', 'user')
-  if (userStore.isSuperAdmin) tabs.push('department')
+  if (userStore.isSuperAdmin) tabs.push('department', 'permissions')
   return tabs
 })
 

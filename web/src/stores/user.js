@@ -13,11 +13,24 @@ export const useUserStore = defineStore('user', () => {
   const userRole = ref('')
   const departmentId = ref(null)
   const departmentName = ref('')
+  const feedbackScope = ref('none')
 
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)
   const isAdmin = computed(() => userRole.value === 'admin' || userRole.value === 'superadmin')
   const isSuperAdmin = computed(() => userRole.value === 'superadmin')
+  const canViewFeedback = computed(() => isAdmin.value && ['department', 'all'].includes(feedbackScope.value))
+
+  async function refreshPermissions() {
+    try {
+      const { rolePermissionApi } = await import('@/apis/role_permission_api')
+      const permissions = await rolePermissionApi.mine()
+      feedbackScope.value = permissions['feedback.view'] || 'none'
+    } catch (error) {
+      feedbackScope.value = 'none'
+      throw error
+    }
+  }
 
   // 动作
   async function login(credentials) {
@@ -70,6 +83,7 @@ export const useUserStore = defineStore('user', () => {
   }
 
   function logout() {
+    feedbackScope.value = 'none'
     // 清除状态
     token.value = ''
     userId.value = null
@@ -382,6 +396,9 @@ export const useUserStore = defineStore('user', () => {
     userRole,
     departmentId,
     departmentName,
+    feedbackScope,
+    canViewFeedback,
+    refreshPermissions,
 
     // 计算属性
     isLoggedIn,
