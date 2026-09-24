@@ -32,14 +32,14 @@ features:
     details: 助手整理纪要、核对依据并确认派发待办，知枢集中管理企业会议和知识建议，保留修订与处理记录。
 ---
 
-## 0.6.0 文档更新
+## 0.7.0 文档更新
 
-本版补充会议管理、待办修改与飞书同步、正式知识逐条比对、历史会议版本选择，以及飞书统一登录与授权复用。查看[版本变更记录](/develop-guides/changelog)。
+本版补充统一 RBAC、飞书部门角色继承、右侧嵌入企业知识助手、用户反馈菜单、会议待办闭环和审计说明；助手手册同步到 0.6.10，并更新架构图与界面示意。查看[版本变更记录](/develop-guides/changelog)。
 
 ## 在线访问
 
-- **善达企业知识助手**：[http://assit.quickdone.cn/](http://assit.quickdone.cn/)
-- **善达知枢（管理端）**：[http://manager.assit.quickdone.cn/](http://manager.assit.quickdone.cn/)
+- **善达企业知识助手**：[https://assit.quickdone.cn/](https://assit.quickdone.cn/)
+- **善达知枢（管理端）**：[https://manager.assit.quickdone.cn/](https://manager.assit.quickdone.cn/)
 
 <div class="home-path">
   <strong>推荐阅读顺序</strong>

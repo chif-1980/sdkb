@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 900" role="img" aria-labelledby="title desc">
+  <title id="title">善达知枢 0.7.0 系统架构</title>
+  <desc id="desc">管理端、企业知识助手、飞书身份、统一 RBAC、知识治理、会议同步和数据基础设施的关系。</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width=".6"/></pattern>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0 0L10 3.5L0 7Z" fill="#22d3ee"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0 0L10 3.5L0 7Z" fill="#34d399"/></marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0 0L10 3.5L0 7Z" fill="#a78bfa"/></marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0 0L10 3.5L0 7Z" fill="#fb923c"/></marker>
+  </defs>
+  <style>
+    text{font-family:"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif}.title{fill:#f8fafc;font-size:25px;font-weight:700}.subtitle{fill:#94a3b8;font-size:13px}.region{fill:none;stroke-width:1.2;stroke-dasharray:10 5}.region-label{font-size:13px;font-weight:600}.name{fill:#f8fafc;font-size:15px;font-weight:600;text-anchor:middle}.detail{fill:#cbd5e1;font-size:11px;text-anchor:middle}.edge-label{fill:#cbd5e1;font-size:10px;text-anchor:middle}.note{fill:#cbd5e1;font-size:11px}
+  </style>
+  <rect width="1480" height="900" fill="#0f172a"/><rect width="1480" height="900" fill="url(#grid)"/>
+  <text x="40" y="44" class="title">善达知枢 0.7.0 · 企业知识治理与可信问答架构</text>
+  <text x="40" y="68" class="subtitle">正式知识才进入回答；身份、权限、会议任务和操作记录贯穿全流程</text>
+
+  <rect x="30" y="94" width="270" height="555" rx="14" class="region" stroke="#22d3ee"/><text x="48" y="120" class="region-label" fill="#22d3ee">用户与外部入口</text>
+  <rect x="320" y="94" width="585" height="555" rx="14" class="region" stroke="#34d399"/><text x="338" y="120" class="region-label" fill="#34d399">产品与治理平面</text>
+  <rect x="925" y="94" width="525" height="555" rx="14" class="region" stroke="#a78bfa"/><text x="943" y="120" class="region-label" fill="#a78bfa">数据与检索平面</text>
+  <rect x="30" y="680" width="1420" height="175" rx="14" class="region" stroke="#fbbf24"/><text x="48" y="706" class="region-label" fill="#fbbf24">外部能力、异步任务与安全边界</text>
+
+  <path d="M255 173H345" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/><path d="M255 273H345" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+  <path d="M255 393H345" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/><path d="M255 513H345" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+  <path d="M600 173H650" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-green)"/><path d="M600 273H650" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <path d="M600 393H650" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-green)"/><path d="M600 513H650" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <path d="M885 173H955" fill="none" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrow-violet)"/><path d="M885 273H955" fill="none" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrow-violet)"/>
+  <path d="M885 393H955" fill="none" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrow-violet)"/><path d="M885 513H955" fill="none" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrow-violet)"/>
+
+  <g><rect x="58" y="143" width="198" height="62" rx="8" fill="#083344" stroke="#22d3ee"/><text x="157" y="169" class="name">管理端浏览器</text><text x="157" y="189" class="detail">知识加工 · 审核 · 会议管理</text></g>
+  <g><rect x="58" y="243" width="198" height="62" rx="8" fill="#083344" stroke="#22d3ee"/><text x="157" y="269" class="name">企业知识助手</text><text x="157" y="289" class="detail">提问 · 引用 · 技能 · 反馈</text></g>
+  <g><rect x="58" y="363" width="198" height="62" rx="8" fill="#1e293b" stroke="#94a3b8"/><text x="157" y="389" class="name">飞书企业知识源</text><text x="157" y="409" class="detail">Wiki · 文档 · 附件</text></g>
+  <g><rect x="58" y="483" width="198" height="62" rx="8" fill="#1e293b" stroke="#94a3b8"/><text x="157" y="509" class="name">飞书身份与通讯录</text><text x="157" y="529" class="detail">OAuth · 部门 · 成员</text></g>
+
+  <g><rect x="345" y="143" width="255" height="62" rx="8" fill="#064e3b" stroke="#34d399"/><text x="472" y="169" class="name">Vue 管理端</text><text x="472" y="189" class="detail">菜单 · 右侧助手 iframe · 0.7.0</text></g>
+  <g><rect x="345" y="243" width="255" height="62" rx="8" fill="#064e3b" stroke="#34d399"/><text x="472" y="269" class="name">FastAPI 认证与业务 API</text><text x="472" y="289" class="detail">会话 · 一次性交接码 · 最终鉴权</text></g>
+  <g><rect x="345" y="363" width="255" height="62" rx="8" fill="#064e3b" stroke="#34d399"/><text x="472" y="389" class="name">统一 RBAC</text><text x="472" y="409" class="detail">角色 · 主菜单 · 页面能力 · 数据范围</text></g>
+  <g><rect x="345" y="483" width="255" height="62" rx="8" fill="#064e3b" stroke="#34d399"/><text x="472" y="509" class="name">会议与知识治理</text><text x="472" y="529" class="detail">纪要 · 待办 · 审核 · 反馈 · 审计</text></g>
+
+  <g><rect x="955" y="143" width="220" height="62" rx="8" fill="#4c1d95" stroke="#a78bfa"/><text x="1065" y="169" class="name">PostgreSQL</text><text x="1065" y="189" class="detail">用户 · 角色 · 会议 · 审计</text></g>
+  <g><rect x="1200" y="143" width="220" height="62" rx="8" fill="#4c1d95" stroke="#a78bfa"/><text x="1310" y="169" class="name">Redis / ARQ</text><text x="1310" y="189" class="detail">队列 · 运行事件 · 重试</text></g>
+  <g><rect x="955" y="243" width="220" height="62" rx="8" fill="#4c1d95" stroke="#a78bfa"/><text x="1065" y="269" class="name">MinIO</text><text x="1065" y="289" class="detail">原文件 · 解析产物 · 预览</text></g>
+  <g><rect x="1200" y="243" width="220" height="62" rx="8" fill="#4c1d95" stroke="#a78bfa"/><text x="1310" y="269" class="name">Milvus</text><text x="1310" y="289" class="detail">正式知识向量索引</text></g>
+  <g><rect x="955" y="363" width="220" height="62" rx="8" fill="#4c1d95" stroke="#a78bfa"/><text x="1065" y="389" class="name">飞书任务与消息</text><text x="1065" y="409" class="detail">确认 · 通知 · 完成状态回读</text></g>
+  <g><rect x="1200" y="363" width="220" height="62" rx="8" fill="#4c1d95" stroke="#a78bfa"/><text x="1310" y="389" class="name">Neo4j（可选）</text><text x="1310" y="409" class="detail">知识图谱关系</text></g>
+  <g><rect x="955" y="483" width="465" height="62" rx="8" fill="#4c1d95" stroke="#a78bfa"/><text x="1187" y="509" class="name">正式知识检索边界</text><text x="1187" y="529" class="detail">仅使用已发布、有效且当前账号有权访问的内容</text></g>
+
+  <path d="M157 545V730H365" fill="none" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arrow-orange)"/><path d="M472 545V730" fill="none" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arrow-orange)"/><path d="M790 545V730" fill="none" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arrow-orange)"/>
+  <text x="260" y="714" class="edge-label">OAuth / 只读同步</text><text x="472" y="714" class="edge-label">后台任务</text><text x="790" y="714" class="edge-label">HTTPS / CSP / 审计</text>
+  <g><rect x="70" y="745" width="270" height="66" rx="8" fill="#78350f" stroke="#fbbf24"/><text x="205" y="773" class="name">飞书开放平台</text><text x="205" y="793" class="detail">登录 · 知识授权 · 部门同步</text></g>
+  <g><rect x="365" y="745" width="270" height="66" rx="8" fill="#78350f" stroke="#fbbf24"/><text x="500" y="773" class="name">Docker Compose</text><text x="500" y="793" class="detail">API · Worker · Nginx · 数据卷</text></g>
+  <g><rect x="660" y="745" width="270" height="66" rx="8" fill="#78350f" stroke="#fbbf24"/><text x="795" y="773" class="name">一次性登录交接</text><text x="795" y="793" class="detail">60 秒有效 · 不在 URL 传管理令牌</text></g>
+  <g><rect x="955" y="745" width="465" height="66" rx="8" fill="#78350f" stroke="#fbbf24"/><text x="1187" y="773" class="name">安全边界</text><text x="1187" y="793" class="detail">后端最终鉴权 · iframe frame-ancestors · 私有对象受控代理</text></g>
+  <text x="40" y="884" class="note">版本口径：知枢管理端 0.7.0；企业知识助手 0.6.10。图中数据为架构关系，不代表单个环境必须启用全部组件。</text>
+</svg>
