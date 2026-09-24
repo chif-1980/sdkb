@@ -145,14 +145,13 @@ async def dashboard_session():
     await engine.dispose()
 
 
-async def test_dashboard_routes_require_superadmin_dependency():
+async def test_dashboard_routes_require_rbac_admin_dependency():
     dashboard_routes = [route for route in dashboard.routes if isinstance(route, APIRoute)]
 
     assert dashboard_routes
     for route in dashboard_routes:
         dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
-        expected = get_admin_user if route.path == '/dashboard/feedbacks' else get_superadmin_user
-        assert expected in dependency_calls
+        assert get_admin_user in dependency_calls
 
 
 async def test_dashboard_dependency_rejects_department_admin(dashboard_session):
@@ -230,8 +229,6 @@ async def test_agent_stats_include_product_assistant_feedback(dashboard_session)
     stats = await get_agent_analytics(db=dashboard_session["db"], current_user=dashboard_session["superadmin"])
 
     assert stats.total_agents == 2
-    product_stats = next(
-        item for item in stats.agent_satisfaction_rates if item["agent_id"] == "enterprise-assistant"
-    )
+    product_stats = next(item for item in stats.agent_satisfaction_rates if item["agent_id"] == "enterprise-assistant")
     assert product_stats["total_feedbacks"] == 1
     assert product_stats["satisfaction_rate"] == 0

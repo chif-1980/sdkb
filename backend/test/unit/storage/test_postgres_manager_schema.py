@@ -13,6 +13,9 @@ class _RecordingConnection:
     async def execute(self, statement):
         self.statements.append(str(statement))
 
+    async def run_sync(self, callback):
+        self.statements.append("BusinessBase.metadata.create_all")
+
 
 class _RecordingBegin:
     def __init__(self, connection: _RecordingConnection):
@@ -147,6 +150,28 @@ async def test_ensure_business_schema_creates_user_config_table():
 
     assert "CREATE TABLE IF NOT EXISTS user_config" in statements
     assert "enable_memory BOOLEAN NOT NULL DEFAULT FALSE" in statements
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_seeds_builtin_rbac_roles_with_created_at():
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+
+    assert "BusinessBase.metadata.create_all" in statements
+    assert "is_builtin, created_at) VALUES" in statements
+    assert statements.count("CURRENT_TIMESTAMP") == 3
 
 
 @pytest.mark.asyncio

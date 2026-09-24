@@ -13,21 +13,28 @@ export const useUserStore = defineStore('user', () => {
   const userRole = ref('')
   const departmentId = ref(null)
   const departmentName = ref('')
-  const feedbackScope = ref('none')
+  const permissions = ref({})
 
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)
-  const isAdmin = computed(() => userRole.value === 'admin' || userRole.value === 'superadmin')
+  const isAdmin = computed(() => userRole.value === 'admin' || userRole.value === 'superadmin' || hasPermission('admin.manage'))
   const isSuperAdmin = computed(() => userRole.value === 'superadmin')
-  const canViewFeedback = computed(() => isAdmin.value && ['department', 'all'].includes(feedbackScope.value))
+  const feedbackScope = computed(() => permissions.value['feedback.view'] || 'none')
+  const canViewFeedback = computed(() => feedbackScope.value !== 'none')
+
+  function hasPermission(permission, minimumScope = 'self') {
+    if (isSuperAdmin.value) return true
+    const rank = { none: 0, self: 1, department: 2, all: 3 }
+    return (rank[permissions.value[permission]] || 0) >= (rank[minimumScope] || 1)
+  }
 
   async function refreshPermissions() {
     try {
       const { rolePermissionApi } = await import('@/apis/role_permission_api')
-      const permissions = await rolePermissionApi.mine()
-      feedbackScope.value = permissions['feedback.view'] || 'none'
+      const granted = await rolePermissionApi.mine()
+      permissions.value = granted
     } catch (error) {
-      feedbackScope.value = 'none'
+      permissions.value = {}
       throw error
     }
   }
@@ -83,7 +90,7 @@ export const useUserStore = defineStore('user', () => {
   }
 
   function logout() {
-    feedbackScope.value = 'none'
+    permissions.value = {}
     // 清除状态
     token.value = ''
     userId.value = null
@@ -398,6 +405,8 @@ export const useUserStore = defineStore('user', () => {
     departmentName,
     feedbackScope,
     canViewFeedback,
+    permissions,
+    hasPermission,
     refreshPermissions,
 
     // 计算属性
@@ -423,9 +432,9 @@ export const useUserStore = defineStore('user', () => {
 })
 
 // 检查当前用户是否有管理员权限
-export const checkAdminPermission = () => {
+export const checkAdminPermission = (permission = 'admin.manage', minimumScope = 'all') => {
   const userStore = useUserStore()
-  if (!userStore.isAdmin) {
+  if (!userStore.hasPermission(permission, minimumScope)) {
     throw new Error('需要管理员权限')
   }
   return true

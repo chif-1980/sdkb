@@ -154,6 +154,7 @@ TLS 配置会监听 443，并把 80 端口的所有请求永久跳转到同主�
 | 配置 | 用途 |
 | --- | --- |
 | `FEISHU_PRODUCT_REDIRECT_URI` | 两端发起飞书登录时使用的共享后端回调，例如 `https://assit.quickdone.cn/api/auth/feishu/callback` |
+| `ENTERPRISE_ASSISTANT_URL` | 管理端“企业知识助手”菜单的目标 origin；为空时从 `FEISHU_PRODUCT_REDIRECT_URI` 自动推导，例如 `https://assit.quickdone.cn` |
 | `FEISHU_MANAGER_ORIGINS` | 允许登录后返回的知枢地址，多个地址用逗号分隔；仅填写协议、域名和端口，不带路径，例如 `https://manager.assit.quickdone.cn` |
 | `FEISHU_KNOWLEDGE_REDIRECT_URI` | 知识访问授权的浏览器回调 |
 | `FEISHU_KNOWLEDGE_QR_REDIRECT_URI` | 知识访问授权的手机扫码回调，须能从手机访问 |
@@ -162,6 +163,10 @@ TLS 配置会监听 443，并把 80 端口的所有请求永久跳转到同主�
 飞书开放平台需登记实际使用的 OAuth 回调地址。知枢登录结束后返回 `/auth/feishu/callback` 页面，管理域名应能访问该前端路由及同源 API。该前端页面与飞书开放平台登记的后端回调用途不同。
 
 **身份与权限：** 首次飞书登录只创建普通用户，不自动授予管理角色。系统管理员先授权管理角色，用户再使用同一飞书身份登录知枢；可在“飞书账号与授权”查看绑定和角色。知识源会尝试复用同一身份已有的知识授权，并核验企业和目标资料访问权；登录成功不能代替知识访问授权。
+
+管理端的“企业知识助手”菜单通过一次性、60 秒有效的登录交接码进入助手，不会把管理端令牌放进地址栏。交接成功后助手端写入独立的 HttpOnly 会话 Cookie；交接失败或过期时回到助手登录页。助手端仍会重新校验账号状态和部门归属。
+
+管理端会在左侧菜单保持可见的右侧内容区内嵌助手页面。生产环境的助手站点必须允许 `https://manager.assit.quickdone.cn` 作为 CSP `frame-ancestors`，并移除会阻止跨域嵌入的 `X-Frame-Options: DENY`。仓库中的 `docker/nginx/nginx.conf` 用于管理端，已在 `frame-src` 中放行 `https://assit.quickdone.cn`，同时保留管理端自身禁止被嵌入的策略。使用其他域名时需同步更新目标地址及对应的 CSP 白名单。
 
 **升级核对：**
 

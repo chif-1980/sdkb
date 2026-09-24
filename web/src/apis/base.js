@@ -154,8 +154,23 @@ export function apiGet(url, options = {}, requiresAuth = true, responseType = 'j
   return apiRequest(url, { method: 'GET', ...options }, requiresAuth, responseType)
 }
 
+const adminPermissionForRequest = (url, method) => {
+  const path = new URL(url, window.location.origin).pathname.replace(/^\/api/, '')
+  const prefixes = [
+    ['/auth/users', 'users'], ['/departments', 'users'], ['/workspace', 'workspace'],
+    ['/agent', 'agents'], ['/knowledge', 'knowledge'],
+    ['/feishu-knowledge', 'feishu_knowledge'], ['/governance', 'governance'],
+    ['/meeting-management', 'meetings'], ['/evaluation', 'evaluation'], ['/graph', 'graph'],
+    ['/tasks', 'tasks'], ['/system/model-providers', 'models'], ['/system/skills', 'extensions'],
+    ['/system/tools', 'extensions'], ['/system/mcp-servers', 'extensions'],
+    ['/dashboard/feedbacks', 'feedback'], ['/dashboard', 'dashboard']
+  ]
+  const module = prefixes.find(([prefix]) => path.startsWith(prefix))?.[1] || 'admin'
+  return `${module}.${method === 'GET' ? 'view' : 'manage'}`
+}
+
 export function apiAdminGet(url, options = {}, responseType = 'json') {
-  checkAdminPermission()
+  checkAdminPermission(adminPermissionForRequest(url, 'GET'), url.includes('/dashboard/feedbacks') ? 'self' : 'all')
   return apiGet(url, options, true, responseType)
 }
 
@@ -187,7 +202,7 @@ export function apiPost(url, data = {}, options = {}, requiresAuth = true, respo
 }
 
 export function apiAdminPost(url, data = {}, options = {}, responseType = 'json') {
-  checkAdminPermission()
+  checkAdminPermission(adminPermissionForRequest(url, 'POST'))
   return apiPost(url, data, options, true, responseType)
 }
 
@@ -210,7 +225,7 @@ export function apiPatch(url, data = {}, options = {}, requiresAuth = true, resp
 }
 
 export function apiAdminPatch(url, data = {}, options = {}, responseType = 'json') {
-  checkAdminPermission()
+  checkAdminPermission(adminPermissionForRequest(url, 'PATCH'))
   return apiPatch(url, data, options, true, responseType)
 }
 
@@ -237,7 +252,7 @@ export function apiPut(url, data = {}, options = {}, requiresAuth = true, respon
 }
 
 export function apiAdminPut(url, data = {}, options = {}, responseType = 'json') {
-  checkAdminPermission()
+  checkAdminPermission(adminPermissionForRequest(url, 'PUT'))
   return apiPut(url, data, options, true, responseType)
 }
 
@@ -259,7 +274,7 @@ export function apiDelete(url, options = {}, requiresAuth = true, responseType =
 }
 
 export function apiAdminDelete(url, options = {}) {
-  checkAdminPermission()
+  checkAdminPermission(adminPermissionForRequest(url, 'DELETE'))
   return apiDelete(url, options, true)
 }
 

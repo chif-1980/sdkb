@@ -179,12 +179,44 @@ async def get_agent_authenticated_user(
 
 
 # 获取管理员用户
-async def get_admin_user(current_user: User = Depends(get_required_user)):
-    if current_user.role not in ["admin", "superadmin"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="需要管理员权限",
-        )
+def _admin_permission_for_request(request: Request) -> str:
+    path = request.url.path.removeprefix("/api")
+    module_prefixes = (
+        ("/auth/users", "users"),
+        ("/departments", "users"),
+        ("/workspace", "workspace"),
+        ("/agent", "agents"),
+        ("/knowledge", "knowledge"),
+        ("/feishu-knowledge", "feishu_knowledge"),
+        ("/governance", "governance"),
+        ("/meeting-management", "meetings"),
+        ("/evaluation", "evaluation"),
+        ("/graph", "graph"),
+        ("/tasks", "tasks"),
+        ("/system/model-providers", "models"),
+        ("/system/skills", "extensions"),
+        ("/system/tools", "extensions"),
+        ("/system/mcp-servers", "extensions"),
+        ("/dashboard/feedbacks", "feedback"),
+        ("/dashboard", "dashboard"),
+    )
+    module = next((module for prefix, module in module_prefixes if path.startswith(prefix)), "admin")
+    action = "view" if request.method == "GET" else "manage"
+    return f"{module}.{action}"
+
+
+async def get_admin_user(
+    request: Request,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "superadmin":
+        from yuxi.services.role_permission_service import permission_scope
+
+        permission = _admin_permission_for_request(request)
+        scope = await permission_scope(db, current_user, permission)
+        if scope == "none" or (scope != "all" and permission != "feedback.view"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前角色没有此模块的管理权限")
     return current_user
 
 

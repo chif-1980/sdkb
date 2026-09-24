@@ -41,7 +41,7 @@
             class="sider-item"
             :class="{ activesec: activeTab === 'base' }"
             @click="activeTab = 'base'"
-            v-if="userStore.isAdmin"
+            v-if="userStore.hasPermission('admin.view')"
           >
             <Settings class="icon" :size="18" />
             <span>基本设置</span>
@@ -50,7 +50,7 @@
             class="sider-item"
             :class="{ activesec: activeTab === 'user' }"
             @click="activeTab = 'user'"
-            v-if="userStore.isAdmin"
+            v-if="userStore.hasPermission('users.view')"
           >
             <User class="icon" :size="18" />
             <span>用户管理</span>
@@ -59,13 +59,13 @@
             class="sider-item"
             :class="{ activesec: activeTab === 'department' }"
             @click="activeTab = 'department'"
-            v-if="userStore.isSuperAdmin"
+            v-if="userStore.hasPermission('users.manage', 'all')"
           >
             <Users class="icon" :size="18" />
             <span>部门管理</span>
           </div>
-          <div v-if="userStore.isSuperAdmin" class="sider-item"
-            :class="{ activesec: activeTab === 'permissions' }" @click="activeTab = 'permissions'">
+          <div v-if="userStore.hasPermission('admin.manage', 'all')" class="sider-item"
+            :class="{ activesec: activeTab === 'permissions' }" @click="openRolePermissions">
             <ShieldCheck class="icon" :size="18" /><span>角色权限</span>
           </div>
           <div
@@ -143,7 +143,7 @@
           class="nav-item"
           :class="{ active: activeTab === 'base' }"
           @click="activeTab = 'base'"
-          v-if="userStore.isAdmin"
+          v-if="userStore.hasPermission('admin.view')"
         >
           基本设置
         </div>
@@ -151,7 +151,7 @@
           class="nav-item"
           :class="{ active: activeTab === 'user' }"
           @click="activeTab = 'user'"
-          v-if="userStore.isAdmin"
+          v-if="userStore.hasPermission('users.view')"
         >
           用户管理
         </div>
@@ -159,12 +159,12 @@
           class="nav-item"
           :class="{ active: activeTab === 'department' }"
           @click="activeTab = 'department'"
-          v-if="userStore.isSuperAdmin"
+          v-if="userStore.hasPermission('users.manage', 'all')"
         >
           部门管理
         </div>
-        <div v-if="userStore.isSuperAdmin" class="nav-item"
-          :class="{ active: activeTab === 'permissions' }" @click="activeTab = 'permissions'">角色权限</div>
+        <div v-if="userStore.hasPermission('admin.manage', 'all')" class="nav-item"
+          :class="{ active: activeTab === 'permissions' }" @click="openRolePermissions">角色权限</div>
       </div>
 
       <!-- 内容区域 -->
@@ -182,18 +182,18 @@
             <AgentEnvSettingsCard />
           </div>
 
-          <div v-show="activeTab === 'base'" v-if="userStore.isAdmin">
+          <div v-show="activeTab === 'base'" v-if="userStore.hasPermission('admin.view')">
             <BasicSettingsSection />
           </div>
 
-          <div v-show="activeTab === 'user'" v-if="userStore.isAdmin">
+          <div v-show="activeTab === 'user'" v-if="userStore.hasPermission('users.view')">
             <UserManagementComponent />
           </div>
 
-          <div v-show="activeTab === 'department'" v-if="userStore.isSuperAdmin">
+          <div v-show="activeTab === 'department'" v-if="userStore.hasPermission('users.manage', 'all')">
             <DepartmentManagementComponent />
           </div>
-          <RolePermissionsComponent v-if="activeTab === 'permissions' && userStore.isSuperAdmin" />
+
         </div>
       </div>
     </div>
@@ -221,7 +221,7 @@ import BasicSettingsSection from '@/components/BasicSettingsSection.vue'
 import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
 import UserManagementComponent from '@/components/UserManagementComponent.vue'
 import DepartmentManagementComponent from '@/components/DepartmentManagementComponent.vue'
-import RolePermissionsComponent from '@/components/RolePermissionsComponent.vue'
+import { useRouter } from 'vue-router'
 
 const props = defineProps({
   visible: {
@@ -235,6 +235,12 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:visible', 'close'])
+const router = useRouter()
+function openRolePermissions() {
+  emit('update:visible', false)
+  emit('close')
+  router.push('/role-permissions')
+}
 
 const userStore = useUserStore()
 const activeTab = ref('account')
@@ -251,17 +257,20 @@ const visible = computed({
 const availableTabs = computed(() => {
   const tabs = []
   if (userStore.isLoggedIn) tabs.push('account', 'apiKeys', 'agentEnv')
-  if (userStore.isAdmin) tabs.push('base', 'user')
-  if (userStore.isSuperAdmin) tabs.push('department', 'permissions')
+  if (userStore.hasPermission('admin.view')) tabs.push('base')
+  if (userStore.hasPermission('users.view')) tabs.push('user')
+  if (userStore.hasPermission('users.manage', 'all')) tabs.push('department')
+  if (userStore.hasPermission('admin.manage', 'all')) tabs.push('permissions')
   return tabs
 })
 
 const setActiveTab = (preferredTab) => {
+  if (preferredTab === 'permissions' && userStore.hasPermission('admin.manage')) { openRolePermissions(); return }
   if (preferredTab && availableTabs.value.includes(preferredTab)) {
     activeTab.value = preferredTab
     return
   }
-  activeTab.value = userStore.isAdmin ? 'base' : availableTabs.value[0]
+  activeTab.value = userStore.hasPermission('admin.view') ? 'base' : availableTabs.value[0]
 }
 
 const handleClose = () => {

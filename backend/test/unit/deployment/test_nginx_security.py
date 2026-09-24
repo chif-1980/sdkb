@@ -15,6 +15,8 @@ def test_nginx_applies_security_headers_and_removes_server_header():
     assert 'add_header Content-Security-Policy "' in config
     assert 'add_header X-Content-Type-Options "nosniff" always;' in config
     assert 'add_header Referrer-Policy "strict-origin-when-cross-origin" always;' in config
+    assert "frame-ancestors 'none'" in config
+    assert "frame-src 'self' https://assit.quickdone.cn blob: data:" in config
     assert 'add_header X-Frame-Options "DENY" always;' in config
 
 

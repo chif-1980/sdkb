@@ -816,6 +816,17 @@ class PostgresManager(metaclass=SingletonMeta):
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""
         self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            await conn.run_sync(BusinessBase.metadata.create_all)
+            await conn.execute(
+                text(
+                    "INSERT INTO rbac_roles (role_key, name, description, is_builtin, created_at) VALUES "
+                    "('superadmin', '超级管理员', '系统全量权限', TRUE, CURRENT_TIMESTAMP), "
+                    "('admin', '管理员', '兼容现有管理员账号', TRUE, CURRENT_TIMESTAMP), "
+                    "('user', '普通用户', '兼容现有普通用户账号', TRUE, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (role_key) DO NOTHING"
+                )
+            )
         stmts = [
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",

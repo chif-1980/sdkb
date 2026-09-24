@@ -547,11 +547,11 @@ async def create_user(
             detail="不能创建超级管理员账户",
         )
 
-    # 管理员只能创建普通用户
-    if current_user.role == "admin" and user_data.role != "user":
+    # Only legacy administrators and super administrators can choose a system role.
+    if current_user.role != "superadmin" and user_data.role != "user":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="管理员只能创建普通用户账户",
+            detail="只能创建普通用户账户",
         )
 
     # 部门分配逻辑
@@ -716,16 +716,16 @@ async def update_user(
             detail="不能降级超级管理员账户",
         )
 
-    if current_user.role == "admin":
+    if current_user.role != "superadmin":
         if user.role != "user":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="管理员只能修改普通用户账户",
+                detail="只能修改普通用户账户",
             )
-        if user_data.role is not None and user_data.role != "user":
+        if user_data.role is not None and (current_user.role != "admin" or user_data.role != "user"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="管理员只能将用户角色设置为普通用户",
+                detail="只能通过角色管理分配业务权限",
             )
 
     # 更新信息
@@ -821,10 +821,10 @@ async def delete_user(
             detail="不能删除超级管理员账户",
         )
 
-    if current_user.role == "admin" and user.role != "user":
+    if current_user.role != "superadmin" and user.role != "user":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="管理员只能删除普通用户账户",
+            detail="只能删除普通用户账户",
         )
 
     # 检查是否是部门的唯一管理员

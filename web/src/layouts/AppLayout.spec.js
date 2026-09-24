@@ -15,7 +15,17 @@ const taskerState = vi.hoisted(() => ({
   },
   store: null
 }))
-const userState = vi.hoisted(() => ({ isAdmin: false, isSuperAdmin: false, canViewFeedback: false }))
+const userState = vi.hoisted(() => ({
+  isAdmin: false, isSuperAdmin: false, canViewFeedback: false, grants: null,
+  hasPermission(permission) {
+    if (this.grants) return this.grants.includes(permission)
+    if (this.isSuperAdmin) return true
+    if (permission === 'feedback.view') return this.canViewFeedback
+    if (permission === 'dashboard.view') return false
+    return this.isAdmin
+  }
+}))
+const routerState = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }))
 
 vi.mock('pinia', async (importOriginal) => {
   const actual = await importOriginal()
@@ -30,7 +40,7 @@ vi.mock('vue-router', async (importOriginal) => {
   return {
     ...actual,
     useRoute: () => ({ path: '/feishu-knowledge', params: {} }),
-    useRouter: () => ({ push: vi.fn(), replace: vi.fn() })
+    useRouter: () => routerState
   }
 })
 
@@ -95,12 +105,15 @@ vi.mock('@/stores/user', () => ({
 
 describe('AppLayout', () => {
   beforeEach(() => {
+    userState.grants = null
     userState.isAdmin = false
     userState.isSuperAdmin = false
     userState.canViewFeedback = false
     taskerState.refs.sortedTasks.value = []
     taskerState.refs.activeCount.value = 0
     taskerState.refs.isDrawerOpen.value = false
+    routerState.push.mockReset()
+    routerState.replace.mockReset()
     globalThis.fetch = vi.fn().mockResolvedValue({
       json: async () => ({ stargazers_count: 0 })
     })
@@ -148,6 +161,26 @@ describe('AppLayout', () => {
     const revoked = shallowMount(AppLayout)
     expect(revoked.findAllComponents({ name: 'RouterLink' }).map((link) => link.props('to'))).not.toContain('/feedbacks')
     revoked.unmount()
+  })
+
+  it('普通账号按自定义角色显示菜单而非按管理员身份', () => {
+    userState.grants = ['meetings.view', 'feedback.view']
+    const wrapper = shallowMount(AppLayout)
+    const paths = wrapper.findAllComponents({ name: 'RouterLink' }).map((link) => link.props('to'))
+    expect(paths).toContain('/meeting-management')
+    expect(paths).toContain('/feedbacks')
+    expect(paths).not.toContain('/extensions')
+    expect(paths).not.toContain('/workspace')
+    wrapper.unmount()
+  })
+
+  it('点击企业知识助手使用右侧嵌入路由，不离开知枢布局', async () => {
+    const wrapper = shallowMount(AppLayout)
+    const assistant = wrapper.findAll('button').find((button) => button.text().includes('企业知识助手'))
+    expect(assistant.exists()).toBe(true)
+    await assistant.trigger('click')
+    expect(routerState.push).toHaveBeenCalledWith({ name: 'EnterpriseAssistantEmbed' })
+    wrapper.unmount()
   })
 
   it('在窄屏使用折叠导航且不强制根布局宽度', async () => {

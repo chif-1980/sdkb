@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import Integer, String, cast, distinct, func, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_superadmin_user
+from server.utils.auth_middleware import get_admin_user, get_db
 from yuxi.services.role_permission_service import feedback_scope
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -136,7 +136,7 @@ async def get_all_conversations(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """获取所有对话（超级管理员权限）"""
     from yuxi.storage.postgres.models_business import Conversation, ConversationStats
@@ -184,7 +184,7 @@ async def get_all_conversations(
 async def get_conversation_detail(
     thread_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """获取指定对话详情（超级管理员权限）"""
     try:
@@ -252,7 +252,7 @@ async def get_conversation_detail(
 @dashboard.get("/stats/users", response_model=UserActivityStats)
 async def get_user_activity_stats(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """获取用户活动统计（超级管理员权限）"""
     try:
@@ -323,7 +323,7 @@ async def get_user_activity_stats(
 @dashboard.get("/stats/tools", response_model=ToolCallStats)
 async def get_tool_call_stats(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """获取工具调用统计（超级管理员权限）"""
     try:
@@ -398,7 +398,7 @@ async def get_tool_call_stats(
 @dashboard.get("/stats/knowledge", response_model=KnowledgeStats)
 async def get_knowledge_stats(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """获取知识库统计（超级管理员权限）"""
     try:
@@ -486,7 +486,7 @@ async def get_knowledge_stats(
 @dashboard.get("/stats/agents", response_model=AgentAnalytics)
 async def get_agent_analytics(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """获取智能体分析（超级管理员权限）"""
     try:
@@ -639,7 +639,7 @@ async def get_agent_analytics(
 @dashboard.get("/stats")
 async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """获取基础统计（超级管理员权限）"""
     from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback
@@ -739,6 +739,12 @@ async def get_all_feedbacks(
     from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback, User
     from yuxi.storage.postgres.models_product import ProductConversation, ProductMessage
 
+    if current_user.role not in {"admin", "superadmin"}:
+        from yuxi.services.role_permission_service import permission_scope
+
+        if await permission_scope(db, current_user, "feedback.view") == "none":
+            raise HTTPException(status_code=403, detail="当前角色没有用户反馈查看权限")
+
     scope = await feedback_scope(db, current_user)
     if scope == "none" or (scope == "department" and not current_user.department_id):
         raise HTTPException(status_code=403, detail="当前角色没有用户反馈查看权限")
@@ -776,6 +782,9 @@ async def get_all_feedbacks(
         if scope == "department":
             legacy_query = legacy_query.where(User.department_id == current_user.department_id)
             product_query = product_query.where(User.department_id == current_user.department_id)
+        elif scope == "self":
+            legacy_query = legacy_query.where(MessageFeedback.uid == current_user.uid)
+            product_query = product_query.where(ProductConversation.owner_user_id == current_user.id)
 
         legacy_results = (await db.execute(legacy_query)).all()
         product_results = (await db.execute(product_query)).all()
@@ -808,9 +817,7 @@ async def get_all_feedbacks(
             reason = reason_labels.get(message.feedback_reason_type) if message.feedback_reason_type else None
             if message.feedback_reason_text:
                 reason = (
-                    f"{reason}；补充说明：{message.feedback_reason_text}"
-                    if reason
-                    else message.feedback_reason_text
+                    f"{reason}；补充说明：{message.feedback_reason_text}" if reason else message.feedback_reason_text
                 )
             feedback_items.append(
                 {
@@ -863,7 +870,7 @@ async def get_call_timeseries_stats(
     type: str = "models",  # models/agents/tokens/tools
     time_range: str = "14days",  # 14hours/14days/14weeks
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """获取调用分析时间序列统计（超级管理员权限）"""
     try:

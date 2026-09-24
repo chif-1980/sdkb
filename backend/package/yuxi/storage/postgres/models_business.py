@@ -57,6 +57,44 @@ class RolePermission(Base):
     scope = Column(String(16), nullable=False)
 
 
+class Role(Base):
+    __tablename__ = "rbac_roles"
+
+    role_key = Column(String(64), primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    description = Column(String(255), nullable=True)
+    is_builtin = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+
+class RoleCapability(Base):
+    __tablename__ = "rbac_role_capabilities"
+
+    role_key = Column(String(64), ForeignKey("rbac_roles.role_key", ondelete="CASCADE"), primary_key=True)
+    permission = Column(String(64), primary_key=True)
+    scope = Column(String(16), nullable=False)
+
+
+class UserRole(Base):
+    __tablename__ = "rbac_user_roles"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    role_key = Column(String(64), ForeignKey("rbac_roles.role_key", ondelete="CASCADE"), primary_key=True)
+    assigned_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+
+class FeishuDepartmentRole(Base):
+    __tablename__ = "rbac_feishu_department_roles"
+
+    department_binding_id = Column(
+        Integer, ForeignKey("feishu_department_bindings.id", ondelete="CASCADE"), primary_key=True
+    )
+    role_key = Column(String(64), ForeignKey("rbac_roles.role_key", ondelete="CASCADE"), primary_key=True)
+    assigned_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+
 class User(Base):
     """用户模型"""
 

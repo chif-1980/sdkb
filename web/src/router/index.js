@@ -7,10 +7,22 @@ import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    { path: '/auth/feishu/callback', component: () => import('../views/FeishuCallbackView.vue'), meta: { requiresAuth: false } },
-    { path: '/feishu-account', component: AppLayout, children: [
-      { path: '', component: () => import('../views/FeishuAccountView.vue'), meta: { requiresAuth: true } }
-    ] },
+    {
+      path: '/auth/feishu/callback',
+      component: () => import('../views/FeishuCallbackView.vue'),
+      meta: { requiresAuth: false }
+    },
+    {
+      path: '/feishu-account',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          component: () => import('../views/FeishuAccountView.vue'),
+          meta: { requiresAuth: true }
+        }
+      ]
+    },
     {
       path: '/',
       name: 'main',
@@ -54,6 +66,52 @@ const router = createRouter({
       ]
     },
     {
+      path: '/enterprise-assistant',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'EnterpriseAssistantEmbed',
+          component: () => import('../views/EnterpriseAssistantEmbedView.vue'),
+          meta: { requiresAuth: true, keepAlive: false }
+        }
+      ]
+    },
+    ...(import.meta.env.DEV
+      ? [
+          {
+            path: '/role-permissions-prototype',
+            name: 'RolePermissionsPrototype',
+            component: AppLayout,
+            children: [
+              {
+                path: '',
+                name: 'RolePermissionsPrototypeView',
+                component: () => import('../views/RolePermissionsPrototypeView.vue'),
+                meta: { requiresAuth: true }
+              }
+            ]
+          }
+        ]
+      : []),
+    {
+      path: '/role-permissions',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'RolePermissions',
+          component: () => import('../components/RolePermissionsComponent.vue'),
+          meta: {
+            requiresAuth: true,
+            requiresPermission: 'admin.manage',
+            requiresPermissionScope: 'all',
+            keepAlive: false
+          }
+        }
+      ]
+    },
+    {
       path: '/workspace',
       name: 'workspace',
       component: AppLayout,
@@ -62,7 +120,7 @@ const router = createRouter({
           path: '',
           name: 'WorkspaceComp',
           component: () => import('../views/WorkspaceView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiresPermission: 'workspace.view' }
         }
       ]
     },
@@ -74,7 +132,7 @@ const router = createRouter({
           path: '',
           name: 'UserFeedback',
           component: () => import('../views/UserFeedbackView.vue'),
-          meta: { requiresAuth: true, requiresAdmin: true, requiresFeedback: true }
+          meta: { requiresAuth: true, requiresPermission: 'feedback.view' }
         }
       ]
     },
@@ -87,7 +145,7 @@ const router = createRouter({
           path: '',
           name: 'DashboardComp',
           component: () => import('../views/DashboardView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresSuperAdmin: true }
+          meta: { keepAlive: false, requiresAuth: true, requiresPermission: 'dashboard.view' }
         }
       ]
     },
@@ -100,7 +158,11 @@ const router = createRouter({
           path: '',
           name: 'FeishuKnowledgeComp',
           component: () => import('../views/FeishuKnowledgeView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+          meta: {
+            keepAlive: false,
+            requiresAuth: true,
+            requiresPermission: 'feishu_knowledge.view'
+          }
         }
       ]
     },
@@ -108,8 +170,18 @@ const router = createRouter({
       path: '/meeting-management',
       component: AppLayout,
       children: [
-        { path: '', name: 'MeetingManagement', component: () => import('../views/MeetingManagementView.vue'), meta: { requiresAuth: true, requiresAdmin: true } },
-        { path: ':id', name: 'MeetingManagementDetail', component: () => import('../views/MeetingManagementDetail.vue'), meta: { requiresAuth: true, requiresAdmin: true } }
+        {
+          path: '',
+          name: 'MeetingManagement',
+          component: () => import('../views/MeetingManagementView.vue'),
+          meta: { requiresAuth: true, requiresPermission: 'meetings.view' }
+        },
+        {
+          path: ':id',
+          name: 'MeetingManagementDetail',
+          component: () => import('../views/MeetingManagementDetail.vue'),
+          meta: { requiresAuth: true, requiresPermission: 'meetings.view' }
+        }
       ]
     },
     {
@@ -121,7 +193,7 @@ const router = createRouter({
           path: '',
           name: 'ModelManageComp',
           component: () => import('../views/ModelManageView.vue'),
-          meta: { keepAlive: false, requiresAuth: true }
+          meta: { keepAlive: false, requiresAuth: true, requiresPermission: 'agents.view' }
         }
       ]
     },
@@ -136,7 +208,8 @@ const router = createRouter({
           component: () => import('../views/ExtensionsView.vue'),
           meta: {
             keepAlive: false,
-            requiresAuth: true
+            requiresAuth: true,
+            requiresPermission: 'extensions.view'
           },
           children: [
             {
@@ -146,7 +219,7 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiresAdmin: true
+                requiresPermission: 'knowledge.view'
               }
             },
             {
@@ -156,7 +229,7 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiresAdmin: true
+                requiresPermission: 'extensions.manage'
               }
             },
             {
@@ -165,7 +238,8 @@ const router = createRouter({
               component: () => import('../components/extensions/SkillDetailView.vue'),
               meta: {
                 keepAlive: false,
-                requiresAuth: true
+                requiresAuth: true,
+                requiresPermission: 'extensions.view'
               }
             }
           ]
@@ -185,6 +259,16 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   // 检查路由是否需要认证
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
+  const requiredPermissions = to.matched.flatMap((record) =>
+    record.meta.requiresPermission
+      ? [
+          {
+            permission: record.meta.requiresPermission,
+            scope: record.meta.requiresPermissionScope || 'self'
+          }
+        ]
+      : []
+  )
   const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
   const requiresSuperAdmin = to.matched.some((record) => record.meta.requiresSuperAdmin)
 
@@ -205,14 +289,17 @@ router.beforeEach(async (to) => {
   const isAdmin = userStore.isAdmin
   const isSuperAdmin = userStore.isSuperAdmin
 
-  if (isLoggedIn && isAdmin) {
+  if (isLoggedIn) {
     try {
       await userStore.refreshPermissions()
     } catch (error) {
       console.error('获取角色权限失败:', error)
     }
   }
-  if (isLoggedIn && to.matched.some((record) => record.meta.requiresFeedback) && !userStore.canViewFeedback) {
+  if (
+    isLoggedIn &&
+    requiredPermissions.some(({ permission, scope }) => !userStore.hasPermission(permission, scope))
+  ) {
     return '/agent'
   }
 

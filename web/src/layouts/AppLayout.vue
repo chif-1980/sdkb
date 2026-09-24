@@ -14,7 +14,8 @@ import {
   MessageCirclePlus,
   MessageSquareText,
   Workflow,
-  Search
+  Search,
+  Bot
 } from 'lucide-vue-next'
 
 import { useConfigStore } from '@/stores/config'
@@ -25,6 +26,7 @@ import { useDatabaseStore } from '@/stores/database'
 import { useInfoStore } from '@/stores/info'
 import { useTaskerStore } from '@/stores/tasker'
 import { useUserStore } from '@/stores/user'
+import { PERMISSION_MENUS } from '@/utils/permissionNavigation'
 import { storeToRefs } from 'pinia'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
 import DebugComponent from '@/components/DebugComponent.vue'
@@ -108,9 +110,10 @@ onMounted(async () => {
   await Promise.all([infoStore.loadInfoConfig(), getRemoteDatabase()])
   await initAgentNavigation()
   await getRemoteConfig()
-  // 仅管理员加载任务中心数据
-  if (userStore.isAdmin) {
+  if (userStore.hasPermission('tasks.view')) {
     taskerStore.loadTasks()
+  }
+  if (userStore.isAdmin) {
     fetchGithubStars() // Fetch GitHub stars on mount
   }
 })
@@ -157,56 +160,18 @@ const mainList = computed(() => {
       activeIcon: MessageCirclePlus,
       action: true,
       exactActive: true
+    },
+    {
+      name: '企业知识助手',
+      icon: Bot,
+      activeIcon: Bot,
+      external: true
     }
   ]
 
-  items.push({
-    name: '工作区',
-    path: '/workspace',
-    icon: FolderKanban,
-    activeIcon: FolderKanban
-  })
-
-  items.push({
-    name: '智能体扩展',
-    path: '/extensions',
-    activePaths: ['/extensions'],
-    icon: LibraryBig,
-    activeIcon: LibraryBig
-  })
-
-  items.push({
-    name: '智能体管理',
-    path: '/model-manage',
-    icon: Box,
-    activeIcon: Box
-  })
-
-  if (userStore.isAdmin) {
-    items.push({
-      name: '知识加工',
-      path: '/feishu-knowledge',
-      icon: Workflow,
-      activeIcon: Workflow
-    })
-    items.push({ name: '会议管理', path: '/meeting-management', icon: ClipboardList, activeIcon: ClipboardList })
-  }
-
-  if (userStore.canViewFeedback) {
-    items.push({
-      name: '用户反馈',
-      path: '/feedbacks',
-      icon: MessageSquareText,
-      activeIcon: MessageSquareText
-    })
-  }
-  if (userStore.isSuperAdmin) {
-    items.push({
-      name: '数据总览',
-      path: '/dashboard',
-      icon: BarChart3,
-      activeIcon: BarChart3
-    })
+  const icons = { FolderKanban, LibraryBig, Box, Workflow, ClipboardList, MessageSquareText, BarChart3 }
+  for (const item of PERMISSION_MENUS) {
+    if (userStore.hasPermission(`${item.module}.view`)) items.push({ name: item.menu, path: item.path, icon: icons[item.icon], activeIcon: icons[item.icon] })
   }
 
   return items
@@ -214,6 +179,7 @@ const mainList = computed(() => {
 
 const primaryNavItem = computed(() => mainList.value[0] || null)
 const secondaryNavItems = computed(() => mainList.value.slice(1))
+const routerSecondaryNavItems = computed(() => secondaryNavItems.value.filter((item) => !item.external))
 
 const isNavItemActive = (item) => {
   const activePaths = item.activePaths || [item.path]
@@ -239,6 +205,10 @@ const expandSidebar = () => {
 
 const openConversationSearch = () => {
   conversationSearchOpen.value = true
+}
+
+const openEnterpriseAssistant = async () => {
+  await router.push({ name: 'EnterpriseAssistantEmbed' })
 }
 
 const initAgentNavigation = async () => {
@@ -387,8 +357,21 @@ provide('settingsModal', {
           <span class="nav-text">搜索对话</span>
         </button>
 
+        <button
+          v-if="secondaryNavItems[0]?.external"
+          type="button"
+          class="nav-item"
+          :class="{ active: route.path === '/enterprise-assistant' }"
+          @click.stop="openEnterpriseAssistant"
+        >
+          <a-tooltip placement="right" :open="effectiveSidebarCollapsed ? undefined : false">
+            <template #title>企业知识助手</template>
+            <Bot class="icon" size="18" />
+          </a-tooltip>
+          <span class="nav-text">企业知识助手</span>
+        </button>
         <RouterLink
-          v-for="(item, index) in secondaryNavItems"
+          v-for="(item, index) in routerSecondaryNavItems"
           :key="index"
           :to="item.path"
           v-show="!item.hidden"
@@ -439,7 +422,7 @@ provide('settingsModal', {
         <!-- 用户信息组件 -->
         <div class="nav-item user-info" @click.stop>
           <UserInfoComponent :show-role="!effectiveSidebarCollapsed">
-            <template v-if="userStore.isAdmin" #actions>
+            <template v-if="userStore.hasPermission('tasks.view')" #actions>
               <a-tooltip placement="top" title="任务中心">
                 <button
                   class="user-task-center"
@@ -471,7 +454,7 @@ provide('settingsModal', {
     </router-view>
 
     <button
-      v-if="userStore.isAdmin && activeFeishuScanTask"
+      v-if="userStore.hasPermission('tasks.view') && activeFeishuScanTask"
       type="button"
       class="global-scan-progress"
       data-testid="global-scan-progress"
@@ -512,7 +495,7 @@ provide('settingsModal', {
     >
       <DebugComponent />
     </a-modal>
-    <TaskCenterDrawer v-if="userStore.isAdmin" />
+    <TaskCenterDrawer v-if="userStore.hasPermission('tasks.view')" />
     <SettingsModal
       v-model:visible="showSettingsModal"
       :initial-tab="settingsInitialTab"
