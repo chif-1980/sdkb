@@ -1,0 +1,320 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "会议纪要到任务闭环",
+    "locale": "zh-CN",
+    "output": "meeting-business.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "happy-path",
+        "label": "正常闭环",
+        "focus": [
+          "input",
+          "analysis",
+          "review",
+          "delivery",
+          "sync",
+          "archive"
+        ],
+        "note": "从会议输入到纪要、待办、飞书同步和归档。"
+      },
+      {
+        "id": "delivery-failure",
+        "label": "发送异常",
+        "focus": [
+          "review",
+          "delivery",
+          "delivery-failed"
+        ],
+        "note": "飞书写入失败时保留错误、支持重试和人工处理。"
+      },
+      {
+        "id": "remote-change",
+        "label": "远端变化",
+        "focus": [
+          "sync",
+          "diff",
+          "manual-reconcile"
+        ],
+        "note": "回读比较负责人和期限；本地待发送修改不会被回读覆盖。"
+      }
+    ],
+    "viewBox": [
+      1050,
+      652
+    ],
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "backend": {
+          "label": "业务处理"
+        },
+        "security": {
+          "label": "人工确认 / 异常"
+        },
+        "messagebus": {
+          "label": "异步执行"
+        },
+        "database": {
+          "label": "业务记录"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "employee",
+      "label": "员工与助手"
+    },
+    {
+      "id": "backend",
+      "label": "知枢会议服务"
+    },
+    {
+      "id": "operator",
+      "label": "管理与审核"
+    },
+    {
+      "id": "exception",
+      "label": "异常处理",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "capture",
+      "label": "采集与分析",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "review",
+      "label": "确认与发送",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "reconcile",
+      "label": "同步与归档",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "input",
+    "analysis",
+    "review",
+    "delivery",
+    "sync",
+    "archive"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "input"
+    ],
+    "allowedTerminals": [
+      "archive",
+      "manual-reconcile"
+    ],
+    "requiredPaths": [
+      {
+        "from": "input",
+        "to": "archive"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "input",
+      "lane": "employee",
+      "col": 0,
+      "type": "external",
+      "label": "会议输入",
+      "sublabel": "链接 / 转写 / 文件",
+      "width": 140
+    },
+    {
+      "id": "analysis",
+      "lane": "backend",
+      "col": 1,
+      "type": "backend",
+      "label": "后台分析",
+      "sublabel": "纪要 · 待办 · 知识建议",
+      "width": 145
+    },
+    {
+      "id": "review",
+      "lane": "operator",
+      "col": 2,
+      "type": "security",
+      "label": "确认与编辑",
+      "sublabel": "版本校验 · 负责人 · 期限",
+      "width": 150
+    },
+    {
+      "id": "delivery",
+      "lane": "backend",
+      "col": 3,
+      "type": "messagebus",
+      "label": "飞书任务写入",
+      "sublabel": "幂等创建 / 更新",
+      "width": 145
+    },
+    {
+      "id": "sync",
+      "lane": "backend",
+      "col": 4,
+      "type": "backend",
+      "label": "状态回读",
+      "sublabel": "定时同步 / 手动同步",
+      "width": 145
+    },
+    {
+      "id": "archive",
+      "lane": "operator",
+      "col": 5,
+      "type": "database",
+      "label": "归档与审计",
+      "sublabel": "结果可追溯",
+      "width": 145
+    },
+    {
+      "id": "delivery-failed",
+      "lane": "exception",
+      "col": 3,
+      "type": "security",
+      "label": "发送失败",
+      "sublabel": "错误可见",
+      "width": 135
+    },
+    {
+      "id": "diff",
+      "lane": "exception",
+      "col": 4,
+      "type": "security",
+      "label": "差异核对",
+      "sublabel": "负责人 / 期限",
+      "width": 135
+    },
+    {
+      "id": "manual-reconcile",
+      "lane": "exception",
+      "col": 5,
+      "type": "backend",
+      "label": "核对后处理",
+      "sublabel": "保存修改 / 核对原任务",
+      "width": 135
+    }
+  ],
+  "edges": [
+    {
+      "id": "capture-analysis",
+      "from": "input",
+      "to": "analysis",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "analysis-review",
+      "from": "analysis",
+      "to": "review",
+      "label": "生成结果",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "review-delivery",
+      "from": "review",
+      "to": "delivery",
+      "label": "确认后发送",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "delivery-sync",
+      "from": "delivery",
+      "to": "sync",
+      "label": "任务编号",
+      "role": "main",
+      "variant": "dashed"
+    },
+    {
+      "id": "sync-archive",
+      "from": "sync",
+      "to": "archive",
+      "label": "状态与差异",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "delivery-failure",
+      "from": "delivery",
+      "to": "delivery-failed",
+      "label": "写入异常",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "retry-delivery",
+      "from": "delivery-failed",
+      "to": "delivery",
+      "label": "幂等重发",
+      "role": "return",
+      "variant": "dashed"
+    },
+    {
+      "id": "remote-diff",
+      "from": "sync",
+      "to": "diff",
+      "label": "远端已变更",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "reconcile-archive",
+      "from": "manual-reconcile",
+      "to": "archive",
+      "label": "写入审计",
+      "role": "return",
+      "variant": "dashed"
+    },
+    {
+      "id": "diff-reconcile",
+      "from": "diff",
+      "to": "manual-reconcile",
+      "label": "核对处理",
+      "role": "branch",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "主链验收",
+      "items": [
+        "分析结果必须可编辑并有版本校验",
+        "发送、回读、归档都有明确状态"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "异常验收",
+      "items": [
+        "失败可见且能重试",
+        "本地修改不被远端状态静默覆盖"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "当前补强",
+      "items": [
+        "事件订阅与完整字段冲突处理属于规划",
+        "会议归档是人工操作，不等于待办均完成"
+      ]
+    }
+  ]
+}

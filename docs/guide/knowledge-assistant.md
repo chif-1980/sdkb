@@ -6,9 +6,11 @@
 
 ## 1. 功能架构与知识来源
 
-[![企业知识助手 0.6.10 功能架构：普通问答、查资料、做方案、会议纪要，以及知识依据与反馈闭环](/images/manuals/assistant-architecture-0610.svg)](/images/manuals/assistant-architecture-0610.svg)
+[![企业知识助手问答与引用时序](/diagrams/assistant-answer.png)](/diagrams/assistant-answer.html)
 
-[下载架构图 SVG](/images/manuals/assistant-architecture-0610.svg)
+[打开交互图与导出图片](/diagrams/assistant-answer.html)
+
+助手与知枢管理端、正式知识、会议任务和反馈治理的关系见[系统功能与业务架构交互图](/guide/architecture)。需要核对会议后台处理和飞书回读时，直接查看其中的[会议任务同步时序图](/diagrams/meeting-task-sync.html)。
 
 助手的企业知识证据来自善达知枢中已审核发布、当前有效且你有权访问的正式知识。它不会因为检索不到答案，就改用待审核或不纳入的资料。会话附件可作为你此次提问的上下文，**不会自动发布到企业知识库**。
 

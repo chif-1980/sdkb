@@ -1,0 +1,402 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "善达知枢技术架构",
+    "locale": "zh-CN",
+    "output": "technical-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1395,
+      760
+    ],
+    "repository": {
+      "url": "https://github.com/chif-1980/sdkb",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "87bc352535735e1fc1aeb6ce63c9c7cdd28395a0"
+    },
+    "views": [
+      {
+        "id": "request-path",
+        "label": "同步请求路径",
+        "focus": [
+          "browser",
+          "web",
+          "api",
+          "postgres",
+          "feishu"
+        ],
+        "note": "浏览器通过管理端或助手调用 API，权限和业务状态落在后端。"
+      },
+      {
+        "id": "async-path",
+        "label": "异步任务路径",
+        "focus": [
+          "api",
+          "redis",
+          "worker",
+          "postgres",
+          "feishu"
+        ],
+        "note": "会议分析和同步通过队列与 worker 执行，数据库保存最终状态。"
+      },
+      {
+        "id": "governance-path",
+        "label": "知识治理路径",
+        "focus": [
+          "feishu",
+          "api",
+          "postgres",
+          "milvus",
+          "assistant"
+        ],
+        "note": "飞书来源经过版本化、审核和索引后才进入问答。"
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [
+      40,
+      100
+    ],
+    "cols": 4,
+    "gapX": 55,
+    "gapY": 72,
+    "cellW": 215,
+    "cellH": 108
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "external",
+      "label": "浏览器 / 飞书",
+      "sublabel": "员工与管理员",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Vue 管理端",
+      "sublabel": "Vue · Vite · RBAC 菜单",
+      "pos": [
+        305,
+        155
+      ],
+      "size": [
+        215,
+        82
+      ],
+      "tag": "web :5173",
+      "sources": [
+        {
+          "path": "web/src/router/index.js",
+          "label": "前端路由"
+        }
+      ]
+    },
+    {
+      "id": "assistant",
+      "type": "frontend",
+      "label": "助手前端",
+      "sublabel": "React · 独立部署 / 嵌入",
+      "pos": [
+        305,
+        370
+      ],
+      "size": [
+        215,
+        82
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI API",
+      "sublabel": "鉴权 · 业务 · 同步调度",
+      "pos": [
+        590,
+        270
+      ],
+      "size": [
+        225,
+        82
+      ],
+      "tag": "async",
+      "sources": [
+        {
+          "path": "backend/server/routers/__init__.py",
+          "label": "路由注册"
+        }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "messagebus",
+      "label": "Redis",
+      "sublabel": "队列 · SSE · 运行时快照",
+      "pos": [
+        875,
+        100
+      ],
+      "size": [
+        215,
+        78
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "后台执行",
+      "sublabel": "ARQ / API 后台任务",
+      "pos": [
+        875,
+        270
+      ],
+      "size": [
+        215,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backend/server/utils/lifespan.py",
+          "label": "后台任务"
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "身份 · 业务状态 · 审计",
+      "pos": [
+        1145,
+        200
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backend/package/yuxi/storage/postgres/models_product.py",
+          "label": "业务模型"
+        }
+      ]
+    },
+    {
+      "id": "milvus",
+      "type": "database",
+      "label": "Milvus / 知识索引",
+      "sublabel": "正式知识检索",
+      "pos": [
+        1145,
+        430
+      ],
+      "size": [
+        220,
+        78
+      ]
+    },
+    {
+      "id": "feishu",
+      "type": "external",
+      "label": "飞书开放平台",
+      "sublabel": "OAuth · Wiki · Task",
+      "pos": [
+        875,
+        500
+      ],
+      "size": [
+        215,
+        82
+      ]
+    },
+    {
+      "id": "minio",
+      "type": "cloud",
+      "label": "MinIO",
+      "sublabel": "附件与对象存储",
+      "pos": [
+        590,
+        535
+      ],
+      "size": [
+        215,
+        78
+      ]
+    },
+    {
+      "id": "model",
+      "type": "external",
+      "label": "模型服务",
+      "sublabel": "LLM · Embedding · Rerank",
+      "pos": [
+        1150,
+        55
+      ],
+      "size": [
+        215,
+        82
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "应用服务边界",
+      "wraps": [
+        "web",
+        "assistant",
+        "api",
+        "redis",
+        "worker"
+      ],
+      "pad": 28
+    },
+    {
+      "kind": "region",
+      "label": "持久化与外部集成",
+      "wraps": [
+        "postgres",
+        "milvus",
+        "feishu",
+        "minio"
+      ],
+      "pad": 28
+    }
+  ],
+  "connections": [
+    {
+      "id": "browser-web",
+      "from": "browser",
+      "to": "web",
+      "label": "HTTPS / SPA",
+      "variant": "emphasis"
+    },
+    {
+      "id": "browser-assistant",
+      "from": "browser",
+      "to": "assistant",
+      "label": "HTTPS / SSE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "web-api",
+      "from": "web",
+      "to": "api",
+      "label": "REST / cookie",
+      "variant": "security"
+    },
+    {
+      "id": "assistant-api",
+      "from": "assistant",
+      "to": "api",
+      "label": "REST / SSE",
+      "variant": "security"
+    },
+    {
+      "id": "api-redis",
+      "from": "api",
+      "to": "redis",
+      "variant": "dashed"
+    },
+    {
+      "id": "redis-worker",
+      "from": "redis",
+      "to": "worker",
+      "variant": "dashed"
+    },
+    {
+      "id": "worker-postgres",
+      "from": "worker",
+      "to": "postgres",
+      "label": "状态 / 审计",
+      "variant": "emphasis",
+      "labelAt": [
+        1040,
+        366
+      ]
+    },
+    {
+      "id": "api-feishu",
+      "from": "api",
+      "to": "feishu",
+      "variant": "security"
+    },
+    {
+      "id": "worker-feishu",
+      "from": "worker",
+      "to": "feishu",
+      "variant": "dashed"
+    },
+    {
+      "id": "worker-milvus",
+      "from": "worker",
+      "to": "milvus",
+      "label": "索引发布",
+      "variant": "dashed"
+    },
+    {
+      "id": "api-worker",
+      "from": "api",
+      "to": "worker",
+      "label": "业务执行",
+      "variant": "default",
+      "labelAt": [
+        915,
+        245
+      ]
+    },
+    {
+      "id": "api-minio",
+      "from": "api",
+      "to": "minio",
+      "label": "文件访问",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "worker-model",
+      "from": "worker",
+      "to": "model",
+      "label": "模型调用",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "同步请求",
+      "items": [
+        "Vue 与助手前端共享 FastAPI 权限边界",
+        "PostgreSQL 是业务与审计事实来源"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "异步执行",
+      "items": [
+        "ARQ 执行智能体与会议分析队列",
+        "飞书任务回读由 API 生命周期定时器启动"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "外部边界",
+      "items": [
+        "模型按部署配置接入；飞书通过 API 集成",
+        "Neo4j、OCR、沙盒按功能启用，见组件表"
+      ]
+    }
+  ]
+}

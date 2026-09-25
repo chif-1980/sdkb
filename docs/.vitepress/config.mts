@@ -12,9 +12,39 @@ export default defineConfig({
     ['meta', { name: 'theme-color', content: '#087f96' }]
   ],
   ignoreDeadLinks: [/localhost/, /CONTRIBUTING$/, /docker-compose\.yml$/],
+  vite: {
+    plugins: [{
+      name: 'vitepress-page-chunks-compat',
+      enforce: 'post',
+      generateBundle(_options, bundle) {
+        // VitePress 1.x adds lean chunks by assigning to the bundle, which
+        // Rolldown ignores. Emit the full page module for initial hydration.
+        for (const chunk of Object.values(bundle)) {
+          if (chunk.type !== 'chunk' || !chunk.facadeModuleId?.endsWith('.md')) continue
+          const fileName = chunk.fileName.replace(/\.js$/, '.lean.js')
+          if (!Object.values(bundle).some((entry) => entry.fileName === fileName)) {
+            this.emitFile({ type: 'asset', fileName, source: chunk.code })
+          }
+        }
+      }
+    }]
+  },
   markdown: {
     config: (md) => {
       md.use(markdownItTaskCheckbox)
+      const renderLink = md.renderer.rules.link_open
+      md.renderer.rules.link_open = (tokens, index, options, env, self) => {
+        // Standalone diagram viewers must bypass the documentation SPA router.
+        if (/\/diagrams\/[^/]+\.html$/.test(tokens[index].attrGet('href') || '')) {
+          const href = tokens[index].attrGet('href')!
+          if (href.startsWith('/diagrams/')) tokens[index].attrSet('href', `/sdkb${href}`)
+          tokens[index].attrSet('target', '_blank')
+          tokens[index].attrSet('rel', 'noopener')
+        }
+        return renderLink
+          ? renderLink(tokens, index, options, env, self)
+          : self.renderToken(tokens, index, options)
+      }
     }
   },
   themeConfig: {
@@ -22,7 +52,7 @@ export default defineConfig({
     siteTitle: '善达知枢',
     nav: [
       { text: '知枢手册', link: '/guide/zhishu-manual' },
-      { text: '系统架构', link: '/guide/architecture' },
+      { text: '架构与流程图', link: '/guide/architecture' },
       { text: '知识加工', link: '/guide/knowledge-processing' },
       { text: '助手手册', link: '/guide/knowledge-assistant' },
       {
@@ -47,7 +77,7 @@ export default defineConfig({
         text: '开始使用',
         items: [
           { text: '产品概览', link: '/guide/overview' },
-          { text: '系统架构', link: '/guide/architecture' },
+          { text: '系统架构与业务流程', link: '/guide/architecture' },
           { text: '术语定义', link: '/guide/terminology' },
           { text: '快速开始', link: '/intro/quick-start' }
         ]

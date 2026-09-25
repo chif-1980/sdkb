@@ -1,0 +1,371 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "善达知枢核心功能架构",
+    "locale": "zh-CN",
+    "output": "functional-architecture.html",
+    "viewBox": [
+      1390,
+      760
+    ],
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/chif-1980/sdkb",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "87bc352535735e1fc1aeb6ce63c9c7cdd28395a0"
+    },
+    "views": [
+      {
+        "id": "employee-entry",
+        "label": "员工入口",
+        "focus": [
+          "employee",
+          "admin",
+          "assistant",
+          "meeting"
+        ],
+        "note": "从统一登录进入问答助手或管理工作台。"
+      },
+      {
+        "id": "knowledge-loop",
+        "label": "知识闭环",
+        "focus": [
+          "source",
+          "governance",
+          "formal",
+          "assistant"
+        ],
+        "note": "来源扫描、审核发布与可信问答共享正式知识边界。"
+      },
+      {
+        "id": "meeting-loop",
+        "label": "会议闭环",
+        "focus": [
+          "assistant",
+          "meeting",
+          "task",
+          "feedback"
+        ],
+        "note": "会议纪要、待办同步和反馈治理形成可追溯链路。"
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [
+      50,
+      90
+    ],
+    "cols": 4,
+    "gapX": 55,
+    "gapY": 65,
+    "cellW": 205,
+    "cellH": 105
+  },
+  "components": [
+    {
+      "id": "employee",
+      "type": "external",
+      "label": "企业员工",
+      "sublabel": "飞书账号 / 浏览器",
+      "pos": [
+        55,
+        310
+      ],
+      "size": [
+        180,
+        72
+      ],
+      "tag": "统一身份"
+    },
+    {
+      "id": "admin",
+      "type": "frontend",
+      "label": "知枢管理端",
+      "sublabel": "知识 · 会议 · RBAC",
+      "pos": [
+        315,
+        165
+      ],
+      "size": [
+        205,
+        78
+      ],
+      "sources": [
+        {
+          "path": "web/src/layouts/AppLayout.vue",
+          "label": "主菜单"
+        }
+      ]
+    },
+    {
+      "id": "assistant",
+      "type": "frontend",
+      "label": "企业知识助手",
+      "sublabel": "问答 · 查资料 · 会议纪要",
+      "pos": [
+        315,
+        345
+      ],
+      "size": [
+        205,
+        78
+      ],
+      "tag": "嵌入入口"
+    },
+    {
+      "id": "identity",
+      "type": "security",
+      "label": "身份与权限",
+      "sublabel": "飞书登录 · RBAC · 数据范围",
+      "pos": [
+        590,
+        255
+      ],
+      "size": [
+        215,
+        82
+      ],
+      "tag": "访问边界",
+      "sources": [
+        {
+          "path": "backend/package/yuxi/services/role_permission_service.py",
+          "label": "权限解析"
+        }
+      ]
+    },
+    {
+      "id": "source",
+      "type": "cloud",
+      "label": "飞书知识源",
+      "sublabel": "扫描 · 版本 · 来源定位",
+      "pos": [
+        590,
+        95
+      ],
+      "size": [
+        205,
+        78
+      ]
+    },
+    {
+      "id": "governance",
+      "type": "backend",
+      "label": "知识治理",
+      "sublabel": "审核包 · 质量门禁 · 变更请求",
+      "pos": [
+        875,
+        95
+      ],
+      "size": [
+        215,
+        82
+      ]
+    },
+    {
+      "id": "meeting",
+      "type": "backend",
+      "label": "会议管理",
+      "sublabel": "纪要 · 行动清单 · 审计",
+      "pos": [
+        875,
+        430
+      ],
+      "size": [
+        215,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backend/server/routers/meeting_management_router.py",
+          "label": "会议管理 API"
+        }
+      ]
+    },
+    {
+      "id": "formal",
+      "type": "database",
+      "label": "正式知识库",
+      "sublabel": "已审核 · 已发布 · 可引用",
+      "pos": [
+        1125,
+        155
+      ],
+      "size": [
+        205,
+        78
+      ]
+    },
+    {
+      "id": "task",
+      "type": "messagebus",
+      "label": "飞书任务同步",
+      "sublabel": "创建 · 回读 · 差异核对",
+      "pos": [
+        1125,
+        385
+      ],
+      "size": [
+        205,
+        78
+      ]
+    },
+    {
+      "id": "feedback",
+      "type": "backend",
+      "label": "反馈与运营",
+      "sublabel": "反馈列表 · 治理请求",
+      "pos": [
+        590,
+        485
+      ],
+      "size": [
+        215,
+        82
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "统一身份与权限边界",
+      "wraps": [
+        "admin",
+        "assistant",
+        "identity"
+      ],
+      "pad": 28
+    },
+    {
+      "kind": "region",
+      "label": "知枢业务域",
+      "wraps": [
+        "governance",
+        "meeting",
+        "formal",
+        "task",
+        "feedback"
+      ],
+      "pad": 30
+    }
+  ],
+  "connections": [
+    {
+      "id": "employee-admin",
+      "from": "employee",
+      "to": "admin",
+      "label": "飞书登录",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "employee-assistant",
+      "from": "employee",
+      "to": "assistant",
+      "label": "统一会话",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "admin-identity",
+      "from": "admin",
+      "to": "identity",
+      "label": "请求鉴权",
+      "variant": "security"
+    },
+    {
+      "id": "assistant-identity",
+      "from": "assistant",
+      "to": "identity",
+      "label": "会话校验",
+      "variant": "security"
+    },
+    {
+      "id": "governance-formal",
+      "from": "governance",
+      "to": "formal",
+      "label": "审核发布",
+      "variant": "emphasis",
+      "labelAt": [
+        1108,
+        247
+      ]
+    },
+    {
+      "id": "formal-assistant",
+      "from": "formal",
+      "to": "assistant",
+      "label": "可引用知识",
+      "variant": "default",
+      "labelAt": [
+        823,
+        351
+      ]
+    },
+    {
+      "id": "assistant-meeting",
+      "from": "assistant",
+      "to": "meeting",
+      "label": "分析会议",
+      "variant": "emphasis"
+    },
+    {
+      "id": "meeting-task",
+      "from": "meeting",
+      "to": "task",
+      "variant": "dashed"
+    },
+    {
+      "id": "assistant-feedback",
+      "from": "assistant",
+      "to": "feedback",
+      "label": "点赞 / 点踩",
+      "variant": "dashed"
+    },
+    {
+      "id": "meeting-feedback",
+      "from": "meeting",
+      "to": "feedback",
+      "label": "闭环审计",
+      "variant": "dashed"
+    },
+    {
+      "id": "source-governance",
+      "from": "source",
+      "to": "governance",
+      "label": "扫描与审核",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "员工入口",
+      "items": [
+        "管理端与助手支持飞书身份关联",
+        "权限和会话分别校验，不共享浏览器凭据"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "业务闭环",
+      "items": [
+        "来源扫描进入审核发布",
+        "会议任务状态回读并记录差异",
+        "反馈可转知识治理请求"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "其他能力与边界",
+      "items": [
+        "另有工作区、智能体、扩展与数据总览",
+        "反馈指派与复核关闭仍需完善"
+      ]
+    }
+  ]
+}

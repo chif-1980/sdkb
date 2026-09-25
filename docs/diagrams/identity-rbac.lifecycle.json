@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "飞书身份与知枢权限生效生命周期",
+    "locale": "zh-CN",
+    "output": "identity-rbac.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "login",
+        "label": "登录生效",
+        "focus": [
+          "unbound",
+          "mapped",
+          "active",
+          "effective"
+        ],
+        "note": "飞书登录后完成用户与部门映射才进入可用状态。"
+      },
+      {
+        "id": "role",
+        "label": "角色继承",
+        "focus": [
+          "role-resolution",
+          "effective"
+        ],
+        "note": "直接角色与飞书部门角色合并为最终权限。"
+      },
+      {
+        "id": "revoke",
+        "label": "撤销与恢复",
+        "focus": [
+          "effective",
+          "revoked",
+          "relogin"
+        ],
+        "note": "恢复权限需要管理员处理；重新登录本身不会恢复已撤销的授权。"
+      }
+    ],
+    "viewBox": [
+      1040,
+      660
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "身份主轨"
+    },
+    {
+      "id": "events",
+      "label": "角色来源"
+    },
+    {
+      "id": "terminal",
+      "label": "撤销与恢复"
+    }
+  ],
+  "states": [
+    {
+      "id": "unbound",
+      "type": "start",
+      "label": "未完成映射",
+      "sublabel": "登录后待处理",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "阻断"
+    },
+    {
+      "id": "mapped",
+      "type": "active",
+      "label": "身份已映射",
+      "sublabel": "用户 + 部门",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "可识别"
+    },
+    {
+      "id": "active",
+      "type": "active",
+      "label": "账号可用",
+      "sublabel": "基础登录通过",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "session"
+    },
+    {
+      "id": "effective",
+      "type": "success",
+      "label": "权限生效",
+      "sublabel": "菜单 + API + 数据范围",
+      "lane": "main",
+      "col": 4,
+      "step": "04",
+      "tag": "enforced"
+    },
+    {
+      "id": "revoked",
+      "type": "failure",
+      "label": "权限撤销",
+      "sublabel": "拒绝访问",
+      "lane": "terminal",
+      "col": 0,
+      "tag": "terminal"
+    },
+    {
+      "id": "relogin",
+      "type": "active",
+      "label": "恢复授权",
+      "sublabel": "管理员处理后复核",
+      "lane": "terminal",
+      "col": 1,
+      "tag": "recover"
+    },
+    {
+      "id": "role-resolution",
+      "type": "external",
+      "label": "角色解析",
+      "sublabel": "直接 / 部门 / 默认",
+      "lane": "events",
+      "col": 2,
+      "width": 110
+    }
+  ],
+  "transitions": [
+    {
+      "id": "map",
+      "from": "unbound",
+      "to": "mapped",
+      "variant": "security"
+    },
+    {
+      "id": "login",
+      "from": "mapped",
+      "to": "active",
+      "variant": "emphasis"
+    },
+    {
+      "id": "calculate-permissions",
+      "from": "active",
+      "to": "effective",
+      "variant": "emphasis"
+    },
+    {
+      "id": "revoke",
+      "from": "effective",
+      "to": "revoked",
+      "variant": "security",
+      "route": "drop"
+    },
+    {
+      "id": "relogin",
+      "from": "revoked",
+      "to": "relogin",
+      "variant": "dashed",
+      "route": "straight"
+    },
+    {
+      "id": "restore",
+      "from": "relogin",
+      "to": "effective",
+      "variant": "emphasis",
+      "route": "top-channel"
+    },
+    {
+      "id": "resolve-grants",
+      "from": "role-resolution",
+      "to": "effective",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "统一身份",
+      "items": [
+        "飞书身份和部门关系映射到本地账号",
+        "管理员密码登录仍可用；飞书不是唯一入口"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "统一授权",
+      "items": [
+        "直接角色与部门角色按能力合并",
+        "无额外角色时使用内置默认模板"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "当前边界",
+      "items": [
+        "管理端飞书登录仍检查 admin/superadmin",
+        "离职事件自动即时撤权不作为已实现承诺"
+      ]
+    }
+  ]
+}

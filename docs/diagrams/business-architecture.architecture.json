@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "善达知枢业务架构",
+    "locale": "zh-CN",
+    "output": "business-architecture.html",
+    "viewBox": [
+      1395,
+      760
+    ],
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/chif-1980/sdkb",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "87bc352535735e1fc1aeb6ce63c9c7cdd28395a0"
+    },
+    "views": [
+      {
+        "id": "operate",
+        "label": "运营视角",
+        "focus": [
+          "identity",
+          "knowledge-ops",
+          "meeting-ops",
+          "feedback-ops"
+        ],
+        "note": "管理员围绕身份、知识、会议和反馈进行运营。"
+      },
+      {
+        "id": "employee-value",
+        "label": "员工价值",
+        "focus": [
+          "employee",
+          "assistant",
+          "answer",
+          "meeting-output"
+        ],
+        "note": "员工从可信问答和会议协作获得结果。"
+      },
+      {
+        "id": "control",
+        "label": "控制与审计",
+        "focus": [
+          "identity",
+          "audit",
+          "knowledge-ops",
+          "meeting-ops"
+        ],
+        "note": "关键操作都有权限边界和审计记录。"
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [
+      45,
+      100
+    ],
+    "cols": 4,
+    "gapX": 55,
+    "gapY": 70,
+    "cellW": 215,
+    "cellH": 108
+  },
+  "components": [
+    {
+      "id": "employee",
+      "type": "external",
+      "label": "企业员工",
+      "sublabel": "提问 · 反馈 · 会议输入",
+      "pos": [
+        45,
+        315
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "identity",
+      "type": "security",
+      "label": "身份权限运营",
+      "sublabel": "用户 · 部门 · 角色 · 范围",
+      "pos": [
+        310,
+        135
+      ],
+      "size": [
+        215,
+        82
+      ]
+    },
+    {
+      "id": "knowledge-ops",
+      "type": "backend",
+      "label": "知识运营",
+      "sublabel": "来源扫描 · 审核 · 发布 · 质量",
+      "pos": [
+        600,
+        120
+      ],
+      "size": [
+        230,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backend/server/routers/feishu_knowledge_router.py",
+          "label": "知识源 API"
+        }
+      ]
+    },
+    {
+      "id": "meeting-ops",
+      "type": "backend",
+      "label": "会议运营",
+      "sublabel": "纪要 · 待办 · 同步 · 归档",
+      "pos": [
+        600,
+        330
+      ],
+      "size": [
+        230,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backend/package/yuxi/product_chat/meeting_task_sync.py",
+          "label": "任务同步"
+        }
+      ]
+    },
+    {
+      "id": "feedback-ops",
+      "type": "backend",
+      "label": "反馈运营",
+      "sublabel": "收集 · 筛选 · 治理请求",
+      "pos": [
+        600,
+        535
+      ],
+      "size": [
+        230,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backend/server/routers/dashboard_router.py",
+          "label": "反馈列表"
+        }
+      ]
+    },
+    {
+      "id": "assistant",
+      "type": "frontend",
+      "label": "企业知识助手",
+      "sublabel": "快速回答 / 深度查证 / 技能",
+      "pos": [
+        895,
+        130
+      ],
+      "size": [
+        230,
+        82
+      ],
+      "tag": "员工工作入口"
+    },
+    {
+      "id": "answer",
+      "type": "backend",
+      "label": "可信回答",
+      "sublabel": "正式知识 · 引用 · 权限过滤",
+      "pos": [
+        1150,
+        130
+      ],
+      "size": [
+        215,
+        82
+      ]
+    },
+    {
+      "id": "meeting-output",
+      "type": "backend",
+      "label": "会议协作产出",
+      "sublabel": "纪要 · 行动清单 · 知识建议",
+      "pos": [
+        895,
+        350
+      ],
+      "size": [
+        230,
+        82
+      ]
+    },
+    {
+      "id": "audit",
+      "type": "database",
+      "label": "审计与运营指标",
+      "sublabel": "事件 · 反馈 · 同步 · 质量",
+      "pos": [
+        895,
+        555
+      ],
+      "size": [
+        215,
+        82
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "企业治理责任域",
+      "wraps": [
+        "identity",
+        "knowledge-ops",
+        "meeting-ops",
+        "feedback-ops",
+        "audit"
+      ],
+      "pad": 28
+    },
+    {
+      "kind": "region",
+      "label": "员工使用域",
+      "wraps": [
+        "assistant",
+        "answer",
+        "meeting-output"
+      ],
+      "pad": 28
+    }
+  ],
+  "connections": [
+    {
+      "id": "employee-identity",
+      "from": "employee",
+      "to": "identity",
+      "label": "登录 / 组织关系",
+      "variant": "security"
+    },
+    {
+      "id": "knowledge-assistant",
+      "from": "knowledge-ops",
+      "to": "assistant",
+      "label": "已发布知识",
+      "variant": "emphasis"
+    },
+    {
+      "id": "assistant-answer",
+      "from": "assistant",
+      "to": "answer",
+      "label": "检索 / 引用",
+      "variant": "emphasis",
+      "labelAt": [
+        1250,
+        226
+      ]
+    },
+    {
+      "id": "assistant-meeting",
+      "from": "assistant",
+      "to": "meeting-output",
+      "variant": "emphasis"
+    },
+    {
+      "id": "meeting-ops-output",
+      "from": "meeting-ops",
+      "to": "meeting-output",
+      "label": "维护纪要与待办",
+      "variant": "emphasis",
+      "labelAt": [
+        863,
+        446
+      ]
+    },
+    {
+      "id": "employee-feedback",
+      "from": "employee",
+      "to": "feedback-ops",
+      "label": "满意度 / 问题",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "业务主线",
+      "items": [
+        "员工以问答和会议为主要入口",
+        "管理员以知识、会议和反馈运营为主要工作台"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "结果定义",
+      "items": [
+        "回答必须有可访问的正式知识依据",
+        "会议待办必须有负责人、期限、状态和同步结果"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "运营闭环",
+      "items": [
+        "反馈可创建知识治理请求",
+        "指派、复核、关闭不是现成的反馈工作流"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,306 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "知识来源到正式问答流程",
+    "locale": "zh-CN",
+    "output": "knowledge-governance.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "publish",
+        "label": "来源到发布",
+        "focus": [
+          "source",
+          "scan",
+          "review",
+          "publish",
+          "formal"
+        ],
+        "note": "只有审核通过并发布的版本进入正式问答。"
+      },
+      {
+        "id": "meeting-feedback",
+        "label": "会议与反馈触发",
+        "focus": [
+          "source",
+          "review",
+          "publish",
+          "formal"
+        ],
+        "note": "会议建议和用户反馈最终进入同一审核发布链。"
+      },
+      {
+        "id": "failure",
+        "label": "失败与人工处理",
+        "focus": [
+          "scan-failed",
+          "review",
+          "manual-close"
+        ],
+        "note": "扫描失败可重试；缺少证据时先完善原文再审核。"
+      }
+    ],
+    "viewBox": [
+      1050,
+      652
+    ],
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "backend": {
+          "label": "业务处理"
+        },
+        "security": {
+          "label": "人工确认 / 异常"
+        },
+        "messagebus": {
+          "label": "异步执行"
+        },
+        "database": {
+          "label": "业务记录"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "source-owner",
+      "label": "来源与员工"
+    },
+    {
+      "id": "system",
+      "label": "知枢知识服务"
+    },
+    {
+      "id": "operator",
+      "label": "知识维护与审核"
+    },
+    {
+      "id": "exception",
+      "label": "异常与补偿",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ingest",
+      "label": "采集",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "govern",
+      "label": "治理",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "serve",
+      "label": "服务",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "review-loop",
+      "label": "审核发布主链",
+      "lane": "operator",
+      "fromCol": 1,
+      "toCol": 5,
+      "variant": "emphasis"
+    }
+  ],
+  "mainPath": [
+    "source",
+    "scan",
+    "review",
+    "publish",
+    "formal",
+    "answer"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "source"
+    ],
+    "allowedTerminals": [
+      "answer",
+      "manual-close"
+    ],
+    "requiredPaths": [
+      {
+        "from": "source",
+        "to": "answer"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "source",
+      "lane": "source-owner",
+      "col": 0,
+      "type": "external",
+      "label": "飞书知识源",
+      "sublabel": "Wiki / 文档",
+      "width": 140
+    },
+    {
+      "id": "scan",
+      "lane": "system",
+      "col": 1,
+      "type": "backend",
+      "label": "扫描与版本化",
+      "sublabel": "内容哈希 · 版本",
+      "width": 150
+    },
+    {
+      "id": "review",
+      "lane": "operator",
+      "col": 2,
+      "type": "security",
+      "label": "审核包",
+      "sublabel": "质量门禁 · 决策",
+      "width": 145
+    },
+    {
+      "id": "publish",
+      "lane": "operator",
+      "col": 3,
+      "type": "backend",
+      "label": "发布队列",
+      "sublabel": "索引与版本切换",
+      "width": 145
+    },
+    {
+      "id": "formal",
+      "lane": "system",
+      "col": 4,
+      "type": "database",
+      "label": "正式知识",
+      "sublabel": "INCLUDED · 可引用",
+      "width": 145
+    },
+    {
+      "id": "answer",
+      "lane": "system",
+      "col": 5,
+      "type": "frontend",
+      "label": "可信回答",
+      "sublabel": "权限过滤 · 引用",
+      "width": 145
+    },
+    {
+      "id": "scan-failed",
+      "lane": "exception",
+      "col": 1,
+      "type": "security",
+      "label": "扫描失败",
+      "sublabel": "错误可重试",
+      "width": 135
+    },
+    {
+      "id": "manual-close",
+      "lane": "operator",
+      "col": 5,
+      "type": "backend",
+      "label": "人工复核",
+      "sublabel": "补充来源与说明",
+      "width": 135
+    }
+  ],
+  "edges": [
+    {
+      "id": "source-scan",
+      "from": "source",
+      "to": "scan",
+      "label": "扫描来源",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "scan-review",
+      "from": "scan",
+      "to": "review",
+      "label": "提交审核包",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "review-publish",
+      "from": "review",
+      "to": "publish",
+      "label": "审核通过",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "publish-formal",
+      "from": "publish",
+      "to": "formal",
+      "label": "切换正式版本",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "formal-answer",
+      "from": "formal",
+      "to": "answer",
+      "label": "检索引用",
+      "role": "main",
+      "variant": "default"
+    },
+    {
+      "id": "scan-error",
+      "from": "scan",
+      "to": "scan-failed",
+      "label": "处理异常",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "failed-retry",
+      "from": "scan-failed",
+      "to": "scan",
+      "label": "重试扫描",
+      "role": "return",
+      "variant": "dashed"
+    },
+    {
+      "id": "unmatched-close",
+      "from": "review",
+      "to": "manual-close",
+      "label": "需补充证据",
+      "role": "branch",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "可信来源",
+      "items": [
+        "飞书原文是来源事实",
+        "未审核、未发布内容不进入正式问答"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "治理闭环",
+      "items": [
+        "会议建议与反馈可触发知识治理请求",
+        "发布后到原建议的闭环回写仍需核验"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "人工兜底",
+      "items": [
+        "扫描失败可重试",
+        "缺少证据时由维护人员补充原文"
+      ]
+    }
+  ]
+}

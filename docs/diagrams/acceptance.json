@@ -1,0 +1,423 @@
+{
+  "generator": "Archify 2.17",
+  "date": "2026-09-25",
+  "source_revision": "87bc352535735e1fc1aeb6ce63c9c7cdd28395a0",
+  "artifacts": [
+    {
+      "diagram_type": "sequence",
+      "specification": "docs/diagrams/assistant-answer.sequence.json",
+      "output": "docs/public/diagrams/assistant-answer.html",
+      "specification_sha256": "8af956c6f917f24371fab96a3b7c76755c0d528d1c85937add3a219a40571b1c",
+      "artifact_sha256": "42d40e57a193932cb35a2f4a17249ec55ceaf7fee6f9665abd9e06a3ca054514",
+      "validation": {
+        "checksPassed": 9,
+        "checkCount": 9,
+        "compositionProfile": "showcase",
+        "compositionStatus": "pass",
+        "errors": 0,
+        "warnings": 0
+      },
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 1,
+      "viewports": [
+        {
+          "width": 1440,
+          "height": 900,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1600,
+          "height": 1000,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1920,
+          "height": 1080,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 2048,
+          "height": 1320,
+          "overflow": false,
+          "readability": true
+        }
+      ],
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "exports": [
+        "png",
+        "svg"
+      ]
+    },
+    {
+      "diagram_type": "architecture",
+      "specification": "docs/diagrams/business-architecture.architecture.json",
+      "output": "docs/public/diagrams/business-architecture.html",
+      "specification_sha256": "5c21f034e68518ba891bf5dbb8a8d94638eef9b1f73312aa47325ff06600070c",
+      "artifact_sha256": "c394706ae47820d832947e2f2348d285008bc3872ae1c4c4219323d0cf9c16ba",
+      "validation": {
+        "checksPassed": 9,
+        "checkCount": 9,
+        "compositionProfile": "showcase",
+        "compositionStatus": "pass",
+        "errors": 0,
+        "warnings": 0
+      },
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 0,
+      "viewports": [
+        {
+          "width": 1440,
+          "height": 900,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1600,
+          "height": 1000,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1920,
+          "height": 1080,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 2048,
+          "height": 1320,
+          "overflow": false,
+          "readability": true
+        }
+      ],
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "exports": [
+        "png",
+        "svg"
+      ]
+    },
+    {
+      "diagram_type": "architecture",
+      "specification": "docs/diagrams/functional-architecture.architecture.json",
+      "output": "docs/public/diagrams/functional-architecture.html",
+      "specification_sha256": "275499d4f6ad8a7ce5d3e39710187b0609341c5758fc78cde323e67a11b6cdb6",
+      "artifact_sha256": "52c7be8900323a373cca762418944e78a1348a722403c49609b304cf0f445f9a",
+      "validation": {
+        "checksPassed": 9,
+        "checkCount": 9,
+        "compositionProfile": "showcase",
+        "compositionStatus": "pass",
+        "errors": 0,
+        "warnings": 0
+      },
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 0,
+      "viewports": [
+        {
+          "width": 1440,
+          "height": 900,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1600,
+          "height": 1000,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1920,
+          "height": 1080,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 2048,
+          "height": 1320,
+          "overflow": false,
+          "readability": true
+        }
+      ],
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "exports": [
+        "png",
+        "svg"
+      ]
+    },
+    {
+      "diagram_type": "lifecycle",
+      "specification": "docs/diagrams/identity-rbac.lifecycle.json",
+      "output": "docs/public/diagrams/identity-rbac.html",
+      "specification_sha256": "b0704bd04f3fa67c510b0577c28c95afdcec05b41aafeb5eeb09aa022acf66d5",
+      "artifact_sha256": "21afe4e26586f51e80bbdd28b505d524e6ab0c9fb0dd0a10ae09a2b741ef6611",
+      "validation": {
+        "checksPassed": 9,
+        "checkCount": 9,
+        "compositionProfile": "showcase",
+        "compositionStatus": "pass",
+        "errors": 0,
+        "warnings": 0
+      },
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 2,
+      "viewports": [
+        {
+          "width": 1440,
+          "height": 900,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1600,
+          "height": 1000,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1920,
+          "height": 1080,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 2048,
+          "height": 1320,
+          "overflow": false,
+          "readability": true
+        }
+      ],
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "exports": [
+        "png",
+        "svg"
+      ]
+    },
+    {
+      "diagram_type": "workflow",
+      "specification": "docs/diagrams/knowledge-governance.workflow.json",
+      "output": "docs/public/diagrams/knowledge-governance.html",
+      "specification_sha256": "858b33294020d3f5e340cb0d5a096f147173520efa87ff9e585e272e2e1c5253",
+      "artifact_sha256": "69423159c7f6891e703dd27962a97f4d38644f500cb5ba6582a38e34c4cb3074",
+      "validation": {
+        "checksPassed": 9,
+        "checkCount": 9,
+        "compositionProfile": "showcase",
+        "compositionStatus": "pass",
+        "errors": 0,
+        "warnings": 0
+      },
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 2,
+      "viewports": [
+        {
+          "width": 1440,
+          "height": 900,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1600,
+          "height": 1000,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1920,
+          "height": 1080,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 2048,
+          "height": 1320,
+          "overflow": false,
+          "readability": true
+        }
+      ],
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "exports": [
+        "png",
+        "svg"
+      ]
+    },
+    {
+      "diagram_type": "workflow",
+      "specification": "docs/diagrams/meeting-business.workflow.json",
+      "output": "docs/public/diagrams/meeting-business.html",
+      "specification_sha256": "c744de279b67bd8ee4658579a660a907e8011ab9de64315433ce8b502c799492",
+      "artifact_sha256": "4ec489638e8309d8f2bcf9bde50452a0921af9f6b95f291b3cc74da0d3620dd9",
+      "validation": {
+        "checksPassed": 9,
+        "checkCount": 9,
+        "compositionProfile": "showcase",
+        "compositionStatus": "pass",
+        "errors": 0,
+        "warnings": 0
+      },
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 2,
+      "viewports": [
+        {
+          "width": 1440,
+          "height": 900,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1600,
+          "height": 1000,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1920,
+          "height": 1080,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 2048,
+          "height": 1320,
+          "overflow": false,
+          "readability": true
+        }
+      ],
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "exports": [
+        "png",
+        "svg"
+      ]
+    },
+    {
+      "diagram_type": "sequence",
+      "specification": "docs/diagrams/meeting-task-sync.sequence.json",
+      "output": "docs/public/diagrams/meeting-task-sync.html",
+      "specification_sha256": "788d4a8d8ab7d3853750746907ab96edf358debfdd4ec7a901edf275701127ad",
+      "artifact_sha256": "06e67e0180fd0cbd37e338786079f7ad14554f066eeea9f7d534fc57cc19963a",
+      "validation": {
+        "checksPassed": 9,
+        "checkCount": 9,
+        "compositionProfile": "showcase",
+        "compositionStatus": "pass",
+        "errors": 0,
+        "warnings": 0
+      },
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 1,
+      "viewports": [
+        {
+          "width": 1440,
+          "height": 900,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1600,
+          "height": 1000,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1920,
+          "height": 1080,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 2048,
+          "height": 1320,
+          "overflow": false,
+          "readability": true
+        }
+      ],
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "exports": [
+        "png",
+        "svg"
+      ]
+    },
+    {
+      "diagram_type": "architecture",
+      "specification": "docs/diagrams/technical-architecture.architecture.json",
+      "output": "docs/public/diagrams/technical-architecture.html",
+      "specification_sha256": "1501037b4ecc1e8273229bd2f1c8cfc563e4de48a353d399e256685865d4013a",
+      "artifact_sha256": "f4eea187b84aa977b6f2022b65530912f8a3cc54b61f3b5008bdb17795916c06",
+      "validation": {
+        "checksPassed": 9,
+        "checkCount": 9,
+        "compositionProfile": "showcase",
+        "compositionStatus": "pass",
+        "errors": 0,
+        "warnings": 0
+      },
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 0,
+      "viewports": [
+        {
+          "width": 1440,
+          "height": 900,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1600,
+          "height": 1000,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 1920,
+          "height": 1080,
+          "overflow": false,
+          "readability": true
+        },
+        {
+          "width": 2048,
+          "height": 1320,
+          "overflow": false,
+          "readability": true
+        }
+      ],
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "exports": [
+        "png",
+        "svg"
+      ]
+    }
+  ]
+}

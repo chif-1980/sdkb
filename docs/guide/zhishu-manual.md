@@ -10,9 +10,11 @@
 
 ## 1. 功能架构与使用顺序
 
-![善达知枢 0.7.0 功能架构：飞书身份、RBAC、知识治理、会议同步和助手反馈闭环](/images/manuals/zhishu-architecture-070.svg)
+[![善达知枢核心功能架构](/diagrams/functional-architecture.png)](/diagrams/functional-architecture.html)
 
-[下载架构图 SVG](/images/manuals/zhishu-architecture-070.svg)
+[打开交互图与导出图片](/diagrams/functional-architecture.html)
+
+完整的功能、业务和技术关系请查看[系统架构交互图](/guide/architecture)。其中还包含会议任务同步时序、知识治理流程和飞书身份/RBAC 生命周期图，适合在验收时按链路逐项核对。
 
 **首次使用顺序：** 登录 → 添加数据源 → 管理员授权 → 检查连接 → 全量扫描 → 核对加工结果 → 审核 → 检查正式知识 → 到助手验证。
 

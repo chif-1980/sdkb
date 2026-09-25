@@ -1,0 +1,251 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "飞书待办状态同步时序",
+    "locale": "zh-CN",
+    "output": "meeting-task-sync.html",
+    "viewBox": [
+      1150,
+      720
+    ],
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "views": [
+      {
+        "id": "create",
+        "label": "创建任务",
+        "focus": [
+          "assistant",
+          "api",
+          "db",
+          "feishu"
+        ],
+        "note": "确认后的任务通过幂等创建写入飞书。"
+      },
+      {
+        "id": "readback",
+        "label": "状态回读",
+        "focus": [
+          "scheduler",
+          "sync",
+          "feishu",
+          "db",
+          "manager"
+        ],
+        "note": "定时或手动同步读取完成状态并更新管理端。"
+      },
+      {
+        "id": "conflict",
+        "label": "差异处理",
+        "focus": [
+          "sync",
+          "manager",
+          "db"
+        ],
+        "note": "负责人和期限差异可见；创建结果不明时可核对并绑定原飞书任务。"
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "assistant",
+      "type": "frontend",
+      "label": "企业知识助手"
+    },
+    {
+      "id": "manager",
+      "type": "frontend",
+      "label": "会议管理端"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI"
+    },
+    {
+      "id": "scheduler",
+      "type": "messagebus",
+      "label": "定时同步器"
+    },
+    {
+      "id": "sync",
+      "type": "backend",
+      "label": "同步服务"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "PostgreSQL"
+    },
+    {
+      "id": "feishu",
+      "type": "external",
+      "label": "飞书任务 API"
+    }
+  ],
+  "messages": [
+    {
+      "id": "confirm",
+      "from": "assistant",
+      "to": "api",
+      "y": 160,
+      "label": "确认并发送待办（版本校验）",
+      "variant": "emphasis"
+    },
+    {
+      "id": "save-local",
+      "from": "api",
+      "to": "db",
+      "y": 188,
+      "label": "读取版本与任务创建回执",
+      "variant": "default"
+    },
+    {
+      "id": "create-task",
+      "from": "api",
+      "to": "feishu",
+      "y": 216,
+      "label": "创建 / 更新任务",
+      "variant": "emphasis"
+    },
+    {
+      "id": "task-receipt",
+      "from": "feishu",
+      "to": "api",
+      "y": 244,
+      "label": "返回 guid / 发送结果",
+      "variant": "return"
+    },
+    {
+      "id": "persist-delivery",
+      "from": "api",
+      "to": "db",
+      "y": 272,
+      "label": "保存 guid、发送结果与审计",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sync-wake",
+      "from": "scheduler",
+      "to": "sync",
+      "y": 300,
+      "label": "批次唤醒",
+      "variant": "dashed"
+    },
+    {
+      "id": "load-task",
+      "from": "sync",
+      "to": "db",
+      "y": 328,
+      "label": "读取可同步任务",
+      "variant": "default"
+    },
+    {
+      "id": "get-task",
+      "from": "sync",
+      "to": "feishu",
+      "y": 356,
+      "label": "查询 task guid",
+      "variant": "emphasis"
+    },
+    {
+      "id": "remote-state",
+      "from": "feishu",
+      "to": "sync",
+      "y": 384,
+      "label": "状态 / 负责人 / 期限",
+      "variant": "return"
+    },
+    {
+      "id": "save-readback",
+      "from": "sync",
+      "to": "db",
+      "y": 412,
+      "label": "写回 DONE / OPEN 与差异",
+      "variant": "emphasis"
+    },
+    {
+      "id": "notify-manager",
+      "from": "manager",
+      "to": "api",
+      "y": 440,
+      "label": "读取会议详情",
+      "variant": "dashed"
+    },
+    {
+      "id": "read-detail",
+      "from": "api",
+      "to": "db",
+      "y": 468,
+      "label": "查询已保存状态",
+      "variant": "default"
+    },
+    {
+      "id": "detail-result",
+      "from": "db",
+      "to": "api",
+      "y": 496,
+      "label": "返回任务及差异",
+      "variant": "return"
+    },
+    {
+      "id": "remote-change",
+      "from": "api",
+      "to": "manager",
+      "y": 524,
+      "label": "返回任务状态、期限与负责人差异",
+      "variant": "security"
+    },
+    {
+      "id": "resolve",
+      "from": "manager",
+      "to": "api",
+      "y": 552,
+      "label": "结果不明时：核对并关联原任务",
+      "variant": "emphasis"
+    },
+    {
+      "id": "audit",
+      "from": "api",
+      "to": "db",
+      "y": 580,
+      "label": "记录裁决与操作者",
+      "variant": "dashed"
+    },
+    {
+      "id": "retry",
+      "from": "sync",
+      "to": "scheduler",
+      "y": 608,
+      "label": "本轮结束后等待下一次轮询",
+      "variant": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "当前实现",
+      "items": [
+        "有 guid 且无 pendingUpdate 才参与回读",
+        "每批结束后等待 300 秒；每批最多 20 场"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "一致性策略",
+      "items": [
+        "完成状态回写 DONE / OPEN",
+        "负责人和期限只做差异比较，不自动覆盖"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "待完善",
+      "items": [
+        "完整字段冲突合并与事件订阅仍是规划",
+        "创建结果不明先核对原任务，避免重复创建"
+      ]
+    }
+  ]
+}
