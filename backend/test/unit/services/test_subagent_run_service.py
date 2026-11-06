@@ -549,6 +549,11 @@ async def test_subagent_run_service_translates_busy_run(monkeypatch: pytest.Monk
 async def test_subagent_run_service_create_run_record_persists_subagent_context(monkeypatch: pytest.MonkeyPatch):
     db = _FakeDB()
     _patch_run_record_creation(monkeypatch, db)
+    # 0.7.0 起运行入口统一使用系统对话模型，模型覆盖参数不再生效；
+    # 这里固定解析结果，避免断言依赖容器内的模型配置。
+    monkeypatch.setattr(
+        agent_run_service, "resolve_agent_run_model_spec", lambda *args: "system-chat-model"
+    )
     creator_run = SimpleNamespace(id="parent-run", conversation_id=10, conversation_thread_id="parent-thread")
     relation = _relation(child_thread_id="child-thread", parent_conversation_id=10, subagent_slug="worker")
 
@@ -575,7 +580,7 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
     assert db.created_run_kwargs["conversation_thread_id"] == "child-thread"
     assert db.created_run_kwargs["input_message_id"] == 10
     assert db.created_run_kwargs["input_payload"] == {
-        "model_spec": "agent-default-model",
+        "model_spec": "system-chat-model",
         "runtime": {
             "tool_call_id": "tool-1",
             "subagent_name": "Worker",

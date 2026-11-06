@@ -1143,7 +1143,7 @@ async def test_send_counts_messages_without_loading_full_history(
     assert [citation["title"] for citation in exchange["assistantMessage"]["citations"]] == ["产品手册 2"]
 
 
-async def test_product_chat_routes_are_not_registered_in_lite_mode():
+async def test_product_chat_routes_are_not_registered_in_lite_mode(tmp_path):
     backend_root = Path(__file__).resolve().parents[3]
     environment = os.environ.copy()
     environment["LITE_MODE"] = "true"
@@ -1160,7 +1160,9 @@ async def test_product_chat_routes_are_not_registered_in_lite_mode():
 
     result = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=backend_root,
+        # 在临时目录执行：包入口会用 override=True 读取当前目录的 .env，
+        # 若在部署目录内运行，LITE_MODE=false 会覆盖本用例注入的取值。
+        cwd=tmp_path,
         env=environment,
         capture_output=True,
         text=True,

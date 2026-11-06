@@ -803,7 +803,8 @@ async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db
 
         async def call(self, prompt, stream=False):
             self.calls += 1
-            if self.calls == 1:
+            # 0.5.1 起单次回答内部会重试一次；前两次都失败才代表本次回答彻底失败。
+            if self.calls <= 2:
                 raise RuntimeError("model unavailable")
 
             async def chunks():
@@ -825,8 +826,11 @@ async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db
         model_selector=lambda model_spec: model,
     )
 
-    with pytest.raises(RuntimeError, match="model unavailable"):
+    # 两次尝试都失败后向上抛出的是统一错误码，不泄漏底层异常文本。
+    with pytest.raises(RuntimeError, match="MODEL_REQUEST_FAILED"):
         await answer_service.answer("是否支持私有部署？", object(), conversation.conversation_id)
+    # 两次模型尝试都失败后不得写入任何消息。
+    assert model.calls == 2
     assert await db_session.scalar(select(func.count()).select_from(ProductMessage)) == 0
 
     answer = await answer_service.answer("是否支持私有部署？", object(), conversation.conversation_id)
@@ -837,4 +841,4 @@ async def test_model_failure_writes_nothing_and_successful_retry_appends_once(db
     citations = (await db_session.execute(select(MessageCitation))).scalars().all()
     assert [message.role for message in messages] == [MessageRole.USER, MessageRole.ASSISTANT]
     assert len(citations) == 1
-    assert model.calls == 2
+    assert model.calls == 3

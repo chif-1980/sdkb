@@ -146,12 +146,32 @@ async def get_product_user(
             detail={"code": "SESSION_INVALID", "message": "登录已失效"},
         ) from None
 
-    result = await db.execute(select(User).filter(User.id == user_id, User.is_deleted == 0))
+    result = await db.execute(select(User).filter(User.id == user_id))
     user = result.scalar_one_or_none()
-    if user is None or user.department_id is None:
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "IDENTITY_MAPPING_REQUIRED", "message": "账号尚未完成组织映射"},
+        )
+    if user.is_deleted:
+        # 账号被删除后旧会话必须失效，且不能报成"未开通访问权限"误导用户。
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "SESSION_INVALID", "message": "登录已失效"},
+        )
+    if user.department_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "IDENTITY_MAPPING_REQUIRED", "message": "账号尚未完成组织映射"},
+        )
+    from yuxi.services.role_permission_service import permission_scope
+    from yuxi.storage.postgres.models_product import FeishuUserBinding
+    binding = await db.scalar(select(FeishuUserBinding).where(FeishuUserBinding.user_id == user.id))
+    if user.is_login_locked() or (binding and binding.authorization_status != "ACTIVE"):
+        raise HTTPException(403, detail={"code": "ACCESS_REVOKED", "message": "账号访问权限已停用"})
+    if await permission_scope(db, user, "assistant.view") != "all":
+        raise HTTPException(
+            403, detail={"code": "ASSISTANT_ACCESS_REQUIRED", "message": "当前角色没有企业知识助手访问权限"}
         )
     for attribute in User.__mapper__.column_attrs:
         getattr(user, attribute.key)

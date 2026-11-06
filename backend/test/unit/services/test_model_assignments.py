@@ -37,7 +37,8 @@ async def test_runtime_refresh_ignores_old_agent_and_request_model(monkeypatch):
     cfg.refresh = lambda: setattr(cfg, "default_model", "new:model")
     monkeypatch.setattr(models, "sys_config", cfg)
     assert system_chat_model_spec() == "new:model"
-    context = await prepare_agent_runtime_context(BaseContext(model="old:agent"))
+    # uid 留空：该用例只校验模型优先级，不应为了它去连接数据库。
+    context = await prepare_agent_runtime_context(BaseContext(model="old:agent", uid=""))
     assert context.model == "new:model"
     assert "model" not in BaseContext.get_configurable_items()
 
