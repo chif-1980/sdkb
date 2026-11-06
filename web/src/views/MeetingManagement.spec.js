@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
+import { Modal, message } from 'ant-design-vue'
 import MeetingManagementView from './MeetingManagementView.vue'
 import MeetingManagementDetail from './MeetingManagementDetail.vue'
 import * as api from '@/apis/meetingManagement'
@@ -12,13 +13,15 @@ vi.mock('@/apis/meetingManagement', () => ({
   getManagedMeeting: vi.fn(), getMeetingVersion: vi.fn(), archiveMeeting: vi.fn(),
   editMeetingMinutes: vi.fn(), editMeetingTasks: vi.fn(), getMeetingDirectory: vi.fn(),
   decideMeetingKnowledge: vi.fn(), retryManagedMeeting: vi.fn(), cancelManagedMeeting: vi.fn(),
-  syncMeetingTasks: vi.fn(), downloadMeeting: vi.fn(), searchFormalKnowledge: vi.fn(),
+  syncMeetingTasks: vi.fn(), resolveTaskSchedule: vi.fn(), downloadMeeting: vi.fn(), searchFormalKnowledge: vi.fn(),
   previewTaskReconciliation: vi.fn(), confirmTaskReconciliation: vi.fn()
 }))
 vi.mock('@/components/common/MarkdownPreview.vue', () => ({
   default: { props: ['content'], template: '<div>{{ content }}</div>' }
 }))
-vi.mock('ant-design-vue', () => ({message: {warning: vi.fn(), error: vi.fn()}, Modal: {confirm: vi.fn()}}))
+vi.mock('ant-design-vue', () => ({message: {warning: vi.fn(), error: vi.fn(), info: vi.fn()}, Modal: {confirm: vi.fn()}}))
+const permissions = vi.hoisted(() => ({ manage: true }))
+vi.mock('@/stores/user', () => ({ useUserStore: () => ({ hasPermission: () => permissions.manage }) }))
 
 const button = { props: ['disabled'], template: '<button :disabled="disabled"><slot /></button>' }
 const passthrough = { template: '<div><slot /></div>' }
@@ -47,6 +50,7 @@ async function render(path = '/meeting-management', extraStubs = {}) {
 }
 beforeEach(() => {
   vi.clearAllMocks()
+  permissions.manage = true
   api.meetingMetrics.mockResolvedValue({pending:2, overdue:0, knowledge:1, errors:0})
   api.listMeetings.mockResolvedValue({items:[{id:'m1',title:'示例会议',state:'completed'}],total:1})
   api.meetingQueue.mockResolvedValue({items:[],total:0})
@@ -97,6 +101,18 @@ const extractedTask = {id:'task-1', title:'核对手册', assigneeSuggestion:'�
 function meetingData(tasks) {
   return {meeting:{id:'m1',title:'验收会议',state:'completed'}, current:{id:'m1',version:1,sources:[],result:{body:'原始会议安排',followup:{tasks}}},runs:[],events:[]}
 }
+it('会议只读角色保留查看和导出，隐藏全部修改及即时同步入口', async () => {
+  permissions.manage = false
+  api.getManagedMeeting.mockResolvedValue(meetingData([extractedTask]))
+  const {wrapper} = await render('/meeting-management/m1?tab=TASK')
+  const names = wrapper.findAll('button').map(b => b.text())
+  expect(names).toContain('刷新')
+  expect(names).toContain('导出 Word')
+  for (const name of ['归档会议','编辑纪要','重新分析','补充待办','立即同步飞书状态','确认并发送','修改']) {
+    expect(names).not.toContain(name)
+  }
+  wrapper.unmount()
+})
 const reconciliationStubs = {
   'a-modal': {props:['open','title','okButtonProps'], emits:['ok'], template:'<section v-if="open" role="dialog"><h2>{{ title }}</h2><slot /><button :disabled="okButtonProps?.disabled" @click="$emit(\'ok\')">确认恢复关联</button></section>'},
   'a-form': passthrough, 'a-form-item': passthrough,
@@ -104,6 +120,30 @@ const reconciliationStubs = {
   'a-textarea': {props:['value'], emits:['update:value'], template:'<textarea :value="value" @input="$emit(\'update:value\', $event.target.value)" />'}
 }
 const reconciliationPreview = {matchBasis:'来源标记', pendingUpdate:true, remote:{id:'remote-1',title:'飞书原任务',content:'原始说明',assigneeIds:['member'],dueDate:'2026-09-21',status:'OPEN'}}
+it('即时同步展示失败、差异及待发送数量，并重新加载会议', async () => {
+  api.getManagedMeeting.mockResolvedValue(meetingData([extractedTask]))
+  api.syncMeetingTasks.mockResolvedValue({checked:2,failed:1,conflicts:1,skipped:3})
+  const {wrapper} = await render('/meeting-management/m1?tab=TASK')
+  const previous = api.getManagedMeeting.mock.calls.length
+  await wrapper.findAll('button').find(b => b.text() === '立即同步飞书状态').trigger('click')
+  await flushPromises()
+  expect(api.syncMeetingTasks).toHaveBeenCalledWith('m1')
+  expect(message.info).toHaveBeenCalledWith('已读取 2 项；失败 1 项；安排有差异 1 项；本地修改待发送 3 项')
+  expect(api.getManagedMeeting).toHaveBeenCalledTimes(previous + 1)
+  wrapper.unmount()
+})
+it.each([['保留知枢安排','LOCAL'],['采用飞书安排','FEISHU']])('差异处理 %s 使用当前版本，冲突时不自动发送', async (label, choice) => {
+  api.getManagedMeeting.mockResolvedValue(meetingData([{...extractedTask,delivery:{feishuTaskId:'remote-1',scheduleComparison:{status:'DIFFERENT',differences:['dueDate'],localDueDate:'2026-09-21',remoteDueDate:'2026-09-22'}}}]))
+  api.resolveTaskSchedule.mockRejectedValue(new Error('会议版本已变化，请重新核对'))
+  const {wrapper} = await render('/meeting-management/m1?tab=TASK')
+  await wrapper.findAll('button').find(b => b.text() === label).trigger('click')
+  const confirmation = Modal.confirm.mock.calls.at(-1)[0]
+  await confirmation.onOk(); await flushPromises()
+  expect(api.resolveTaskSchedule).toHaveBeenCalledWith('m1','task-1',expect.objectContaining({version:1,choice}))
+  expect(wrapper.text()).toContain('会议版本已变化，请重新核对')
+  expect(api.editMeetingTasks).not.toHaveBeenCalled()
+  wrapper.unmount()
+})
 it('先核对再恢复，改编号清除旧核对结果，核对期间不刷新覆盖版本', async () => {
   api.getManagedMeeting.mockResolvedValue(meetingData([{...extractedTask,delivery:{error:'创建结果待核对'}}]))
   api.previewTaskReconciliation.mockResolvedValue(reconciliationPreview)

@@ -28,3 +28,5 @@ export async function downloadMeeting(id, version) {
   anchor.click()
   URL.revokeObjectURL(url)
 }
+
+export const resolveTaskSchedule = (id, taskId, payload) => apiPost(`${path(id)}/tasks/${encodeURIComponent(taskId)}/resolve-schedule`, payload)

@@ -162,7 +162,8 @@ async def test_saved_revision_export_and_retry_preserve_previous_result(meeting_
     assert retry.status_code == 200
     await owner.post(f"/api/chat/runs/{retry.json()['runId']}/cancel")
     preserved = (await owner.get(f"/api/chat/meetings/{mid}")).json()
-    assert preserved["meeting"]["result"]["body"] == patch["body"]
+    # 0.6.1 起序列化会把待办表按 followup 重新渲染到正文后，这里只校验人工修订的正文被保留。
+    assert preserved["meeting"]["result"]["body"].startswith(patch["body"])
     assert len(preserved["revisions"]) == 2
 
 

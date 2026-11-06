@@ -8,7 +8,7 @@
           <div><h1>{{ data.meeting.title }}</h1><p>跟进负责人：{{ result?.followup?.coordinator?.displayName || '上传者' }}</p></div>
           <div class="meeting-actions">
             <a-button :disabled="busy || editing" @click="load">刷新</a-button>
-            <a-button :disabled="busy || editing" @click="archive">{{ data.meeting.archived ? '恢复会议' : '归档会议' }}</a-button>
+            <a-button v-if="canManage" :disabled="busy || editing" @click="archive">{{ data.meeting.archived ? '恢复会议' : '归档会议' }}</a-button>
             <a-button v-if="current" :disabled="busy || editing" @click="run(() => downloadMeeting(id, current.version), false)">导出 Word</a-button>
           </div>
         </header>
@@ -24,9 +24,9 @@
         <a-tabs v-model:active-key="tab">
           <a-tab-pane key="minutes" tab="纪要与依据">
             <div class="meeting-actions" style="margin-bottom:16px">
-              <a-button v-if="current && !editing && !data.meeting.archived" @click="startEdit">编辑纪要</a-button>
-              <a-button v-if="!data.meeting.archived && !['pending','running'].includes(data.meeting.state)" :disabled="busy || editing" @click="run(() => retryManagedMeeting(id))">重新分析</a-button>
-              <a-button v-if="['pending','running'].includes(data.meeting.state)" :disabled="busy" @click="run(() => cancelManagedMeeting(id))">取消分析</a-button>
+              <a-button v-if="canManage && current && !editing && !data.meeting.archived" @click="startEdit">编辑纪要</a-button>
+              <a-button v-if="canManage && !data.meeting.archived && !['pending','running'].includes(data.meeting.state)" :disabled="busy || editing" @click="run(() => retryManagedMeeting(id))">重新分析</a-button>
+              <a-button v-if="canManage && ['pending','running'].includes(data.meeting.state)" :disabled="busy" @click="run(() => cancelManagedMeeting(id))">取消分析</a-button>
             </div>
             <div v-if="editing" class="meeting-panel meeting-editor">
               <a-input v-model:value="draft.title" aria-label="会议标题" />
@@ -46,8 +46,8 @@
           </a-tab-pane>
           <a-tab-pane key="TASK" tab="待办事项">
             <div class="meeting-actions" style="margin-bottom:16px">
-              <a-button :disabled="!current || busy || data.meeting.archived" @click="addTask">补充待办</a-button>
-              <a-button :disabled="!current || busy || data.meeting.archived" @click="run(() => syncMeetingTasks(id))">刷新飞书状态</a-button>
+              <a-button v-if="canManage" :disabled="!current || busy || data.meeting.archived" @click="addTask">补充待办</a-button>
+              <a-button v-if="canManage" :disabled="!current || busy || data.meeting.archived" @click="syncNow">立即同步飞书状态</a-button>
               <span>无期限的事项不计入逾期。</span>
             </div>
             <p class="meeting-context-note">会议识别的负责人和期限需核对后确认；此处显示与助手共用的最新待办，纪要原文保留会议当时的安排。</p>
@@ -65,12 +65,16 @@
                     <div v-if="task.delivery.scheduleComparison.differences.includes('assignee')"><dt>负责人</dt><dd>本地：{{ task.delivery.scheduleComparison.localAssignees.map(member => member.name).join('、') || '未分配' }}</dd><dd>飞书：{{ task.delivery.scheduleComparison.remoteAssignees.map(member => member.name).join('、') || '未分配' }}</dd></div>
                     <div v-if="task.delivery.scheduleComparison.differences.includes('dueDate')"><dt>截止日期</dt><dd>本地：{{ task.delivery.scheduleComparison.localDueDate || '未设期限' }}</dd><dd>飞书：{{ task.delivery.scheduleComparison.remoteDueDate || '未设期限' }}</dd></div>
                   </dl>
-                  <p>仅提示差异，未改动双方安排。请核对原任务后决定如何调整。</p>
+                  <p>请核对后选择采用哪一方安排。保留知枢安排后，需再点击“同步修改”发送到原任务。</p>
+                  <div v-if="canManage && !data.meeting.archived && !task.delivery.pendingUpdate" class="meeting-actions">
+                    <a-button :disabled="busy" @click="resolveSchedule(task, 'LOCAL')">保留知枢安排</a-button>
+                    <a-button :disabled="busy" @click="resolveSchedule(task, 'FEISHU')">采用飞书安排</a-button>
+                  </div>
                 </template>
                 <a :href="`https://applink.feishu.cn/client/todo/detail?guid=${encodeURIComponent(task.delivery.feishuTaskId)}`" target="_blank" rel="noopener noreferrer">查看飞书原任务 ↗</a>
               </section>
               <div class="meeting-source"><button v-for="ref in task.sourceRefs" :key="ref" class="meeting-title-link" @click="showTaskEvidence(task, ref)">{{ ref }}</button></div>
-              <div class="meeting-actions" v-if="!data.meeting.archived">
+              <div class="meeting-actions" v-if="canManage && !data.meeting.archived">
                 <a-button :disabled="busy" @click="editTask(task)">修改</a-button>
                 <a-button v-if="needsReconciliation(task)" :disabled="busy" @click="openReconciliation(task)">核对飞书原任务</a-button>
                 <a-button v-else :disabled="busy" @click="sendTask(task)">{{ task.delivery?.feishuTaskId ? '同步修改' : '确认并发送' }}</a-button>
@@ -80,16 +84,28 @@
             <a-empty v-if="!tasks.length" description="暂无待办，可手动补充" />
           </a-tab-pane>
           <a-tab-pane key="KNOWLEDGE" tab="知识建议">
-            <p style="margin-bottom:16px">会议表述会先与正式知识比对。修改建议提交后由维护人员更新飞书原文，再进入现有审核/发布流程。</p>
+            <a-alert
+              type="info"
+              show-icon
+              style="margin-bottom:16px"
+              :message="`责任人：知识维护人员 · 处理位置：会议管理 → 知识建议 · 当前查看人：${data.viewerDisplayName || '当前管理员'}`"
+              description="这里负责核对会议建议并决定下一步，不会直接覆盖正式知识。提交原文修改或新增后，维护人员需更新飞书原文，再由系统进入扫描、审核和发布；发布完成会自动回写本条建议。"
+            />
             <article v-for="item in suggestions" :key="item.id" class="meeting-item">
               <div class="meeting-item-header"><h3>{{ item.title }}</h3><a-tag>{{ label(item.status) }}</a-tag></div>
               <p>{{ item.reason }}</p>
               <blockquote class="meeting-evidence"><strong>{{ label(item.comparisonStatus) }}</strong><br>{{ item.comparison }}</blockquote>
               <div v-for="reference in formalReferences(item)" :key="reference.evidence_id" class="meeting-evidence"><strong>{{ reference.title || reference.evidence_id }}</strong><p>{{ reference.excerpt || reference.content || reference.snippet }}</p></div>
               <details v-if="item.draftContent"><summary>查看建议草稿</summary><MarkdownPreview :content="item.draftContent" /></details>
+              <p v-if="item.governance?.formalPublication">已发布版本：{{ item.governance.publishedVersionId }} · {{ formatDate(item.governance.publishedAt) }}</p>
               <small v-if="item.decisionReason">维护人员处理说明：{{ item.decisionReason }}</small>
+              <div class="meeting-context-note" style="margin-top:10px">
+                <div><strong>责任角色：</strong>{{ item.governance?.ownerRole || '知识维护人员' }} · <strong>处理位置：</strong>{{ item.governance?.location || '会议管理 → 知识建议' }}</div>
+                <div><strong>下一步：</strong>{{ item.governance?.nextStep || '选择“处理建议”并填写处理说明' }}</div>
+                <div v-if="item.governance?.decidedByName"><strong>最近处理：</strong>{{ item.governance.decidedByName }} · {{ formatDate(item.governance.decidedAt) }}</div>
+              </div>
               <div class="meeting-source"><button v-for="ref in item.sourceRefs" :key="ref" class="meeting-title-link" @click="showTaskEvidence(item, ref)">{{ ref }}</button></div>
-              <a-button v-if="!data.meeting.archived" :disabled="busy" @click="openDecision(item)">处理建议</a-button>
+              <a-button v-if="canManage && !data.meeting.archived" :disabled="busy" @click="openDecision(item)">处理建议</a-button>
             </article>
             <a-empty v-if="!suggestions.length" description="暂无知识更新建议" />
           </a-tab-pane>
@@ -156,11 +172,13 @@ import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { ArrowLeft } from 'lucide-vue-next'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
+import { useUserStore } from '@/stores/user'
 import { searchFormalKnowledge, getManagedMeeting, archiveMeeting, editMeetingMinutes, editMeetingTasks, getMeetingDirectory,
   decideMeetingKnowledge, retryManagedMeeting, cancelManagedMeeting, syncMeetingTasks, downloadMeeting, getMeetingVersion,
-  previewTaskReconciliation, confirmTaskReconciliation } from '@/apis/meetingManagement'
+  previewTaskReconciliation, confirmTaskReconciliation, resolveTaskSchedule } from '@/apis/meetingManagement'
 import { label, formatDate, stateColor, reviewTone, executionTone, safeSourceUrl, taskAssigneeLabel, taskDeadlineLabel, taskExecutionLabel, taskScheduleLabel } from '@/utils/meetingManagement'
 const route = useRoute(), router = useRouter(), id = route.params.id
+const userStore = useUserStore(), canManage = computed(() => userStore.hasPermission('meetings.manage', 'all'))
 const data = ref(null), loading = ref(false), busy = ref(false), error = ref('')
 const tab = ref(['TASK','KNOWLEDGE'].includes(route.query.tab) ? route.query.tab : 'minutes')
 const current = computed(() => data.value?.current), result = computed(() => current.value?.result)
@@ -220,6 +238,18 @@ async function saveTask() {
   const items = tasks.value.map(task => task.id === taskDraft.value.id ? {...taskDraft.value, assigneeUserId:null} : taskPayload(task))
   if(!tasks.value.some(task => task.id === taskDraft.value.id)) items.push({...taskDraft.value, assigneeUserId:null})
   if(await run(() => editMeetingTasks(id, {version:current.value.version, tasks:items, action:'SAVE'}))) taskModal.value = false
+}
+async function syncNow() {
+  await run(async () => {
+    const summary = await syncMeetingTasks(id)
+    message.info(`已读取 ${summary.checked} 项；失败 ${summary.failed} 项；安排有差异 ${summary.conflicts || 0} 项；本地修改待发送 ${summary.skipped || 0} 项`)
+    return summary
+  })
+}
+function resolveSchedule(task, choice) {
+  Modal.confirm({title: choice === 'LOCAL' ? '保留知枢中的负责人和期限？' : '采用飞书中的负责人和期限？',
+    content: '将重新读取飞书任务并记录本次核对。',
+    onOk: () => run(() => resolveTaskSchedule(id, task.id, {version:current.value.version, choice, reason:'管理员在差异核对中确认采用' + (choice === 'LOCAL' ? '知枢安排' : '飞书安排')}))})
 }
 function sendTask(task) {Modal.confirm({title: task.delivery?.feishuTaskId ? '同步修改到原飞书任务？' : '确认待办并发送到飞书？', content:`负责人：${task.assignee?.displayName || '待分配'}；期限：${task.dueDate || '未设期限'}`, onOk: () => taskAction(task,'CONFIRM')})}
 function taskAction(task, action) {return run(() => editMeetingTasks(id, {version:current.value.version,tasks:tasks.value.map(taskPayload),action,taskId:task.id}))}

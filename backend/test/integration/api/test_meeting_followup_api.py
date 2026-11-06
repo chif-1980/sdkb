@@ -265,3 +265,32 @@ async def test_ai_proposal_keeps_existing_remote_task_and_can_be_dismissed(follo
     assert saved["delivery"] == task["delivery"]
     patch["version"] = 3
     assert (await owner.patch(f"/api/chat/meetings/{mid}/followup", json=patch)).status_code == 409
+
+
+async def test_foreign_owner_parameter_cannot_export_another_users_meeting(followup_clients):
+    from sqlalchemy import select
+
+    (owner, stranger), mid = followup_clients
+    async with pg_manager.get_async_session_context() as db:
+        record = await db.get(MeetingRecord, mid)
+        owner_id = await db.scalar(select(ProductConversation.owner_user_id).where(
+            ProductConversation.conversation_id == record.conversation_id
+        ))
+    response = await stranger.get(f"/api/chat/meetings/{mid}/export", params={"version": 1, "owner_id": owner_id})
+    assert response.status_code == 404, "An assistant request must never select another meeting owner"
+    for suffix in ["", "/followup-directory", "/markdown"]:
+        response = await stranger.get(f"/api/chat/meetings/{mid}{suffix}", params={"version": 1, "owner_id": owner_id})
+        assert response.status_code == 404
+    assert (await stranger.post(f"/api/chat/meetings/{mid}/retry", params={"owner_id": owner_id})).status_code == 404
+    for path in [f"/api/chat/runs/{mid}/cancel", f"/api/chat/meetings/{mid}/sync-tasks"]:
+        assert (await stranger.post(path, params={"owner_id": owner_id})).status_code == 404
+    for suffix, patch in [
+        ("", {"version": 1, "title": "越权修改", "body": "越权正文", "meetingType": "其他"}),
+        ("/followup", {"version": 1, "tasks": []}),
+    ]:
+        assert (
+            await stranger.patch(f"/api/chat/meetings/{mid}{suffix}", params={"owner_id": owner_id}, json=patch)
+        ).status_code == 404
+    untouched = (await owner.get(f"/api/chat/meetings/{mid}")).json()["meeting"]
+    assert untouched["version"] == 1 and untouched["state"] == "completed"
+    assert (await owner.get(f"/api/chat/meetings/{mid}/export", params={"version": 1})).status_code == 200

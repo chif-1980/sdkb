@@ -14,14 +14,16 @@ from yuxi.storage.postgres.models_product import FeishuUserBinding, ManagedMeeti
 from yuxi.utils.datetime_utils import utc_now_naive, utc_isoformat, UTC
 
 
-async def sync_tasks(db, record, user_id):
+async def sync_tasks(db, record, user_id, *, actor_id=None):
+    actor_id = user_id if actor_id is None else actor_id
     result = deepcopy(record.result)
     tasks = result.get("followup", {}).get("tasks", [])
     eligible = [
         t for t in tasks if (t.get("delivery") or {}).get("feishuTaskId") and not t["delivery"].get("pendingUpdate")
     ]
+    skipped = sum(bool((t.get("delivery") or {}).get("feishuTaskId")) for t in tasks) - len(eligible)
     if not eligible:
-        return {"checked": 0, "failed": 0}
+        return {"checked": 0, "failed": 0, "skipped": skipped, "conflicts": 0}
     changed, failures = len(eligible), 0
     processed = set()
     client = None
@@ -91,8 +93,8 @@ async def sync_tasks(db, record, user_id):
     if changed:
         managed = await MeetingManagement(db).attach(record)
         if state_changed:
-            await MeetingRepository(db).save_result(record, result, editor=user_id)
-            MeetingManagement(db).event(managed.id, "TASK_SYNC", user_id, {"checked": changed, "failed": failures})
+            await MeetingRepository(db).save_result(record, result, editor=actor_id)
+            MeetingManagement(db).event(managed.id, "TASK_SYNC", actor_id, {"checked": changed, "failed": failures})
         else:
             # Polling with no state change only refreshes sync metadata.
             # It must not create a revision or invalidate a user's edit version.
@@ -109,7 +111,12 @@ async def sync_tasks(db, record, user_id):
                     )
                     .values(payload=task, updated_at=utc_now_naive())
                 )
-    return {"checked": changed, "failed": failures}
+    return {
+        "checked": changed,
+        "failed": failures,
+        "skipped": skipped,
+        "conflicts": sum(t["delivery"].get("scheduleComparison", {}).get("status") == "DIFFERENT" for t in eligible),
+    }
 
 
 def compare_task_schedule(task, remote):

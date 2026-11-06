@@ -202,7 +202,11 @@ async def get_meeting(meeting_id: str, user: User = Depends(get_product_user)):
 
 
 @product_meeting.get("/chat/meetings/{meeting_id}/followup-directory")
-async def meeting_followup_directory(meeting_id: str, user: User = Depends(get_product_user), *, owner_id=None):
+async def meeting_followup_directory(meeting_id: str, user: User = Depends(get_product_user)):
+    return await load_followup_directory(meeting_id, user)
+
+
+async def load_followup_directory(meeting_id, user, *, owner_id=None):
     async with pg_manager.get_async_session_context() as db:
         await require_meeting(db, meeting_id, user, owner_id=owner_id)
         return await load_meeting_directory(db, user.id)
@@ -551,7 +555,11 @@ async def update_meeting_minutes(meeting_id, patch, user, *, owner_id=None, requ
 
 
 @product_meeting.post("/chat/meetings/{meeting_id}/retry")
-async def retry_meeting(meeting_id: str, user: User = Depends(get_product_user), *, owner_id=None):
+async def retry_meeting(meeting_id: str, user: User = Depends(get_product_user)):
+    return await retry_owned_meeting(meeting_id, user)
+
+
+async def retry_owned_meeting(meeting_id, user, *, owner_id=None):
     async with pg_manager.get_async_session_context() as db:
         record = await require_meeting(db, meeting_id, user, owner_id=owner_id, writable=True)
         request = SendMessageRequest(
@@ -601,7 +609,11 @@ async def copy_meeting(meeting_id: str, version: int, user: User = Depends(get_p
 
 
 @product_meeting.get("/chat/meetings/{meeting_id}/export")
-async def export_meeting(meeting_id: str, version: int, user: User = Depends(get_product_user), *, owner_id=None):
+async def export_meeting(meeting_id: str, version: int, user: User = Depends(get_product_user)):
+    return await export_owned_meeting(meeting_id, version, user)
+
+
+async def export_owned_meeting(meeting_id, version, user, *, owner_id=None):
     from yuxi.product_chat.meeting_export import export_docx
 
     async with pg_manager.get_async_session_context() as db:
@@ -616,3 +628,15 @@ async def export_meeting(meeting_id: str, version: int, user: User = Depends(get
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
     )
+
+
+@product_meeting.post("/chat/meetings/{meeting_id}/sync-tasks")
+async def sync_owned_meeting_tasks(meeting_id: str, user: User = Depends(get_product_user)):
+    from yuxi.product_chat.meeting_task_sync import sync_tasks
+
+    async with pg_manager.get_async_session_context() as db:
+        record = await require_meeting(db, meeting_id, user, lock=True, writable=True)
+        if record.state != "completed" or not record.result:
+            raise HTTPException(409, "会议尚未完成，暂不能同步待办")
+        summary = await sync_tasks(db, record, user.id)
+        return {"meeting": serialize_meeting(record), **summary}

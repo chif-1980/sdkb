@@ -205,10 +205,55 @@ async def detail(meeting_id: str, user=Depends(get_admin_user)):
         if result:
             # Do not expose embedded historical meetings through the management endpoint.
             result["result"] = {k: v for k, v in result["result"].items() if k != "selectedHistory"}
+            # decidedBy 由 JSON 载荷写入，可能是字符串；user_id 是整数列，必须按整数比较。
+            decided_by_ids = {
+                int(item.payload["decidedBy"])
+                for item in items
+                if item.kind == "KNOWLEDGE" and str(item.payload.get("decidedBy") or "").isdigit()
+            }
+            binding_rows = (
+                await db.execute(
+                    select(FeishuUserBinding.user_id, FeishuUserBinding.display_name).where(
+                        FeishuUserBinding.user_id.in_(decided_by_ids)
+                    )
+                )
+            ).all()
+            suggestion_actor_names = {str(row.user_id): row.display_name for row in binding_rows}
+            knowledge_suggestions = []
+            for item in items:
+                if item.kind != "KNOWLEDGE":
+                    continue
+                suggestion = dict(item.payload)
+                status = suggestion.get("status") or "PENDING_MAINTAINER"
+                governance = dict(suggestion.get("governance") or {})
+                governance.setdefault("ownerRole", "知识维护人员")
+                governance.setdefault("location", "会议管理 → 知识建议")
+                if status == "PENDING_MAINTAINER":
+                    governance.setdefault("nextStep", "由具有知识维护权限的人员选择处理结论并填写处理说明")
+                elif status == "COVERED":
+                    governance.setdefault("nextStep", "保留处理记录，正式知识继续按现行版本生效")
+                elif status == "DEFERRED":
+                    governance.setdefault("nextStep", "后续补充证据后，可在本条建议中重新处理")
+                elif status == "REJECTED":
+                    governance.setdefault("nextStep", "本条建议已关闭，会议原文和处理说明继续保留")
+                elif status == "PROCESSING":
+                    governance.setdefault("nextStep", "维护人员完善建议草稿后提交原文修改或新增流程")
+                elif status == "NEW_SOURCE_DRAFT":
+                    governance.setdefault("nextStep", "维护人员补回飞书原文后启动扫描审核")
+                elif status == "REVIEW_REQUESTED":
+                    governance.setdefault("nextStep", "在知识审核工作台完成审核，发布后自动回写本条建议")
+                elif status in {"PUBLISHED", "KNOWLEDGE_PUBLISHED"}:
+                    governance.setdefault("nextStep", "已完成闭环，正式知识版本已回写会议建议")
+                decided_by = suggestion.get("decidedBy")
+                if decided_by:
+                    governance["decidedBy"] = decided_by
+                    governance["decidedByName"] = suggestion_actor_names.get(str(decided_by), str(decided_by))
+                suggestion["governance"] = governance
+                knowledge_suggestions.append(suggestion)
             result["result"]["followup"] = {
                 **(result["result"].get("followup") or {}),
                 "tasks": [i.payload for i in items if i.kind == "TASK"],
-                "knowledgeSuggestions": [i.payload for i in items if i.kind == "KNOWLEDGE"],
+                "knowledgeSuggestions": knowledge_suggestions,
             }
         return {
             "meeting": MeetingManagement.summary(managed, run, items),
@@ -223,6 +268,8 @@ async def detail(meeting_id: str, user=Depends(get_admin_user)):
             ],
             "scope": "TENANT" if managed.tenant_key else "OWNED",
             "ownerDisplayName": owner_display_name,
+            "viewerDisplayName": user.username,
+            "viewerRole": user.role,
         }
 
 
@@ -286,7 +333,7 @@ async def current_run(meeting_id, user, *, writable=True, latest=False):
 @meeting_management.get("/{meeting_id}/directory")
 async def directory(meeting_id: str, user=Depends(get_admin_user)):
     run_id, owner_id = await current_run(meeting_id, user)
-    return await product.meeting_followup_directory(run_id, user, owner_id=owner_id)
+    return await product.load_followup_directory(run_id, user, owner_id=owner_id)
 
 
 @meeting_management.patch("/{meeting_id}/followup")
@@ -308,7 +355,7 @@ async def minutes(meeting_id: str, patch: product.MeetingEdit, user=Depends(get_
 @meeting_management.post("/{meeting_id}/retry")
 async def retry(meeting_id: str, user=Depends(get_admin_user)):
     run_id, owner_id = await current_run(meeting_id, user, latest=True)
-    return await product.retry_meeting(run_id, user, owner_id=owner_id)
+    return await product.retry_owned_meeting(run_id, user, owner_id=owner_id)
 
 
 @meeting_management.post("/{meeting_id}/cancel")
@@ -320,7 +367,7 @@ async def cancel(meeting_id: str, user=Depends(get_admin_user)):
 @meeting_management.get("/{meeting_id}/export")
 async def export(meeting_id: str, version: int, user=Depends(get_admin_user)):
     run_id, owner_id = await current_run(meeting_id, user, writable=False)
-    return await product.export_meeting(run_id, version, user, owner_id=owner_id)
+    return await product.export_owned_meeting(run_id, version, user, owner_id=owner_id)
 
 
 class KnowledgeDecision(BaseModel):
@@ -442,6 +489,7 @@ async def confirm_task_reconciliation(
 @meeting_management.patch("/{meeting_id}/knowledge/{item_id}")
 async def knowledge_decision(meeting_id: str, item_id: str, patch: KnowledgeDecision, user=Depends(get_admin_user)):
     from copy import deepcopy
+    from yuxi.utils.datetime_utils import utc_now_naive, utc_isoformat, UTC
     from yuxi.storage.postgres.models_knowledge import FeishuKnowledgeUnit
 
     async with pg_manager.get_async_session_context() as db:
@@ -541,13 +589,14 @@ async def knowledge_decision(meeting_id: str, item_id: str, patch: KnowledgeDeci
             patch_action = "REVIEW_REQUESTED"
         else:
             patch_action = patch.action
-        target.update(status=patch_action, decisionReason=patch.reason.strip(), decidedBy=user.id)
+        decided_at = utc_isoformat(utc_now_naive().replace(tzinfo=UTC))
+        target.update(status=patch_action, decisionReason=patch.reason.strip(), decidedBy=user.id, decidedAt=decided_at)
         await MeetingRepository(db).save_result(record, result, editor=user.id)
         MeetingManagement(db).event(
             managed.id,
             "KNOWLEDGE_DECISION",
             user.id,
-            {"itemId": item_id, "status": patch_action, "reason": patch.reason.strip()},
+            {"itemId": item_id, "status": patch_action, "reason": patch.reason.strip(), "actorName": user.username},
         )
         return {"meeting": serialize_meeting(record)}
 
@@ -564,6 +613,74 @@ async def refresh_tasks(meeting_id: str, user=Depends(get_admin_user)):
         if not record:
             raise HTTPException(409, "尚无会议结果")
         try:
-            return await sync_tasks(db, record, user.id)
+            return await sync_tasks(db, record, managed.owner_user_id, actor_id=user.id)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+
+
+class TaskScheduleResolution(BaseModel):
+    version: int = Field(ge=1)
+    choice: Literal["LOCAL", "FEISHU"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+@meeting_management.post("/{meeting_id}/tasks/{item_id}/resolve-schedule")
+async def resolve_task_schedule(
+    meeting_id: str, item_id: str, patch: TaskScheduleResolution, user=Depends(get_admin_user)
+):
+    from copy import deepcopy
+    from datetime import date
+    from yuxi.product_chat.meeting_task_sync import sync_tasks
+
+    if not patch.reason.strip():
+        raise HTTPException(422, "请填写核对说明")
+    async with pg_manager.get_async_session_context() as db:
+        managed = await require(db, meeting_id, user, writable=True)
+        record = await db.scalar(select(MeetingRecord).where(
+            MeetingRecord.id == managed.successful_run_id
+        ).with_for_update())
+        if not record or record.version != patch.version:
+            raise HTTPException(409, "会议版本已变化，请刷新后核对")
+        task = next((t for t in record.result.get("followup", {}).get("tasks", []) if t["id"] == item_id), None)
+        if not task or not (task.get("delivery") or {}).get("feishuTaskId"):
+            raise HTTPException(404, "未找到已关联的飞书任务")
+        if task["delivery"].get("pendingUpdate"):
+            raise HTTPException(409, "请先处理尚未同步的本地修改")
+        # Re-read under the version lock; never accept a stale browser snapshot.
+        await sync_tasks(db, record, managed.owner_user_id, actor_id=user.id)
+        result = deepcopy(record.result)
+        task = next(t for t in result["followup"]["tasks"] if t["id"] == item_id)
+        delivery = task["delivery"]
+        comparison = delivery.get("scheduleComparison") or {}
+        if delivery.get("syncStatus") == "FAILED" or comparison.get("status") == "UNVERIFIED":
+            raise HTTPException(409, "飞书安排尚未核实，请稍后重新读取")
+        if comparison.get("status") != "DIFFERENT":
+            raise HTTPException(409, "安排已无差异，请刷新页面")
+        if patch.choice == "FEISHU":
+            assignees = comparison["remoteAssignees"]
+            due = comparison["remoteDueDate"]
+            if len(assignees) > 1:
+                raise HTTPException(422, "飞书存在多位负责人，请先在飞书明确单一负责人")
+            try:
+                if due:
+                    date.fromisoformat(due)
+            except ValueError:
+                raise HTTPException(422, "飞书任务使用具体时刻，请先核对并改为全天截止日期") from None
+            assignee = assignees[0] if assignees else None
+            task["assignee"] = ({"feishuUserId": assignee["id"], "displayName": assignee["name"], "userId": None}
+                                if assignee else None)
+            task["dueDate"] = due
+            task["dueDateEdited"] = True
+            delivery["scheduleComparison"] = {**comparison, "status": "MATCH", "differences": [],
+                                              "localAssignees": assignees, "localDueDate": due}
+        else:
+            # Choosing the local plan is not permission to send a notification.
+            # The existing explicit send action applies it to the original task.
+            delivery.update(pendingUpdate=True, syncStatus="PENDING")
+        await MeetingRepository(db).save_result(record, result, editor=user.id, audit={
+            "action": "TASK_RESOLVE_SCHEDULE", "detail": {
+                "taskId": item_id, "choice": patch.choice, "reason": patch.reason.strip(),
+                "comparison": comparison, "actorName": user.username,
+            },
+        })
+        return {"meeting": serialize_meeting(record)}

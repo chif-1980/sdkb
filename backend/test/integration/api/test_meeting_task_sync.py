@@ -18,12 +18,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from server.routers.meeting_management_router import meeting_management
 from server.routers.product_meeting_router import product_meeting
 from server.utils.auth_middleware import get_admin_user, get_product_user
-from yuxi.integrations.feishu.client import FeishuClientError
+from yuxi.integrations.feishu.client import FeishuClientError, FeishuNotFoundError
 from yuxi.product_chat import meeting_task_sync as sync
 from yuxi.product_chat.meeting_repository import MeetingRepository
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Department, User, Base
+from yuxi.storage.postgres.models_business import (
+    Department, User, Base, Role, RoleCapability, RolePermission, UserRole, FeishuDepartmentRole,
+)
 from yuxi.storage.postgres.models_product import (
+    FeishuDepartmentBinding, FeishuUserDepartmentMembership,
     FeishuUserBinding,
     ProductConversation,
     ProductMessage,
@@ -47,6 +50,8 @@ async def workspace(monkeypatch):
     classes = [
         Department,
         User,
+        Role, RoleCapability, RolePermission, UserRole, FeishuDepartmentRole,
+        FeishuDepartmentBinding, FeishuUserDepartmentMembership,
         FeishuUserBinding,
         ProductConversation,
         ProductMessage,
@@ -244,7 +249,7 @@ async def test_failure_visible_preserves_state_and_recovers(workspace, failure, 
             binding.authorization_status = "ACTIVE"
     response = await w.http.post(f"/api/meeting-management/{mid}/sync-tasks")
     assert response.status_code == 200
-    assert response.json() == {"checked": 1, "failed": 0}
+    assert response.json() == {"checked": 1, "failed": 0, "skipped": 0, "conflicts": 0}
     recovered, _ = await snapshot(w, mid)
     assert recovered["result"]["followup"]["tasks"][0]["delivery"]["syncStatus"] == "SYNCED"
     assert recovered["result"]["followup"]["tasks"][0]["delivery"]["syncError"] is None
@@ -890,3 +895,98 @@ async def test_explicit_local_edit_keeps_old_snapshot_until_send_then_requires_n
     await sync.sync_task_batch()
     matched, _ = await snapshot(w, w.mid)
     assert matched["result"]["followup"]["tasks"][0]["delivery"]["scheduleComparison"]["status"] == "MATCH"
+
+
+@pytest.mark.parametrize("choice", ["LOCAL", "FEISHU"])
+async def test_schedule_resolution_reads_fresh_remote_and_checks_version(workspace, choice):
+    w = workspace
+    mid = await w.create(
+        tasks=[task(assignee={"feishuUserId": "user-test", "displayName": "本地负责人"}, dueDate=None)]
+    )
+    w.client.get_task.return_value = {
+        "completed_at": "0",
+        "members": [{"id": "remote-user", "name": "远程负责人", "role": "assignee"}],
+        "due": None,
+    }
+    response = await w.http.post(f"/api/meeting-management/{mid}/sync-tasks")
+    assert response.json()["conflicts"] == 1
+    before, _ = await snapshot(w, mid)
+    endpoint = f"/api/meeting-management/{mid}/tasks/task-1/resolve-schedule"
+    payload = {"version": before["version"], "choice": choice, "reason": "与负责人核实"}
+    assert (await w.http.post(endpoint, json={**payload, "version": 999})).status_code == 409
+    resolved = await w.http.post(endpoint, json=payload)
+    assert resolved.status_code == 200, resolved.text
+    saved = resolved.json()["meeting"]["result"]["followup"]["tasks"][0]
+    assert saved["delivery"]["feishuTaskId"] == "task-1"
+    if choice == "LOCAL":
+        assert saved["assignee"]["feishuUserId"] == "user-test"
+        assert saved["delivery"]["pendingUpdate"] is True
+    else:
+        assert saved["assignee"]["feishuUserId"] == "remote-user"
+        assert not saved["delivery"].get("pendingUpdate")
+    assert (await w.http.post(endpoint, json=payload)).status_code == 409
+
+
+async def test_assistant_sync_reads_own_tasks_and_returns_summary(workspace):
+    """助手端同步只有反向 404 断言，这里补合法负责人正向读取与汇总口径。"""
+    w = workspace
+    mid = await w.create([task("a"), task("b", delivery={"feishuTaskId": "b", "pendingUpdate": True})])
+    w.client.get_task.return_value = {"completed_at": "1750000000000"}
+    response = await w.http.post(f"/api/chat/meetings/{mid}/sync-tasks")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert {key: body[key] for key in ("checked", "failed", "skipped", "conflicts")} == {
+        "checked": 1, "failed": 0, "skipped": 1, "conflicts": 0
+    }
+    tasks = {t["id"]: t for t in body["meeting"]["result"]["followup"]["tasks"]}
+    assert tasks["a"]["status"] == "DONE"
+    assert tasks["a"]["delivery"]["syncStatus"] == "SYNCED"
+    # 待发送的本地修改不参与读取，也不会被清掉。
+    assert tasks["b"]["delivery"]["pendingUpdate"] is True
+    w.client.get_task.assert_awaited_once_with("a")
+
+
+async def test_manager_sync_uses_meeting_owner_identity_and_records_own_actor(workspace):
+    """管理员同步他人会议时，必须用会议所属人的飞书身份读取，审计记录实际操作者。"""
+    from server.utils.auth_middleware import get_admin_user
+
+    w = workspace
+    mid = await w.create()
+    async with w.db() as db:
+        manager = User(username="另一管理员", uid="manager", role="admin", password_hash="unused",
+                       department_id=w.user.department_id)
+        db.add(manager)
+        await db.flush()
+        db.add(FeishuUserBinding(user_id=manager.id, feishu_user_id="manager-feishu",
+                                 feishu_open_id="manager-open", tenant_key="test-tenant",
+                                 display_name="另一管理员", authorization_status="ACTIVE"))
+        await db.flush()
+    w.app.dependency_overrides[get_admin_user] = lambda: manager
+    w.client.get_task.return_value = {"completed_at": "1750000000000"}
+    response = await w.http.post(f"/api/meeting-management/{mid}/sync-tasks")
+    assert response.status_code == 200, response.text
+    # 读取用的是会议所属人的身份，不是管理员自己的。
+    w.client.get_employee.assert_awaited_with("user-test")
+    _, admin = await snapshot(w, mid)
+    event = next(e for e in admin["events"] if e["action"] == "TASK_SYNC")
+    assert event["actorUserId"] == manager.id
+    assert admin["current"]["result"]["followup"]["tasks"][0]["status"] == "DONE"
+
+
+async def test_deleted_remote_task_reports_reason_and_keeps_last_valid_state(workspace):
+    """飞书原任务被删除时说明原因、保留上次有效状态，不静默清空关联。"""
+    w = workspace
+    mid = await w.create()
+    await sync.sync_task_batch()
+    before = (await snapshot(w, mid))[0]["result"]["followup"]["tasks"][0]
+    w.client.get_task.side_effect = FeishuNotFoundError("飞书任务不存在或已删除")
+    await sync.sync_task_batch()
+    failed, _ = await snapshot(w, mid)
+    task = failed["result"]["followup"]["tasks"][0]
+    assert task["delivery"]["syncStatus"] == "FAILED"
+    assert task["delivery"]["syncError"]
+    assert task["delivery"]["feishuTaskId"] == "task-1"
+    assert task["status"] == before["status"]
+    assert task["delivery"]["lastSyncedAt"] == before["delivery"]["lastSyncedAt"]
+    # 失败不制造修订号变化，页面不会因为读不到就丢掉用户正在编辑的版本。
+    assert failed["version"] == (await snapshot(w, mid))[0]["version"]

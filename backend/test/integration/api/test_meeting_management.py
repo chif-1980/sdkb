@@ -114,7 +114,8 @@ async def test_owned_management_pagination_archive_revisions_and_failed_rerun():
             assert response.status_code == 200, response.text
             data = response.json()
             assert data["meeting"]["state"] == "failed"
-            assert data["current"]["result"]["body"] == "测试纪要 正式记录"
+            # 序列化会把待办表按 followup 追加到正文后，这里校验人工正文本身仍被保留。
+            assert data["current"]["result"]["body"].startswith("测试纪要 正式记录")
             assert len(data["runs"]) == 2
             assert data["current"]["result"]["followup"]["tasks"][0]["delivery"]["feishuTaskId"] == "never-send-this"
             assert (await client.get(f"/api/meeting-management/{mids[-1]}")).status_code == 404
@@ -167,7 +168,7 @@ async def test_owned_management_pagination_archive_revisions_and_failed_rerun():
             assert decision.status_code == 200, decision.text
             assert decision.json()["meeting"]["result"]["followup"]["knowledgeSuggestions"][0]["status"] == "PROCESSING"
             snapshot = await client.get(f"/api/meeting-management/{own}/runs/{own}", params={"version": 1})
-            assert snapshot.json()["meeting"]["result"]["body"] == "测试纪要 正式记录"
+            assert snapshot.json()["meeting"]["result"]["body"].startswith("测试纪要 正式记录")
             pending = await client.get("/api/meeting-management/queue/KNOWLEDGE", params={"status": "PROCESSING"})
             assert pending.json()["total"] == 1
             assert pending.json()["items"][0]["draftContent"] == "知识草稿正文"
