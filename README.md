@@ -4,7 +4,7 @@
   <p><strong>企业知识治理与可信知识助手平台</strong></p>
   <p>让企业资料从接入、加工、审核到发布形成可追溯闭环，并以可核对的引用支撑每一次回答。</p>
 
-  [![Version](https://img.shields.io/badge/version-0.7.0-0f766e)](https://github.com/chif-1980/sdkb/tree/0.7.0)
+  [![Version](https://img.shields.io/badge/version-0.7.2-0f766e)](https://github.com/chif-1980/sdkb/tree/0.7.2)
   [![License](https://img.shields.io/badge/license-MIT-475569)](LICENSE)
   [![Docs](https://img.shields.io/badge/docs-在线文档-2563eb)](https://chif-1980.github.io/sdkb/)
 
@@ -80,7 +80,9 @@
 
 ## 当前版本
 
-**0.7.0（2026-09-24）**，配套 [企业知识助手 0.6.10](https://github.com/chif-1980/sdAssit/tree/0.6.10)。两端补丁版本独立管理。
+**0.7.2（2026-11-06）**，配套 [企业知识助手 0.6.11](https://github.com/chif-1980/sdAssit/tree/0.6.11)。两端补丁版本独立管理。
+
+本版为发布候选加固：反馈工单补齐指派→处理→复核→关闭全链（含驳回回流与并发控制），会议详情写入口统一按 `meetings.manage` 收紧，企业知识助手新增独立 `assistant.view` 权限并让撤权后的旧会话立即失效，知识发布回写补上来源失效拦截。底层 Yuxi 包版本仍为 `0.7.1`，未随产品版本变化。
 
 - **统一 RBAC**：角色权限工作区与主菜单一一对应，支持菜单可见性、页面内操作、数据范围、授权成员和生效预览；内置超级管理员、管理员、普通用户与自定义角色兼容并存，飞书部门可继承角色。
 - **管理端嵌入企业知识助手**：从知枢左侧菜单打开后，助手在右侧内容区加载，管理菜单保持可见；通过一次性 60 秒登录交接码完成身份交接，不把管理令牌放进地址栏。
