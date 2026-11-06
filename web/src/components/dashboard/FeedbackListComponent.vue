@@ -8,13 +8,15 @@
       />
     </a-space>
 
+    <a-select v-model:value="workflowFilter" style="width:160px; margin:0 0 16px 12px" aria-label="治理状态" :options="workflowOptions" />
+    <FeedbackWorkflow :feedback="selectedFeedback" @close="selectedFeedback = null" @updated="loadFeedbacks" />
     <!-- 卡片列表 -->
     <div v-if="loadingFeedbacks" class="loading-container">
       <a-spin size="large" />
     </div>
 
     <div v-else class="feedback-cards-container">
-      <div v-for="feedback in feedbacks" :key="feedback.id" class="feedback-card">
+      <div v-for="feedback in visibleFeedbacks" :key="feedback.id" class="feedback-card">
         <!-- 卡片头部：用户信息和反馈类型 -->
         <div class="card-header">
           <div class="user-info">
@@ -102,6 +104,7 @@
 
         <!-- 卡片底部：时间信息 -->
         <div class="card-footer">
+          <a-button type="link" @click="selectedFeedback = feedback">{{ feedbackStatusName(feedback.governance?.status || 'OPEN') }} · 治理记录</a-button>
           <div class="time-info">
             <ClockCircleOutlined />
             <span>{{ formatFullDate(feedback.created_at) }}</span>
@@ -110,7 +113,7 @@
       </div>
 
       <!-- 空状态 -->
-      <div v-if="feedbacks.length === 0" class="empty-state">
+      <div v-if="visibleFeedbacks.length === 0" class="empty-state">
         <a-empty description="暂无反馈数据" />
       </div>
     </div>
@@ -118,13 +121,19 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, computed } from 'vue'
 import { message } from 'ant-design-vue'
 import { LikeOutlined, DislikeOutlined, ClockCircleOutlined } from '@ant-design/icons-vue'
 import { dashboardApi } from '@/apis/dashboard_api'
 import { formatFullDateTime } from '@/utils/time'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
+
+import FeedbackWorkflow from './FeedbackWorkflow.vue'
+import { feedbackStatusName } from '@/utils/feedbackGovernance'
+const selectedFeedback = ref(null), workflowFilter = ref('ALL')
+const workflowOptions = [{value:'ALL',label:'全部治理状态'}, ...['OPEN','ASSIGNED','PROCESSING','IN_REVIEW','RESOLVED','CLOSED'].map(value => ({value,label:feedbackStatusName(value)}))]
+const visibleFeedbacks = computed(() => feedbacks.value.filter(item => workflowFilter.value === 'ALL' || (item.governance?.status || 'OPEN') === workflowFilter.value))
 
 // 常量配置
 const CONFIG = {

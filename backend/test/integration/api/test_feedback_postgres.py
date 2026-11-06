@@ -58,6 +58,15 @@ async def test_other_feedback_creates_review_and_is_visible_in_dashboard(monkeyp
             admin = await add(
                 User(username="admin", uid="admin", role="superadmin", password_hash="unused", department_id=dept.id)
             )
+            reviewer = await add(
+                User(
+                    username="reviewer",
+                    uid="reviewer",
+                    role="superadmin",
+                    password_hash="unused",
+                    department_id=dept.id,
+                )
+            )
             await add(KnowledgeBase(kb_id="kb", name="test", kb_type="milvus"))
             await add(KnowledgeFile(file_id="file", kb_id="kb", filename="test.txt"))
             await add(
@@ -185,6 +194,65 @@ async def test_other_feedback_creates_review_and_is_visible_in_dashboard(monkeyp
             assert response.status_code == 200, response.text
             assert len(response.json()) == 1
             assert payload["reasonText"] in response.json()[0]["reason"]
+            key = f"product:{message.message_id}"
+            endpoint = f"/api/dashboard/feedbacks/{key}/workflow"
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
+            reviewer_headers = {"Authorization": "Bearer " + AuthUtils.create_access_token({"sub": str(reviewer.id)})}
+            owner_headers = {"Authorization": "Bearer " + AuthUtils.create_access_token({"sub": str(owner.id)})}
+            assert (
+                await client.patch(
+                    endpoint,
+                    headers=owner_headers,
+                    json={"version": 0, "action": "ASSIGN", "note": "越权指派", "assigneeId": owner.id},
+                )
+            ).status_code == 403
+            version = 0
+            for action, headers in [("ASSIGN",admin_headers), ("START",admin_headers), ("SUBMIT_REVIEW",admin_headers)]:
+                result = await client.patch(
+                    endpoint,
+                    headers=headers,
+                    json={"version": version, "action": action, "assigneeId": admin.id, "note": "已核对原文并修正引用"},
+                )
+                assert result.status_code == 200, result.text
+                version = result.json()["version"]
+                if action == "ASSIGN":
+                    blocked = await client.patch(endpoint, headers=reviewer_headers, json={
+                        "version": version, "action": "START", "note": "非负责人不能开始处理",
+                    })
+                    assert blocked.status_code == 403
+            assert result.json()["status"] == "IN_REVIEW"
+            assert (
+                await client.patch(
+                    endpoint, headers=admin_headers, json={"version": version, "action": "APPROVE", "note": "自己复核"}
+                )
+            ).status_code == 403
+            for action, headers in [("APPROVE",reviewer_headers), ("CLOSE",admin_headers)]:
+                result = await client.patch(
+                    endpoint, headers=headers, json={"version": version, "action": action, "note": "核对结果一致"}
+                )
+                assert result.status_code == 200, result.text
+                version = result.json()["version"]
+            assert result.json()["status"] == "CLOSED"
+            assert len(result.json()["history"]) == 5
+            assert result.json()["reviewerId"] == reviewer.id
+            assert (
+                await client.patch(
+                    endpoint, headers=admin_headers, json={"version": 0, "action": "REOPEN", "note": "旧版本"}
+                )
+            ).status_code == 409
+            reopened = await client.patch(
+                endpoint,
+                headers=admin_headers,
+                json={"version": version, "action": "REOPEN", "note": "新增证据，重新处理"},
+            )
+            assert reopened.status_code == 200 and reopened.json()["status"] == "OPEN"
+            assert (
+                await client.patch(
+                    endpoint,
+                    headers=admin_headers,
+                    json={"version": reopened.json()["version"], "action": "CLOSE", "note": "跳过复核"},
+                )
+            ).status_code == 409
 
         async with factory() as db:
             stored = await db.scalar(select(ProductMessage).where(ProductMessage.message_id == message.message_id))
@@ -194,9 +262,27 @@ async def test_other_feedback_creates_review_and_is_visible_in_dashboard(monkeyp
                 payload["reasonText"],
             )
             for model in (FeishuReviewPackage, FeishuReviewItem, FeishuSourceChangeRequest, FeishuNotificationDelivery):
-                assert await db.scalar(select(func.count()).select_from(model)) == 1
+                assert await db.scalar(select(func.count()).select_from(model)) == (
+                    2 if model is FeishuNotificationDelivery else 1
+                )
             request = await db.scalar(select(FeishuSourceChangeRequest))
             assert payload["reasonText"] in request.request_text
+            stored.feedback_reason_text = "用户补充：新的反馈内容"
+            await db.commit()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            latest = await client.get(endpoint, headers=admin_headers)
+            assert latest.status_code == 200 and latest.json()["sourceChanged"] is True
+            current_version = latest.json()["version"]
+            stale_source = await client.patch(endpoint, headers=admin_headers, json={
+                "version": current_version, "action": "ASSIGN", "assigneeId": admin.id, "note": "旧内容不能继续指派",
+            })
+            assert stale_source.status_code == 409
+            refreshed = await client.patch(endpoint, headers=admin_headers, json={
+                "version": current_version, "action": "REOPEN", "note": "根据用户补充更新工单",
+            })
+            assert refreshed.status_code == 200 and refreshed.json()["sourceChanged"] is False
+            assert refreshed.json()["version"] == current_version + 1
     finally:
         async with engine.begin() as conn:
             await conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))

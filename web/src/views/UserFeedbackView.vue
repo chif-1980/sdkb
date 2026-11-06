@@ -2,7 +2,7 @@
   <div class="user-feedback-page">
     <header class="page-heading">
       <h1>用户反馈</h1>
-      <p>查看用户对助手回答的评价和反馈原因。</p>
+      <p>指派、处理和复核用户反馈，关闭后仍保留完整操作记录。</p>
     </header>
     <FeedbackListComponent />
   </div>

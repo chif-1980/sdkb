@@ -8,10 +8,10 @@ Provides centralized dashboard APIs for monitoring system-wide statistics.
 
 import traceback
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import Integer, String, cast, distinct, func, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -726,6 +726,7 @@ class FeedbackListItem(BaseModel):
     message_content: str
     conversation_title: str | None
     agent_id: str
+    governance: dict = Field(default_factory=dict)
 
 
 @dashboard.get("/feedbacks", response_model=list[FeedbackListItem])
@@ -835,6 +836,14 @@ async def get_all_feedbacks(
                 }
             )
 
+        from yuxi.storage.postgres.models_business import FeedbackCase
+        from yuxi.services.feedback_governance import case_view
+
+        cases = {c.feedback_key: c for c in await db.scalars(select(FeedbackCase).where(
+            FeedbackCase.feedback_key.in_([str(item["id"]) for item in feedback_items])
+        ))} if feedback_items else {}
+        for item in feedback_items:
+            item["governance"] = case_view(cases.get(str(item["id"])))
         feedback_items.sort(key=lambda item: item["created_at"], reverse=True)
 
         # Debug logging (privacy-safe)
@@ -1122,3 +1131,46 @@ async def get_call_timeseries_stats(
         logger.error(f"Error getting call timeseries stats: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to get call timeseries stats: {str(e)}")
+
+
+class FeedbackTransition(BaseModel):
+    version: int = Field(ge=0)
+    action: Literal["ASSIGN", "START", "SUBMIT_REVIEW", "APPROVE", "REJECT", "CLOSE", "REOPEN"]
+    assigneeId: int | None = None
+    note: str = Field(min_length=1, max_length=5000)
+
+
+@dashboard.get("/feedbacks/assignees")
+async def feedback_assignees(db: AsyncSession = Depends(get_db), user: User = Depends(get_admin_user)):
+    from yuxi.services.role_permission_service import permission_scope
+
+    if await permission_scope(db, user, "feedback.manage") != "all":
+        raise HTTPException(403, "没有反馈指派权限")
+    users = await db.scalars(select(User).where(User.is_deleted == 0).order_by(User.username))
+    items = []
+    for candidate in users:
+        if (not candidate.is_login_locked()
+                and await permission_scope(db, candidate, "feedback.manage") == "all"
+                and await permission_scope(db, candidate, "feedback.view") == "all"):
+            items.append({"id": candidate.id, "name": candidate.username})
+    return items
+
+
+@dashboard.get("/feedbacks/{feedback_key}/workflow")
+async def feedback_workflow(feedback_key: str, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_admin_user)):
+    from yuxi.services.feedback_governance import feedback_subject, case_view
+    from yuxi.storage.postgres.models_business import FeedbackCase
+
+    snapshot = await feedback_subject(db, feedback_key, user)
+    return case_view(await db.get(FeedbackCase, feedback_key), snapshot)
+
+
+@dashboard.patch("/feedbacks/{feedback_key}/workflow")
+async def update_feedback_workflow(feedback_key: str, patch: FeedbackTransition,
+                                   db: AsyncSession = Depends(get_db), user: User = Depends(get_admin_user)):
+    from yuxi.services.feedback_governance import transition_feedback
+
+    result = await transition_feedback(db, feedback_key, user, patch)
+    await db.commit()
+    return result

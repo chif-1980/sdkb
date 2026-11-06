@@ -941,3 +941,19 @@ Index(
     postgresql_where=AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
     sqlite_where=AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
 )
+
+
+class FeedbackCase(Base):
+    """Shared governance state for legacy and enterprise assistant feedback."""
+
+    __tablename__ = "feedback_cases"
+    feedback_key = Column(String(80), primary_key=True)
+    status = Column(String(24), nullable=False, default="OPEN")
+    version = Column(Integer, nullable=False, default=0)
+    assignee_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    processor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewer_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    resolution = Column(Text, nullable=True)
+    snapshot = Column(JSON, nullable=False, default=dict)
+    history = Column(JSON, nullable=False, default=list)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive)
