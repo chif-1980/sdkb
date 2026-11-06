@@ -175,11 +175,19 @@ describe('AppLayout', () => {
   })
 
   it('点击企业知识助手使用右侧嵌入路由，不离开知枢布局', async () => {
+    userState.grants = ['assistant.view']
     const wrapper = shallowMount(AppLayout)
     const assistant = wrapper.findAll('button').find((button) => button.text().includes('企业知识助手'))
     expect(assistant.exists()).toBe(true)
     await assistant.trigger('click')
     expect(routerState.push).toHaveBeenCalledWith({ name: 'EnterpriseAssistantEmbed' })
+    wrapper.unmount()
+  })
+
+  it('没有企业助手权限时隐藏入口', () => {
+    userState.grants = ['meetings.view']
+    const wrapper = shallowMount(AppLayout)
+    expect(wrapper.findAll('button').some(button => button.text().includes('企业知识助手'))).toBe(false)
     wrapper.unmount()
   })
 

@@ -340,7 +340,7 @@ async def test_superadmin_can_edit_builtin_templates_without_overriding_assigned
             "/api/role-permissions/user/permissions",
             json={
                 "permissions": {"meetings.view": "all"},
-                "expected_permissions": {},
+                "expected_permissions": {"assistant.view": "all"},
             },
         )
     ).status_code == 200

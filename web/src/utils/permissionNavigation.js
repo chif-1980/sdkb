@@ -1,4 +1,5 @@
 export const PERMISSION_MENUS = [
+  { module: 'assistant', menu: '企业知识助手', path: '/enterprise-assistant', description: '允许访问助手；知识内容仍受来源权限约束', icon: 'Bot', viewOnly: true },
   {
     module: 'workspace',
     menu: '工作区',

@@ -72,3 +72,44 @@ async def test_manager_handoff_is_one_time_and_sets_assistant_cookie(handoff_con
     expired = await complete_assistant_handoff(code=code, service=service)
     assert expired.status_code == 303
     assert "error=SSO_EXPIRED" in expired.headers["location"]
+
+
+async def test_assistant_grant_rechecked_at_exchange_and_on_existing_session(handoff_context):
+    from fastapi import FastAPI, Depends, HTTPException
+    from httpx import ASGITransport, AsyncClient
+    from server.utils.auth_middleware import get_db, get_product_user
+    from yuxi.storage.postgres.models_business import Role, RoleCapability, UserRole
+    from yuxi.utils.auth_utils import AuthUtils
+
+    db, user, redis, service = handoff_context
+    db.add(Role(role_key="assistant-test", name="助手角色"))
+    await db.flush()
+    db.add(UserRole(user_id=user.id, role_key="assistant-test"))
+    await db.commit()
+    with pytest.raises(HTTPException) as error:
+        await create_assistant_handoff(current_user=user, service=service)
+    assert error.value.status_code == 403
+    grant = RoleCapability(role_key="assistant-test", permission="assistant.view", scope="all")
+    db.add(grant)
+    await db.commit()
+    result = await create_assistant_handoff(current_user=user, service=service)
+    code = parse_qs(urlparse(result["url"]).query)["code"][0]
+    grant.scope = "none"
+    await db.commit()
+    response = await complete_assistant_handoff(code=code, service=service)
+    assert "error=SSO_NOT_AUTHORIZED" in response.headers["location"]
+    assert "set-cookie" not in response.headers
+    app = FastAPI()
+    app.dependency_overrides[get_db] = lambda: db
+
+    @app.get("/private")
+    async def private(actor=Depends(get_product_user)):
+        return {"id": actor.id}
+
+    token = AuthUtils.create_access_token({"sub": str(user.id), "token_kind": "enterprise_assistant"})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
+                           cookies={"enterprise_assistant_session":token}) as client:
+        assert (await client.get("/private")).status_code == 403
+        grant.scope = "all"
+        await db.commit()
+        assert (await client.get("/private")).status_code == 200

@@ -14,7 +14,7 @@ from server.routers.feishu_manager_auth_router import manager_auth
 from server.routers.auth_router import auth
 from server.utils.auth_middleware import get_admin_user, get_db
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import User, Department
+from yuxi.storage.postgres.models_business import User, Department, Role, RoleCapability, UserRole
 from yuxi.storage.postgres.models_product import FeishuUserBinding
 from server.routers.product_auth_router import product_auth, get_product_auth_service
 from yuxi.product_chat.auth_service import ProductAuthService
@@ -30,7 +30,7 @@ from test.unit.product_chat.test_product_auth_service import (  # noqa: F401
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 
-@pytest.mark.parametrize("role", ["admin", "user"])
+@pytest.mark.parametrize("role", ["admin", "user", "blocked", "assistant_only"])
 async def test_manager_login_shared_identity_browser_binding_and_replay(db_session, monkeypatch, role):  # noqa: F811
     monkeypatch.setenv("YUXI_ENV", "development")
     redis = FakeRedis()
@@ -40,10 +40,17 @@ async def test_manager_login_shared_identity_browser_binding_and_replay(db_sessi
         return _profile()
 
     monkeypatch.setattr(service, "_fetch_profile", profile)
-    if role == "admin":
-        user = await service.resolve_bound_user(_profile())
-        user.role = role
-        await db_session.commit()
+    user = await service.resolve_bound_user(_profile())
+    user.role = "admin" if role == "admin" else "user"
+    if role in {"user", "blocked", "assistant_only"}:
+        db_session.add(Role(role_key="test-custom", name="测试权限"))
+        await db_session.flush()
+        db_session.add(UserRole(user_id=user.id, role_key="test-custom"))
+        if role == "user":
+            db_session.add(RoleCapability(role_key="test-custom", permission="meetings.view", scope="all"))
+        elif role == "assistant_only":
+            db_session.add(RoleCapability(role_key="test-custom", permission="assistant.view", scope="all"))
+    await db_session.commit()
     app = FastAPI()
     app.include_router(product_auth, prefix="/api")
     app.include_router(manager_auth, prefix="/api")
@@ -70,7 +77,7 @@ async def test_manager_login_shared_identity_browser_binding_and_replay(db_sessi
         assert callback.status_code == 303
         assert "set-cookie" not in callback.headers
         assert callback.headers["location"].startswith("http://localhost:5173/auth/feishu/callback#")
-        if role == "user":
+        if role in {"blocked", "assistant_only"}:
             assert callback.headers["location"].endswith("error=MANAGEMENT_ACCESS_REQUIRED")
             binding = await db_session.scalar(select(FeishuUserBinding))
             user = await db_session.get(User, binding.user_id)
@@ -129,7 +136,8 @@ async def test_manager_login_shared_identity_browser_binding_and_replay(db_sessi
         state = await start()
         callback = await client.get("/api/auth/feishu/callback", params={"state": state, "code": "external-code"})
         code = parse_qs(urlsplit(callback.headers["location"]).fragment)["code"][0]
-        user.role = "user"
+        binding = await db_session.scalar(select(FeishuUserBinding))
+        binding.authorization_status = "REVOKED"
         await db_session.commit()
         assert (
             await client.post("/api/auth/feishu/manager/exchange", json={"code": code, "verifier": verifier})

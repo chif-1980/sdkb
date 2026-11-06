@@ -32,6 +32,7 @@ from yuxi.product_chat.schemas import (
     SessionResponse,
 )
 from yuxi.storage.postgres.models_business import User
+from yuxi.storage.postgres.models_product import FeishuUserBinding
 from yuxi.storage.redis import get_async_redis_client
 from yuxi.utils.auth_utils import AuthUtils
 
@@ -121,6 +122,9 @@ async def create_assistant_handoff(
     if current_user.is_deleted or current_user.is_login_locked() or current_user.department_id is None:
         raise HTTPException(403, "当前账号尚未完成企业身份配置")
 
+    from yuxi.services.role_permission_service import permission_scope
+    if await permission_scope(service._db, current_user, "assistant.view") != "all":
+        raise HTTPException(403, "当前角色没有企业知识助手访问权限")
     code = secrets.token_urlsafe(32)
     created = await service._redis.set(
         _ASSISTANT_HANDOFF_PREFIX + code,
@@ -163,6 +167,13 @@ async def complete_assistant_handoff(
 
     user = await service._db.scalar(select(User).where(User.id == user_id, User.is_deleted == 0))
     if user is None or user.department_id is None or user.is_login_locked():
+        return RedirectResponse(f"{origin}/login?error=SSO_NOT_AUTHORIZED", status_code=303)
+
+    from yuxi.services.role_permission_service import permission_scope
+    if await permission_scope(service._db, user, "assistant.view") != "all":
+        return RedirectResponse(f"{origin}/login?error=SSO_NOT_AUTHORIZED", status_code=303)
+    binding = await service._db.scalar(select(FeishuUserBinding).where(FeishuUserBinding.user_id == user.id))
+    if binding and binding.authorization_status != "ACTIVE":
         return RedirectResponse(f"{origin}/login?error=SSO_NOT_AUTHORIZED", status_code=303)
 
     session_token = AuthUtils.create_access_token(

@@ -165,12 +165,14 @@ const mainList = computed(() => {
       name: '企业知识助手',
       icon: Bot,
       activeIcon: Bot,
-      external: true
+      external: true,
+      hidden: !userStore.hasPermission('assistant.view', 'all')
     }
   ]
 
   const icons = { FolderKanban, LibraryBig, Box, Workflow, ClipboardList, MessageSquareText, BarChart3 }
   for (const item of PERMISSION_MENUS) {
+    if (item.module === 'assistant') continue
     if (userStore.hasPermission(`${item.module}.view`)) items.push({ name: item.menu, path: item.path, icon: icons[item.icon], activeIcon: icons[item.icon] })
   }
 
@@ -358,7 +360,7 @@ provide('settingsModal', {
         </button>
 
         <button
-          v-if="secondaryNavItems[0]?.external"
+          v-if="secondaryNavItems[0]?.external && !secondaryNavItems[0]?.hidden"
           type="button"
           class="nav-item"
           :class="{ active: route.path === '/enterprise-assistant' }"

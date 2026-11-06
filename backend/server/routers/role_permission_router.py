@@ -72,7 +72,11 @@ class FeedbackPermissionEdit(BaseModel):
 
 
 def _validate_permissions(permissions: dict[str, str]):
-    allowed = {f"{module}.{action}" for module in MODULES for action in ("view", "manage")}
+    allowed = {
+        f"{module}.{action}"
+        for module in MODULES
+        for action in (("view",) if module == "assistant" else ("view", "manage"))
+    }
     if set(permissions) - allowed or any(scope not in SCOPES for scope in permissions.values()):
         raise HTTPException(status_code=422, detail="权限项或数据范围无效")
     if any(
@@ -330,7 +334,7 @@ async def set_role_permissions(
         {
             f"{module}.{action}": payload.permissions.get(f"{module}.{action}", "none")
             for module in MODULES
-            for action in ("view", "manage")
+            for action in (("view",) if module == "assistant" else ("view", "manage"))
         }
         if role.is_builtin
         else payload.permissions

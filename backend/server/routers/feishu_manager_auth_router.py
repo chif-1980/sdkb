@@ -1,4 +1,4 @@
-"""Feishu identity shared with the assistant; management still requires an admin role."""
+"""Feishu identity shared with the assistant; management access follows effective RBAC grants."""
 
 import hashlib
 import json
@@ -16,6 +16,7 @@ from yuxi.product_chat.auth_service import FEISHU_AUTHORIZE_URL, ProductAuthErro
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.postgres.models_product import FeishuUserBinding
 from yuxi.utils.auth_utils import AuthUtils
+from yuxi.services.role_permission_service import can_enter_manager
 
 manager_auth = APIRouter(prefix="/auth/feishu/manager", tags=["auth"])
 
@@ -69,7 +70,7 @@ async def manager_callback_response(service: ProductAuthService, user):
     origin = context["origin"]
     if origin not in manager_origins():
         raise ProductAuthError("MANAGER_ORIGIN_INVALID", 400)
-    if user.role not in {"admin", "superadmin"} or user.is_deleted or user.is_login_locked():
+    if not await can_enter_manager(service._db, user):
         return RedirectResponse(f"{origin}/auth/feishu/callback#error=MANAGEMENT_ACCESS_REQUIRED", status_code=303)
     code = secrets.token_urlsafe(32)
     await service._redis.set(
@@ -94,7 +95,7 @@ async def exchange(data: ExchangeRequest, response: Response, service=Depends(ge
     if not secrets.compare_digest(payload["challenge"], hashlib.sha256(data.verifier.encode()).hexdigest()):
         raise HTTPException(401, "登录浏览器校验失败，请从本页面重新登录")
     user = await service._db.scalar(select(User).where(User.id == payload["user_id"], User.is_deleted == 0))
-    if not user or user.role not in {"admin", "superadmin"} or user.is_login_locked():
+    if not await can_enter_manager(service._db, user):
         raise HTTPException(403, "此飞书账号尚无知枢管理权限，请联系管理员授权")
     response.headers["Cache-Control"] = "no-store"
     return {"access_token": AuthUtils.create_access_token({"sub": str(user.id)}), "token_type": "bearer"}

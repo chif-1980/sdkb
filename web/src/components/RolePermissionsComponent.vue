@@ -185,7 +185,7 @@
                         :disabled="permissionsReadOnly || saving"
                         @change="setLevel(item, $event.target.value)"
                       >
-                        <option v-for="(level, index) in levels" :key="level" :value="index">
+                        <option v-for="(level, index) in (item.viewOnly ? ['不可访问', '允许访问'] : levels)" :key="level" :value="index">
                           {{ level }}
                         </option>
                       </select>
@@ -770,7 +770,7 @@ async function selectRole(roleKey) {
 function hydratePermissions() {
   for (const key of Object.keys(permissions)) delete permissions[key]
   for (const module of Object.keys(data.value.modules))
-    for (const action of ['view', 'manage'])
+    for (const action of (module === 'assistant' ? ['view'] : ['view', 'manage']))
       permissions[`${module}.${action}`] =
         selectedRole.value?.permissions?.[`${module}.${action}`] || 'none'
   savedPermissions.value = { ...permissions }
@@ -783,7 +783,7 @@ function setLevel(item, rawLevel) {
       : item.module === 'feedback' && level === 1 && permissions['feedback.view'] !== 'none'
         ? permissions['feedback.view']
         : 'all'
-  permissions[`${item.module}.manage`] = level === 2 ? 'all' : 'none'
+  if (!item.viewOnly) permissions[`${item.module}.manage`] = level === 2 ? 'all' : 'none'
   if (level === 0)
     for (const child of item.children || []) {
       permissions[`${child.module}.view`] = 'none'

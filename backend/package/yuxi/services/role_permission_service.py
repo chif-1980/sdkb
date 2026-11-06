@@ -16,6 +16,7 @@ from yuxi.storage.postgres.models_product import FeishuDepartmentBinding, Feishu
 
 SCOPES = ("none", "self", "department", "all")
 MODULES = {
+    "assistant": "企业知识助手",
     "admin": "系统管理",
     "users": "用户与部门",
     "workspace": "工作区",
@@ -36,7 +37,11 @@ MODULES = {
 
 async def permission_resolution(db: AsyncSession, user: User) -> dict:
     """One resolver for enforcement and the management preview; preserve legacy fallback."""
-    empty = {f"{module}.{action}": "none" for module in MODULES for action in ("view", "manage")}
+    empty = {
+        f"{module}.{action}": "none"
+        for module in MODULES
+        for action in (("view",) if module == "assistant" else ("view", "manage"))
+    }
     if user.role == "superadmin":
         grants = dict.fromkeys(empty, "all")
         return {
@@ -96,15 +101,19 @@ async def permission_resolution(db: AsyncSession, user: User) -> dict:
                 f"{module}.{action}": "all"
                 for module in MODULES
                 if module not in {"feedback", "dashboard"}
-                for action in ("view", "manage")
+                for action in (("view",) if module == "assistant" else ("view", "manage"))
             }
             feedback = await db.get(RolePermission, ("admin", "feedback.view"), populate_existing=True)
             if feedback:
                 grants["feedback.view"] = feedback.scope
             sources.append({"kind": "legacy", "name": "管理员兼容权限（未绑定角色时）", "permissions": grants})
+    if not role_keys and user.role in {"admin", "user"} and not any(
+        "assistant.view" in source["permissions"] for source in sources
+    ):
+        sources.append({"kind": "system", "name": "企业助手默认入口", "permissions": {"assistant.view": "all"}})
     for source in sources:
         for key, scope in source["permissions"].items():
-            if key in empty and scope in SCOPES:
+            if key in empty and scope in SCOPES and (scope not in {"self", "department"} or key == "feedback.view"):
                 empty[key] = max((empty[key], scope), key=SCOPES.index)
     return {"permissions": empty, "sources": sources, "legacy_fallback": legacy}
 
@@ -138,3 +147,15 @@ def require_permission(permission: str):
         return user
 
     return authenticated_user
+
+
+async def can_enter_manager(db, user):
+    """Login follows effective grants, not the legacy identity label."""
+    if not user or user.is_deleted or user.is_login_locked():
+        return False
+    from yuxi.storage.postgres.models_product import FeishuUserBinding
+    binding = await db.scalar(select(FeishuUserBinding).where(FeishuUserBinding.user_id == user.id))
+    if binding and binding.authorization_status != "ACTIVE":
+        return False
+    permissions = await permission_matrix(db, user)
+    return any(key != "assistant.view" and scope != "none" for key, scope in permissions.items())

@@ -73,7 +73,7 @@ const router = createRouter({
           path: '',
           name: 'EnterpriseAssistantEmbed',
           component: () => import('../views/EnterpriseAssistantEmbedView.vue'),
-          meta: { requiresAuth: true, keepAlive: false }
+          meta: { requiresAuth: true, keepAlive: false, requiresPermission: 'assistant.view', requiresPermissionScope: 'all' }
         }
       ]
     },
