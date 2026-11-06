@@ -373,6 +373,30 @@ class KnowledgeUnitService:
         if base_item and base_item.item_status == ReviewItemStatus.WAITING_SOURCE_CHANGE:
             return
 
+        if not units and not unit_items:
+            # 从未拆出过知识单元的历史资料仍走资料级审核：审核开始后才产生的
+            # 跨文档关系必须补进待办，否则人工看到的证据永远是空的。
+            # 已显式关联过的待办保持原有关系集合，避免把无关关系一起裁决。
+            if (
+                base_item is not None
+                and base_item.item_status in {
+                    ReviewItemStatus.PENDING,
+                    ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION,
+                }
+                and not base_item.relation_ids
+            ):
+                relations = await self._relations_for_version(package.source_version_id)
+                relation_types = {relation.relation_type for relation in relations if relation.status == "open"}
+                base_item.relation_ids = [relation.relation_id for relation in relations]
+                base_item.problem_tags = sorted(
+                    set(base_item.problem_tags or [])
+                    | {RELATION_TAGS[value] for value in relation_types if value in RELATION_TAGS}
+                )
+                if "CONFLICT" in relation_types:
+                    base_item.review_type = ReviewType.CONFLICT
+                    package.risk_level = "HIGH"
+            return
+
         active_unit_ids = {unit.unit_id for unit in units}
         for old_item in unit_items.values():
             if (old_item.subject_id not in active_unit_ids
@@ -465,7 +489,9 @@ class KnowledgeUnitService:
             item.relation_ids = [relation.relation_id for relation in relations]
             item.problem_tags = [str(tag) for tag in problem_tags]
 
-        if base_item and base_item.item_status in {
+        # 只有真的拆出知识单元，才把资料级审核项置为失效。
+        # 没有正文分段的历史资料若在这里被失效，整条审核项就无法再处理。
+        if units and base_item and base_item.item_status in {
             ReviewItemStatus.PENDING,
             ReviewItemStatus.WAITING_BUSINESS_CONFIRMATION,
         }:
@@ -556,6 +582,22 @@ class KnowledgeUnitService:
             .limit(1)
         )
         return await self._active_units(previous_version_id)
+
+    async def _relations_for_version(self, version_id: str | None) -> list[FeishuCrossDocumentRelation]:
+        """Every live relation touching one version; used when no unit split exists."""
+        if not version_id:
+            return []
+        return list(
+            await self.session.scalars(
+                select(FeishuCrossDocumentRelation).where(
+                    FeishuCrossDocumentRelation.status != "invalidated",
+                    or_(
+                        FeishuCrossDocumentRelation.source_version_id == version_id,
+                        FeishuCrossDocumentRelation.target_version_id == version_id,
+                    ),
+                )
+            )
+        )
 
     async def _relations_by_unit(
         self,

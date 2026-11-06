@@ -1,7 +1,9 @@
+import os
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.governance.domain import (
@@ -31,10 +33,33 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture
-async def source_change_session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+async def source_change_engine(request):
+    schema = None
+    if getattr(request, "param", "sqlite") == "postgres":
+        if not os.environ.get("POSTGRES_URL"):
+            raise RuntimeError("PostgreSQL acceptance requires POSTGRES_URL in the Docker test environment")
+        schema = "test_publication_" + uuid4().hex
+        engine = create_async_engine(
+            os.environ["POSTGRES_URL"], execution_options={"schema_translate_map": {None: schema}}
+        )
+    else:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            if schema:
+                await connection.execute(text(f"CREATE SCHEMA {schema}"))
+            await connection.run_sync(Base.metadata.create_all)
+        yield engine
+    finally:
+        if schema:
+            async with engine.begin() as connection:
+                await connection.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        await engine.dispose()
+
+
+@pytest.fixture
+async def source_change_session(source_change_engine):
+    engine = source_change_engine
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         now = datetime.now(UTC)
@@ -120,10 +145,12 @@ async def source_change_session():
             created_at=now,
             updated_at=now,
         )
-        session.add_all([source, source_item, *versions, package, review_item, change_request])
+        # Flush parents explicitly so PostgreSQL validates the actual publication path.
+        for row in [source, source_item, *versions, package, review_item, change_request]:
+            session.add(row)
+            await session.flush()
         await session.commit()
         yield session
-    await engine.dispose()
 
 
 async def test_changed_hash_closes_old_review_stage_and_is_idempotent(source_change_session):
@@ -236,3 +263,413 @@ async def test_parsed_new_version_reopens_review_and_next_decision_fulfills_old_
     assert new_request.round_number == 2
     assert new_item.item_status == ReviewItemStatus.WAITING_SOURCE_CHANGE
     assert new_package.workflow_status == ReviewPackageStatus.WAITING_SOURCE_CHANGE
+
+
+async def test_publication_closes_linked_suggestion_only_after_success(source_change_session):
+    from server.routers.feishu_knowledge_router import FeishuReviewService
+    from yuxi.governance.meeting_publication import complete_meeting_suggestions
+    from yuxi.product_chat.meeting_repository import MeetingRepository
+    from yuxi.storage.postgres.models_business import User, Department
+    from yuxi.storage.postgres.models_product import (
+        ProductConversation, ProductMessage, MeetingRecord, ManagedMeetingItem, ManagedMeetingEvent,
+    )
+
+    db = source_change_session
+    department = Department(name="测试发布")
+    db.add(department)
+    await db.flush()
+    user = User(
+        username="publication-test", uid="publication-test", password_hash="unused", department_id=department.id
+    )
+    db.add(user)
+    await db.flush()
+    conversation = ProductConversation(owner_user_id=user.id, title="发布会议")
+    db.add(conversation)
+    await db.flush()
+    question = ProductMessage(conversation_id=conversation.conversation_id, role="USER", content="会议")
+    answer = ProductMessage(
+        conversation_id=conversation.conversation_id, role="ASSISTANT", content="结果", answer_status="SUPPORTED"
+    )
+    db.add_all([question, answer])
+    await db.flush()
+    record = MeetingRecord(id="meeting-publish", conversation_id=conversation.conversation_id,
+        message_id=answer.message_id, user_message_id=question.message_id, request_id="publish-test",
+        state="completed", version=0, input={}, sources=[])
+    db.add(record)
+    await db.flush()
+    await MeetingRepository(db).save_result(record, {"title":"发布会议", "body":"核对规则", "followup":{
+        "tasks":[], "knowledgeSuggestions":[{"id":"suggestion-1", "title":"修改规则", "status":"REVIEW_REQUESTED",
+            "governance":{"changeRequestId":"change-request-old", "formalPublication":False}}]}})
+    request = await db.scalar(select(FeishuSourceChangeRequest))
+    request.status = SourceChangeRequestStatus.FULFILLED
+    request.received_version_id = "version-received"
+    version = await db.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-received")
+    )
+    version.processing_status = "publish_failed"
+    await db.commit()
+    assert await complete_meeting_suggestions(db, version.version_id) == 0
+    assert record.result["followup"]["knowledgeSuggestions"][0]["status"] == "REVIEW_REQUESTED"
+    version.processing_status = "published"
+    version.published_at = datetime.now(UTC)
+    source_item = await db.scalar(select(FeishuSourceItem))
+    source_item.publication_status = "ACTIVE"
+    await db.flush()
+    # A successful but superseded version cannot close a linked suggestion.
+    assert await complete_meeting_suggestions(db, version.version_id) == 0
+    source_item.active_version_id = version.version_id
+    source_item.publication_status = "INACTIVE"
+    await db.flush()
+    assert await complete_meeting_suggestions(db, version.version_id) == 0
+    source_item.publication_status = "ACTIVE"
+    request.status = SourceChangeRequestStatus.NEW_VERSION_RECEIVED
+    await db.flush()
+    assert await complete_meeting_suggestions(db, version.version_id) == 0
+    request.status = SourceChangeRequestStatus.FULFILLED
+    source_item.active_version_id = "version-published"
+    version.processing_status = "publishing"
+    await db.commit()
+    await FeishuReviewService(db).mark_publish_succeeded(version.version_id, yuxi_file_id="file-new")
+    await db.commit()
+    suggestion = record.result["followup"]["knowledgeSuggestions"][0]
+    assert suggestion["status"] == "PUBLISHED"
+    assert suggestion["governance"]["publishedVersionId"] == version.version_id
+    assert suggestion["governance"]["formalPublication"] is True
+    projection = await db.scalar(select(ManagedMeetingItem).where(ManagedMeetingItem.kind == "KNOWLEDGE"))
+    assert projection.payload["status"] == "PUBLISHED"
+    saved_version = record.version
+    assert await complete_meeting_suggestions(db, version.version_id) == 0
+    assert record.version == saved_version
+    events = list(
+        await db.scalars(select(ManagedMeetingEvent).where(ManagedMeetingEvent.action == "KNOWLEDGE_PUBLISHED"))
+    )
+    assert len(events) == 1
+
+
+async def _published_meeting(db, *, suggestions, meeting_id="meeting-publish", parent_id=None, title="发布会议"):
+    """Create one completed meeting snapshot whose knowledge suggestions drive the writeback."""
+    from yuxi.product_chat.meeting_repository import MeetingRepository
+    from yuxi.storage.postgres.models_business import Department, User
+    from yuxi.storage.postgres.models_product import MeetingRecord, ProductConversation, ProductMessage
+
+    department = await db.scalar(select(Department).limit(1))
+    if department is None:
+        department = Department(name="测试发布")
+        db.add(department)
+        await db.flush()
+    user = await db.scalar(select(User).limit(1))
+    if user is None:
+        user = User(
+            username="publication-test",
+            uid="publication-test",
+            password_hash="unused",
+            department_id=department.id,
+        )
+        db.add(user)
+        await db.flush()
+    conversation = await db.scalar(select(ProductConversation).limit(1))
+    if conversation is None:
+        conversation = ProductConversation(owner_user_id=user.id, title=title)
+        db.add(conversation)
+        await db.flush()
+    question = ProductMessage(conversation_id=conversation.conversation_id, role="USER", content="会议")
+    answer = ProductMessage(
+        conversation_id=conversation.conversation_id, role="ASSISTANT", content="结果", answer_status="SUPPORTED"
+    )
+    db.add_all([question, answer])
+    await db.flush()
+    record = MeetingRecord(
+        id=meeting_id,
+        conversation_id=conversation.conversation_id,
+        message_id=answer.message_id,
+        user_message_id=question.message_id,
+        request_id=f"request-{meeting_id}",
+        state="completed",
+        version=0,
+        input={"parentId": parent_id} if parent_id else {},
+        sources=[],
+    )
+    db.add(record)
+    await db.flush()
+    await MeetingRepository(db).save_result(record, {"title": title, "body": "核对规则", "followup": {
+        "tasks": [], "knowledgeSuggestions": suggestions}})
+    return record
+
+
+async def _make_version_published(db, version_id, *, publication_status="ACTIVE"):
+    version = await db.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == version_id)
+    )
+    version.processing_status = "published"
+    version.published_at = datetime.now(UTC)
+    item = await db.scalar(select(FeishuSourceItem).where(FeishuSourceItem.item_id == version.item_id))
+    item.active_version_id = version_id
+    item.publication_status = publication_status
+    await db.flush()
+    return version, item
+
+
+async def test_invalidated_source_never_closes_linked_suggestion(source_change_session):
+    """A version published after the Feishu original disappeared must not claim closure."""
+    from yuxi.governance.meeting_publication import complete_meeting_suggestions
+
+    db = source_change_session
+    record = await _published_meeting(db, suggestions=[{
+        "id": "suggestion-1", "title": "修改规则", "status": "REVIEW_REQUESTED",
+        "governance": {"changeRequestId": "change-request-old", "formalPublication": False}}])
+    request = await db.scalar(select(FeishuSourceChangeRequest))
+    request.status = SourceChangeRequestStatus.FULFILLED
+    request.received_version_id = "version-received"
+    version, item = await _make_version_published(db, "version-received")
+    # 扫描把该页面标记失效后，版本仍可能已排入发布队列并成功写入索引。
+    item.source_validity = "invalid"
+    await db.commit()
+
+    assert await complete_meeting_suggestions(db, version.version_id) == 0
+    assert record.result["followup"]["knowledgeSuggestions"][0]["status"] == "REVIEW_REQUESTED"
+    assert record.result["followup"]["knowledgeSuggestions"][0]["governance"]["formalPublication"] is False
+
+    # 来源恢复有效后，同一版本的回写才允许生效。
+    item.source_validity = "valid"
+    await db.flush()
+    assert await complete_meeting_suggestions(db, version.version_id) == 1
+    assert record.result["followup"]["knowledgeSuggestions"][0]["status"] == "PUBLISHED"
+
+
+async def test_one_request_closes_every_linked_suggestion_across_meetings(source_change_session):
+    """A single fulfilled request may back several suggestions; each must close exactly once."""
+    from yuxi.governance.meeting_publication import complete_meeting_suggestions
+    from yuxi.storage.postgres.models_product import ManagedMeetingEvent
+
+    db = source_change_session
+    first = await _published_meeting(db, meeting_id="meeting-a", suggestions=[
+        {"id": "suggestion-1", "title": "修改规则", "status": "REVIEW_REQUESTED",
+         "governance": {"changeRequestId": "change-request-old", "formalPublication": False}},
+        {"id": "suggestion-2", "title": "补充部署步骤", "status": "REVIEW_REQUESTED",
+         "governance": {"changeRequestId": "change-request-old", "formalPublication": False}},
+        # 同一会议中未关联该请求的建议必须保持不变。
+        {"id": "suggestion-3", "title": "另一条建议", "status": "REVIEW_REQUESTED",
+         "governance": {"changeRequestId": "change-request-other", "formalPublication": False}},
+    ])
+    second = await _published_meeting(db, meeting_id="meeting-b", suggestions=[
+        {"id": "suggestion-1", "title": "修改规则", "status": "REVIEW_REQUESTED",
+         "governance": {"changeRequestId": "change-request-old", "formalPublication": False}}])
+    request = await db.scalar(select(FeishuSourceChangeRequest))
+    request.status = SourceChangeRequestStatus.FULFILLED
+    request.received_version_id = "version-received"
+    version, _ = await _make_version_published(db, "version-received")
+    await db.commit()
+
+    assert await complete_meeting_suggestions(db, version.version_id) == 3
+    first_items = {item["id"]: item for item in first.result["followup"]["knowledgeSuggestions"]}
+    assert first_items["suggestion-1"]["status"] == "PUBLISHED"
+    assert first_items["suggestion-2"]["status"] == "PUBLISHED"
+    assert first_items["suggestion-3"]["status"] == "REVIEW_REQUESTED"
+    assert second.result["followup"]["knowledgeSuggestions"][0]["status"] == "PUBLISHED"
+    events = list(
+        await db.scalars(select(ManagedMeetingEvent).where(ManagedMeetingEvent.action == "KNOWLEDGE_PUBLISHED"))
+    )
+    assert sorted(event.meeting_id for event in events) == ["meeting-a", "meeting-b"]
+    assert sorted(events[0].detail["itemIds"]) == ["suggestion-1", "suggestion-2"]
+
+    # 重复回调不得新增事件，也不得再次增加版本。
+    saved_first, saved_second = first.version, second.version
+    assert await complete_meeting_suggestions(db, version.version_id) == 0
+    assert (first.version, second.version) == (saved_first, saved_second)
+
+
+async def test_writeback_failure_rolls_back_publication_and_keeps_suggestion(source_change_session, monkeypatch):
+    """如果回写本身失败，发布会整体回滚，建议不会被提前关闭。"""
+    from server.routers import feishu_knowledge_router
+    from yuxi.governance import meeting_publication
+    from yuxi.storage.postgres.models_product import MeetingRecord
+
+    db = source_change_session
+    await _published_meeting(db, suggestions=[{
+        "id": "suggestion-1", "title": "修改规则", "status": "REVIEW_REQUESTED",
+        "governance": {"changeRequestId": "change-request-old", "formalPublication": False}}])
+    request = await db.scalar(select(FeishuSourceChangeRequest))
+    request.status = SourceChangeRequestStatus.FULFILLED
+    request.received_version_id = "version-received"
+    version = await db.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-received")
+    )
+    version.processing_status = "publishing"
+    await db.commit()
+
+    async def broken_writeback(*args, **kwargs):
+        raise RuntimeError("writeback transaction failed")
+
+    monkeypatch.setattr(meeting_publication, "complete_meeting_suggestions", broken_writeback)
+
+    with pytest.raises(RuntimeError, match="writeback transaction failed"):
+        await feishu_knowledge_router.FeishuReviewService(db).mark_publish_succeeded(
+            version.version_id, yuxi_file_id="file-new"
+        )
+    await db.rollback()
+
+    refreshed = await db.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-received")
+    )
+    item = await db.scalar(select(FeishuSourceItem))
+    assert refreshed.processing_status == "publishing"
+    assert refreshed.published_at is None
+    assert item.active_version_id == "version-published"
+    reloaded = await db.scalar(
+        select(MeetingRecord).where(MeetingRecord.request_id == "request-meeting-publish")
+    )
+    assert reloaded.result["followup"]["knowledgeSuggestions"][0]["status"] == "REVIEW_REQUESTED"
+
+
+async def test_restart_marks_publish_failed_and_retry_closes_only_after_success(source_change_session):
+    """服务重启把发布中断标记为失败后，必须再成功发布一次才回写。"""
+    from server.routers.feishu_knowledge_router import FeishuReviewService
+    from yuxi.governance.meeting_publication import complete_meeting_suggestions
+    from yuxi.repositories.feishu_knowledge_repository import FeishuKnowledgeRepository
+
+    db = source_change_session
+    record = await _published_meeting(db, suggestions=[{
+        "id": "suggestion-1", "title": "修改规则", "status": "REVIEW_REQUESTED",
+        "governance": {"changeRequestId": "change-request-old", "formalPublication": False}}])
+    request = await db.scalar(select(FeishuSourceChangeRequest))
+    request.status = SourceChangeRequestStatus.FULFILLED
+    request.received_version_id = "version-received"
+    version = await db.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-received")
+    )
+    version.processing_status = "publish_queued"
+    await db.commit()
+
+    reconciled = await FeishuKnowledgeRepository(db).reconcile_interrupted_work()
+    await db.commit()
+    assert reconciled["material_versions"] == 1
+    interrupted = await db.scalar(
+        select(FeishuMaterialVersion).where(FeishuMaterialVersion.version_id == "version-received")
+    )
+    assert interrupted.processing_status == "publish_failed"
+    assert await complete_meeting_suggestions(db, version.version_id) == 0
+    assert record.result["followup"]["knowledgeSuggestions"][0]["status"] == "REVIEW_REQUESTED"
+
+    retried = await FeishuReviewService(db).retry(version.version_id, operator_id="admin")
+    assert retried.processing_status == "publish_queued"
+    await db.commit()
+    await FeishuReviewService(db).mark_publish_succeeded(version.version_id, yuxi_file_id="file-new")
+    await db.commit()
+
+    assert record.result["followup"]["knowledgeSuggestions"][0]["status"] == "PUBLISHED"
+
+
+async def test_rerun_keeps_request_link_so_publication_still_closes_suggestion(source_change_session):
+    """重新分析后同一条建议仍保留修改请求关联，发布会继续命中并回写。"""
+    from yuxi.governance.meeting_publication import complete_meeting_suggestions
+
+    db = source_change_session
+    first = await _published_meeting(db, suggestions=[{
+        "id": "knowledge-1", "title": "修改规则", "reason": "原规则与现状冲突", "sourceRefs": ["S1-P2"],
+        "status": "REVIEW_REQUESTED",
+        "governance": {"changeRequestId": "change-request-old", "formalPublication": False,
+                       "reviewPackageId": "package-old"}}])
+    # 同一会议重新分析：模型再次抽出同一条建议（标题与引用一致），合并必须保留人工处置与请求关联。
+    rerun = await _published_meeting(db, meeting_id="meeting-rerun", parent_id=first.id, suggestions=[{
+        "id": "knowledge-1", "title": "修改规则", "reason": "重新生成的理由", "sourceRefs": ["S1-P2"],
+        "status": "PENDING_MAINTAINER", "comparisonStatus": "COVERED", "comparison": "已有知识覆盖"}])
+
+    merged = rerun.result["followup"]["knowledgeSuggestions"]
+    assert len(merged) == 1
+    assert merged[0]["status"] == "REVIEW_REQUESTED"
+    assert merged[0]["governance"]["changeRequestId"] == "change-request-old"
+    # 可刷新的比对结论被更新，人工填写的理由与处置不被覆盖。
+    assert merged[0]["comparisonStatus"] == "COVERED"
+    assert merged[0]["reason"] == "原规则与现状冲突"
+
+    request = await db.scalar(select(FeishuSourceChangeRequest))
+    request.status = SourceChangeRequestStatus.FULFILLED
+    request.received_version_id = "version-received"
+    version, _ = await _make_version_published(db, "version-received")
+    await db.commit()
+
+    assert await complete_meeting_suggestions(db, version.version_id) == 1
+    assert rerun.result["followup"]["knowledgeSuggestions"][0]["status"] == "PUBLISHED"
+
+
+async def test_rerun_with_new_evidence_keeps_original_request_link(source_change_session):
+    """重新分析换了引用时新增一条建议，但原建议的请求关联仍在，发布后仍会闭环。"""
+    from yuxi.governance.meeting_publication import complete_meeting_suggestions
+
+    db = source_change_session
+    first = await _published_meeting(db, suggestions=[{
+        "id": "knowledge-1", "title": "修改规则", "reason": "原规则与现状冲突", "sourceRefs": ["S1-P2"],
+        "status": "REVIEW_REQUESTED",
+        "governance": {"changeRequestId": "change-request-old", "formalPublication": False}}])
+    rerun = await _published_meeting(db, meeting_id="meeting-rerun", parent_id=first.id, suggestions=[{
+        "id": "knowledge-1", "title": "修改规则", "reason": "引用了另一段正文", "sourceRefs": ["S1-P9"],
+        "status": "PENDING_MAINTAINER"}])
+
+    merged = rerun.result["followup"]["knowledgeSuggestions"]
+    assert len(merged) == 2
+    by_status = {item["status"]: item for item in merged}
+    assert by_status["REVIEW_REQUESTED"]["governance"]["changeRequestId"] == "change-request-old"
+    assert by_status["PENDING_MAINTAINER"]["title"] == "修改规则"
+
+    request = await db.scalar(select(FeishuSourceChangeRequest))
+    request.status = SourceChangeRequestStatus.FULFILLED
+    request.received_version_id = "version-received"
+    version, _ = await _make_version_published(db, "version-received")
+    await db.commit()
+
+    # 只关闭带请求关联的那条，新证据产生的建议保持待处理。
+    assert await complete_meeting_suggestions(db, version.version_id) == 1
+    by_status = {item["status"]: item for item in rerun.result["followup"]["knowledgeSuggestions"]}
+    assert by_status["PUBLISHED"]["governance"]["changeRequestId"] == "change-request-old"
+    assert "governance" not in by_status["PENDING_MAINTAINER"]
+
+
+async def test_new_source_suggestion_is_never_matched_by_title(source_change_session):
+    """待补回原文的建议只记录人工草稿，发布同名资料也不得被当作闭环。"""
+    from yuxi.governance.meeting_publication import complete_meeting_suggestions
+
+    db = source_change_session
+    record = await _published_meeting(db, suggestions=[{
+        "id": "suggestion-new", "title": "部署版本矩阵", "status": "NEW_SOURCE_DRAFT",
+        "draftContent": "待补回：部署版本矩阵",
+        "governance": {"nextStep": "请维护人员补回飞书原文后启动扫描审核", "formalPublication": False}}])
+    # 另有一条已履行的请求，确保回写函数不会在“无请求”处提前返回。
+    other = FeishuSourceChangeRequest(
+        change_request_id="change-request-other",
+        review_item_id="review-item-old",
+        source_item_id="item-1",
+        status=SourceChangeRequestStatus.FULFILLED,
+        request_text="无关请求",
+        round_number=2,
+        received_version_id="version-brand-new",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    db.add(other)
+    brand_new = FeishuSourceItem(
+        item_id="item-brand-new",
+        source_id="source-1",
+        item_key="page:item-brand-new",
+        item_type="docx",
+        title="部署版本矩阵",  # 与建议标题完全一致
+        source_url="https://quickdone.feishu.cn/wiki/item-brand-new",
+        source_validity="valid",
+        active_version_id="version-brand-new",
+    )
+    brand_new_version = FeishuMaterialVersion(
+        version_id="version-brand-new",
+        item_id="item-brand-new",
+        revision="1",
+        content_hash="hash-brand-new",
+        processing_status="published",
+        published_at=datetime.now(UTC),
+        review_status="approved",
+    )
+    db.add_all([brand_new, brand_new_version])
+    await db.commit()
+
+    assert await complete_meeting_suggestions(db, "version-brand-new") == 0
+    suggestion = record.result["followup"]["knowledgeSuggestions"][0]
+    assert suggestion["status"] == "NEW_SOURCE_DRAFT"
+    assert suggestion["governance"]["formalPublication"] is False
+    assert "publishedVersionId" not in suggestion["governance"]

@@ -25,6 +25,7 @@ EXPECTED_ROUTES = {
     ("POST", "/feishu-knowledge/sources/{source_id}/check"),
     ("GET", "/feishu-knowledge/sources/{source_id}/tree"),
     ("POST", "/feishu-knowledge/sources/{source_id}/oauth/authorize"),
+    ("POST", "/feishu-knowledge/sources/{source_id}/oauth/reuse"),
     ("GET", "/feishu-knowledge/sources/{source_id}/oauth/status"),
     ("GET", "/feishu-knowledge/oauth/callback"),
     ("POST", "/feishu-knowledge/sources/{source_id}/scan"),
@@ -161,10 +162,29 @@ async def test_feishu_endpoints_reject_non_admin_users():
     app = _app()
 
     async def standard_user():
-        return SimpleNamespace(uid="user-1", role="user", department_id=1)
+        return SimpleNamespace(id=1, uid="user-1", role="user", department_id=1, is_deleted=0)
+
+    class _EmptyResult:
+        def all(self):
+            return []
+
+        def scalars(self):
+            return self
+
+    class _EmptyDb:
+        """没有角色绑定的普通账号：权限解析要能读到空集合而不是报错。"""
+
+        async def scalars(self, *_args, **_kwargs):
+            return _EmptyResult()
+
+        async def execute(self, *_args, **_kwargs):
+            return _EmptyResult()
+
+        async def get(self, *_args, **_kwargs):
+            return None
 
     async def fake_db():
-        yield SimpleNamespace()
+        yield _EmptyDb()
 
     app.dependency_overrides[get_current_user] = standard_user
     app.dependency_overrides[get_db] = fake_db

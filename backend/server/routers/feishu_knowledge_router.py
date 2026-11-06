@@ -908,6 +908,10 @@ class FeishuReviewService:
                 },
             )
             await self.session.flush()
+            if not republish_required:
+                from yuxi.governance.meeting_publication import complete_meeting_suggestions
+
+                await complete_meeting_suggestions(self.session, version_id)
             return PublishSwitchResult(
                 material=version,
                 replaced_file_id=cleanup_file_id,

@@ -8,13 +8,13 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from yuxi.repositories.feishu_knowledge_repository import (
     ConcurrentSyncRunError,
     FeishuKnowledgeRepository,
 )
-from yuxi.storage.postgres.models_knowledge import FeishuSource
+from yuxi.storage.postgres.models_business import Base
+from yuxi.storage.postgres.models_knowledge import FeishuSource, FeishuSyncRun
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -24,33 +24,26 @@ async def postgres_source_context():
     postgres_url = os.getenv("POSTGRES_URL")
     if not postgres_url:
         pytest.skip("POSTGRES_URL is not configured for the PostgreSQL repository integration tests.")
-    engine = create_async_engine(postgres_url, poolclass=StaticPool)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine = create_async_engine(postgres_url)
+    schema_name = f"task3_upsert_{uuid4().hex}"
+    schema_engine = engine.execution_options(schema_translate_map={None: schema_name})
+    factory = async_sessionmaker(schema_engine, expire_on_commit=False)
     source_id = f"task3-upsert-{uuid4().hex}"
+    schema_created = False
     try:
         async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """
-                    CREATE TEMPORARY TABLE feishu_sources (
-                        id SERIAL PRIMARY KEY,
-                        source_id VARCHAR(64) NOT NULL UNIQUE,
-                        name VARCHAR(255) NOT NULL,
-                        wiki_root_token VARCHAR(255) NOT NULL,
-                        wiki_root_url VARCHAR(1024),
-                        target_kb_id VARCHAR(80) NOT NULL,
-                        credential_env_name VARCHAR(255) NOT NULL,
-                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                        created_by VARCHAR(64),
-                        created_at TIMESTAMPTZ DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ DEFAULT NOW()
-                    ) ON COMMIT PRESERVE ROWS
-                    """
-                )
-            )
+            await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+            schema_created = True
+        # Build the table from the real model so this fixture cannot drift from the
+        # columns the repository actually reads and writes.
+        async with schema_engine.begin() as connection:
+            await connection.run_sync(lambda c: FeishuSource.__table__.create(c))
         async with factory() as session:
             yield session, factory, source_id
     finally:
+        if schema_created:
+            async with engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
         await engine.dispose()
 
 
@@ -68,72 +61,37 @@ async def postgres_mutex_context():
         async with engine.begin() as connection:
             await connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
             schema_created = True
-            await connection.execute(text(f'SET LOCAL search_path TO "{schema_name}"'))
-            await connection.execute(
-                text(
-                    """
-                    CREATE TABLE feishu_sources (
-                        id SERIAL PRIMARY KEY,
-                        source_id VARCHAR(64) NOT NULL UNIQUE,
-                        name VARCHAR(255) NOT NULL,
-                        wiki_root_token VARCHAR(255) NOT NULL,
-                        wiki_root_url VARCHAR(1024),
-                        target_kb_id VARCHAR(80) NOT NULL,
-                        credential_env_name VARCHAR(255) NOT NULL,
-                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                        created_by VARCHAR(64),
-                        created_at TIMESTAMPTZ DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                    """
-                )
+        # Same reason as above: model-derived DDL keeps the fixture in step with
+        # scan_scope / impact_summary and any future column.
+        async with schema_engine.begin() as connection:
+            await connection.run_sync(
+                lambda c: Base.metadata.create_all(c, tables=[FeishuSource.__table__, FeishuSyncRun.__table__])
             )
-            await connection.execute(
-                text(
-                    """
-                    CREATE TABLE feishu_sync_runs (
-                        id SERIAL PRIMARY KEY,
-                        run_id VARCHAR(64) NOT NULL UNIQUE,
-                        source_id VARCHAR(64) NOT NULL REFERENCES feishu_sources(source_id) ON DELETE CASCADE,
-                        run_type VARCHAR(32) NOT NULL,
-                        status VARCHAR(32) NOT NULL DEFAULT 'running',
-                        started_at TIMESTAMPTZ DEFAULT NOW(),
-                        finished_at TIMESTAMPTZ,
-                        operator_id VARCHAR(64),
-                        scanned_count INTEGER DEFAULT 0,
-                        new_count INTEGER DEFAULT 0,
-                        changed_count INTEGER DEFAULT 0,
-                        unchanged_count INTEGER DEFAULT 0,
-                        unsupported_count INTEGER DEFAULT 0,
-                        failed_count INTEGER DEFAULT 0,
-                        invalidated_count INTEGER DEFAULT 0,
-                        error_summary TEXT
-                    )
-                    """
-                )
+        async with factory() as session:
+            # 用 ORM 插入，才能应用模型上只有 Python 端默认值的列
+            # （enabled / scan_scope / impact_summary）。
+            session.add_all(
+                [
+                    FeishuSource(
+                        source_id="source-1",
+                        name="Source",
+                        wiki_root_token="root",
+                        target_kb_id="kb-1",
+                        credential_env_name="FEISHU_ACCESS_TOKEN",
+                    ),
+                    FeishuSource(
+                        source_id="source-2",
+                        name="Other Source",
+                        wiki_root_token="other-root",
+                        target_kb_id="kb-2",
+                        credential_env_name="FEISHU_ACCESS_TOKEN",
+                    ),
+                    FeishuSyncRun(run_id="run-first", source_id="source-1", run_type="full", status="queued"),
+                    FeishuSyncRun(run_id="run-second", source_id="source-1", run_type="full", status="queued"),
+                    FeishuSyncRun(run_id="run-other", source_id="source-2", run_type="full", status="queued"),
+                ]
             )
-            await connection.execute(
-                text(
-                    """
-                    INSERT INTO feishu_sources (
-                        source_id, name, wiki_root_token, target_kb_id, credential_env_name
-                    ) VALUES
-                        ('source-1', 'Source', 'root', 'kb-1', 'FEISHU_ACCESS_TOKEN'),
-                        ('source-2', 'Other Source', 'other-root', 'kb-2', 'FEISHU_ACCESS_TOKEN')
-                    """
-                )
-            )
-            await connection.execute(
-                text(
-                    """
-                    INSERT INTO feishu_sync_runs (run_id, source_id, run_type, status)
-                    VALUES
-                        ('run-first', 'source-1', 'full', 'queued'),
-                        ('run-second', 'source-1', 'full', 'queued'),
-                        ('run-other', 'source-2', 'full', 'queued')
-                    """
-                )
-            )
+            await session.commit()
         yield factory, schema_name
     finally:
         if schema_created:

@@ -2240,19 +2240,19 @@ async def test_minio_archive_adapter_ignores_unsafe_extension(monkeypatch):
     assert calls == ["feishu/source-1/item-1/version-1/source.bin"]
 
 
-async def test_router_requires_login_and_admin_role():
+async def test_router_requires_login_and_module_permission(review_fixture):
     app = FastAPI()
     app.include_router(feishu_knowledge, prefix="/api")
 
     async def fake_db():
-        yield SimpleNamespace()
+        yield review_fixture
 
     app.dependency_overrides[get_db] = fake_db
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         anonymous = await client.get("/api/feishu-knowledge/sources")
 
     async def standard_user():
-        return SimpleNamespace(role="user", department_id=1)
+        return User(id=-1, role="user", department_id=1)
 
     app.dependency_overrides[get_current_user] = standard_user
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -5081,6 +5081,8 @@ async def test_reprocess_endpoint_commits_before_enqueue(monkeypatch):
         return SimpleNamespace(id='task-1')
     monkeypatch.setattr(router_module, 'FeishuReviewService', Service)
     monkeypatch.setattr(router_module, '_enqueue_processing', enqueue)
-    result = await router_module.reprocess_material('version-new', db=SimpleNamespace(commit=commit), current_user=SimpleNamespace(uid='admin'))
+    result = await router_module.reprocess_material(
+        "version-new", db=SimpleNamespace(commit=commit), current_user=SimpleNamespace(uid="admin")
+    )
     assert calls == ['reprocess', 'commit', 'enqueue']
     assert result['task_id'] == 'task-1'
